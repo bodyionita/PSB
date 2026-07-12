@@ -117,7 +117,7 @@ jobs:
           printf '%s\n' "$ORIGIN_CERT_PEM" > deploy/origin.crt
           printf '%s\n' "$ORIGIN_KEY_PEM" > deploy/origin.key
 
-      - name: Copy rendered .env + origin TLS files to the VPS (ADR-016/017: scp-of-a-file)
+      - name: "Copy rendered .env + origin TLS files to the VPS (ADR-016/017 scp-of-a-file)"
         if: env.HAVE_VPS == 'true'
         uses: appleboy/scp-action@v0.1.7   # verify tag at go-live; job is dormant until then
         with:
