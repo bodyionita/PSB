@@ -9,6 +9,10 @@ services:
     restart: unless-stopped
     depends_on:
       - api
+    environment:
+      # Only the domain — NOT the app secrets (env_file) — reaches the edge TLS
+      # terminator. Interpolated from deploy/.env via `compose --env-file` (ADR-016).
+      BRAINDAN_DOMAIN: ${BRAINDAN_DOMAIN:-localhost}
     ports:
       - "80:80"
       - "443:443"

@@ -66,42 +66,59 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Render deploy/.env (defaults.env + secrets), base64 for transport
+      - name: Render deploy/.env (defaults.env + secrets)
         if: env.HAVE_VPS == 'true'
+        env:                          # values as env vars — NOT substituted into the script
+          API_PASSWORD_HASH: ${{ secrets.API_PASSWORD_HASH }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+          SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           umask 077
-          cp deploy/defaults.env deploy/.env.rendered
+          cp deploy/defaults.env deploy/.env
+          # printf %s writes each value literally — safe for $, %, backticks in
+          # Argon2 hashes / DB URLs (the shell never re-parses the value).
           {
-            echo "API_PASSWORD_HASH=${{ secrets.API_PASSWORD_HASH }}"
-            echo "SESSION_SECRET=${{ secrets.SESSION_SECRET }}"
-            echo "DATABASE_URL=${{ secrets.DATABASE_URL }}"
-            echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
-            echo "NEBIUS_API_KEY=${{ secrets.NEBIUS_API_KEY }}"
-            echo "SLACK_USER_TOKEN=${{ secrets.SLACK_USER_TOKEN }}"
-            echo "R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}"
-            echo "R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}"
-            echo "R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}"
-          } >> deploy/.env.rendered
-          # Redirect to $GITHUB_ENV (not stdout) so nothing is logged.
-          echo "ENV_B64=$(base64 -w0 deploy/.env.rendered)" >> "$GITHUB_ENV"
-          rm -f deploy/.env.rendered
+            printf 'API_PASSWORD_HASH=%s\n'    "$API_PASSWORD_HASH"
+            printf 'SESSION_SECRET=%s\n'       "$SESSION_SECRET"
+            printf 'DATABASE_URL=%s\n'         "$DATABASE_URL"
+            printf 'OPENAI_API_KEY=%s\n'       "$OPENAI_API_KEY"
+            printf 'NEBIUS_API_KEY=%s\n'       "$NEBIUS_API_KEY"
+            printf 'SLACK_USER_TOKEN=%s\n'     "$SLACK_USER_TOKEN"
+            printf 'R2_ACCOUNT_ID=%s\n'        "$R2_ACCOUNT_ID"
+            printf 'R2_ACCESS_KEY_ID=%s\n'     "$R2_ACCESS_KEY_ID"
+            printf 'R2_SECRET_ACCESS_KEY=%s\n' "$R2_SECRET_ACCESS_KEY"
+          } >> deploy/.env
 
-      - name: Deploy — write /srv/app/deploy/.env (600), pull, build, migrate
+      - name: Copy rendered .env to the VPS (ADR-016: scp-of-a-file)
+        if: env.HAVE_VPS == 'true'
+        uses: appleboy/scp-action@v0.1.7   # verify tag at go-live; job is dormant until then
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: deploy/.env
+          target: /srv/app                 # preserves path -> /srv/app/deploy/.env
+          overwrite: true
+
+      - name: Deploy — secure perms, pull, build, migrate
         if: env.HAVE_VPS == 'true'
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: ENV_B64
           script: |
             set -e
             cd /srv/app
-            git pull --ff-only
-            umask 077
-            printf '%s' "$ENV_B64" | base64 -d > deploy/.env
             chmod 600 deploy/.env
-            docker compose -f deploy/docker-compose.yml up -d --build
+            git pull --ff-only
+            docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
             docker compose -f deploy/docker-compose.yml exec -T api uv run alembic upgrade head
 
       - name: Dormant notice
