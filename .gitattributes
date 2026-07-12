@@ -1,0 +1,12 @@
+# Normalize to LF in the repo; let checkout decide the working-copy ending.
+* text=auto eol=lf
+
+# These run on the Linux VPS / in containers — must stay LF regardless of platform.
+*.sh              text eol=lf
+deploy/Dockerfile text eol=lf
+deploy/Caddyfile  text eol=lf
+
+# Binary-ish assets: leave untouched.
+*.svg  text
+*.png  binary
+*.ico  binary

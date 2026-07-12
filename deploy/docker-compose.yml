@@ -1,0 +1,40 @@
+# Production topology on the VPS (07-infrastructure.md). Dormant until the provisioning
+# session (ADR-012). Postgres is Supabase (managed, off-box) — not a service here.
+#
+#   docker compose up -d --build
+#
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../web/dist:/srv/web:ro          # static PWA build, served at /
+      - caddy_data:/data
+      - caddy_config:/config
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENABLE_SCHEDULER: "true"           # exactly one instance; there is only one (ADR-003)
+    volumes:
+      - /srv/vault:/srv/vault            # vault git repo (source of truth, ADR-001)
+      - /srv/data:/srv/data              # raw audio files (never lost, invariant 5)
+      - claude_creds:/root/.claude       # Claude Max OAuth (claude login), persisted
+    expose:
+      - "8000"
+
+volumes:
+  caddy_data:
+  caddy_config:
+  claude_creds:

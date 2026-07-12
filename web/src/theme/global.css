@@ -1,0 +1,74 @@
+/* Base tokens = Nebula default, so first paint is correct before JS runs (ThemeProvider
+   then overrides for a stored theme). Every color in the app reads these variables. */
+:root {
+  --bg: #0b0910;
+  --bg-glow: rgba(124, 92, 255, 0.2);
+  --surface: rgba(255, 255, 255, 0.05);
+  --surface-border: rgba(255, 255, 255, 0.1);
+  --text: #f4f1fb;
+  --muted: rgba(244, 241, 251, 0.58);
+  --accent: #7c5cff;
+  --accent-2: #9c7bff;
+  --on-accent: #0b0910;
+
+  --radius: 18px;
+  --radius-lg: 28px;
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font);
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Ambient accent glow anchored to the top of the viewport. */
+#root::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(60% 50% at 50% 0%, var(--bg-glow), transparent 70%),
+    radial-gradient(50% 40% at 100% 100%, var(--bg-glow), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input {
+  font-family: inherit;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* Motion is a first-class feature, but users who ask for less get less (06-web-app.md). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

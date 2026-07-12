@@ -1,0 +1,25 @@
+# Local dev database only (ADR-012): dockerized pgvector on localhost.
+# Prod swaps DATABASE_URL -> Supabase; same extension, same migrations, disposable.
+#
+#   docker compose -f deploy/docker-compose.dev.yml up -d
+#
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: braindan-dev-db
+    environment:
+      POSTGRES_USER: braindan
+      POSTGRES_PASSWORD: braindan
+      POSTGRES_DB: braindan
+    ports:
+      - "5432:5432"
+    volumes:
+      - braindan_dev_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U braindan -d braindan"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  braindan_dev_pgdata:

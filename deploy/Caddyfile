@@ -1,0 +1,26 @@
+# Caddy: TLS termination + serves the PWA at / and proxies /api -> FastAPI (03-api.md).
+# Cloudflare in front is "Full (strict)"; Caddy gets a real cert for {$BRAINDAN_DOMAIN}.
+# Replace the domain via the BRAINDAN_DOMAIN env var (deploy/.env) at provisioning.
+
+{$BRAINDAN_DOMAIN:localhost} {
+	encode zstd gzip
+
+	# API — everything under /api goes to the FastAPI container.
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	# PWA static assets + SPA fallback (client-side routing).
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		# Sensible security defaults; refine at provisioning if needed.
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Content-Type-Options nosniff
+		-Server
+	}
+}

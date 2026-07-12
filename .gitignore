@@ -1,0 +1,34 @@
+# --- Python / server ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# --- Node / web ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+
+# --- deploy / runtime secrets & data ---
+deploy/.env
+deploy/secrets/
+srv/
+/data/
+*.log
+
+# --- editors / OS ---
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db

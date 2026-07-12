@@ -1,0 +1,64 @@
+# CI — per-directory pipelines with path filters (ADR-006: server/web share nothing).
+# Deploy-on-main is written now but dormant until the provisioning session (ADR-012):
+# it no-ops unless the VPS_* secrets exist.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv python install 3.12
+      - run: uv sync --frozen || uv sync
+      - run: uv run ruff check .
+      - run: uv run pytest -q     # no live LLMs/DB — fakes only (08 testing policy)
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm version comes from web/package.json "packageManager" (Corepack).
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm build        # tsc (strict) + vite production build
+
+  deploy:
+    # Dormant: only runs on main once VPS_HOST is configured (provisioning session).
+    needs: [server, web]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy over SSH (git pull + docker compose up)
+        if: ${{ secrets.VPS_HOST != '' }}
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /srv/app
+            git pull
+            docker compose -f deploy/docker-compose.yml up -d --build
+            docker compose -f deploy/docker-compose.yml exec -T api uv run alembic upgrade head
+      - name: Note when deploy is not yet configured
+        if: ${{ secrets.VPS_HOST == '' }}
+        run: echo "VPS_HOST secret not set — deploy step is dormant (ADR-012)."

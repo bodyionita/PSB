@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#1a1230"/>
+      <stop offset="100%" stop-color="#0b0910"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#9C7BFF"/>
+      <stop offset="100%" stop-color="#5B5BD6"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g fill="none" stroke="url(#accent)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M256 128c-52 0-92 34-92 82 0 20 8 36 20 48-14 12-24 30-24 52 0 44 40 74 96 74"/>
+    <path d="M256 128c52 0 92 34 92 82 0 20-8 36-20 48 14 12 24 30 24 52 0 44-40 74-96 74"/>
+    <line x1="256" y1="128" x2="256" y2="384"/>
+    <circle cx="196" cy="222" r="10" fill="url(#accent)" stroke="none"/>
+    <circle cx="316" cy="222" r="10" fill="url(#accent)" stroke="none"/>
+    <circle cx="212" cy="312" r="10" fill="url(#accent)" stroke="none"/>
+    <circle cx="300" cy="312" r="10" fill="url(#accent)" stroke="none"/>
+  </g>
+</svg>
