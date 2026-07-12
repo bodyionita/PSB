@@ -295,6 +295,7 @@ class CapturePipeline:
             inter.organize = {
                 "model": organize.model_used or None,
                 "fallback_used": organize.provider_fallback_used,
+                "inbox_fallback": organize.used_fallback,
             }
             inter.model_used = organize.model_used or inter.model_used
             inter.fallback_used = inter.fallback_used or organize.provider_fallback_used
@@ -356,6 +357,7 @@ class CapturePipeline:
             inter.organize = {
                 "model": organize.model_used or None,
                 "fallback_used": organize.provider_fallback_used,
+                "inbox_fallback": organize.used_fallback,
             }
             inter.model_used = organize.model_used or inter.model_used
             inter.fallback_used = organize.provider_fallback_used

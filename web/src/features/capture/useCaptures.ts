@@ -19,12 +19,19 @@ export function isInFlight(c: CaptureView): boolean {
   return !TERMINAL.has(c.status);
 }
 
-// Whether the strip should keep polling this capture even though it is at a terminal status:
-// it is `indexed`, no nudge has landed yet, and it was updated recently — the trailing nudge
-// may still be on its way.
+// Whether the strip should keep polling this capture even though it sits at the terminal
+// `indexed` status, because a further transition is still expected:
+//   - the trailing follow-up nudge is generated AFTER indexing (question still null), or
+//   - the user just answered the nudge and Pass 2 re-cycles organizing→…→indexed AFTER the
+//     202 (answer set) — its status flip can lag a refetch, so we must not stop on the
+//     transient `indexed` in between.
+// We keep polling for a bounded window past the last server update (updated_at is bumped on
+// every capture write, incl. the answer), then give up — an Inbox-fallback capture never gets
+// a nudge, so this must not poll forever. The one genuinely-settled case is a nudge shown and
+// awaiting the user's answer: question present, answer absent → stop.
 function isSettling(c: CaptureView): boolean {
   if (c.status !== 'indexed') return false;
-  if (c.follow_up_question != null || c.follow_up_answer != null) return false;
+  if (c.follow_up_question != null && c.follow_up_answer == null) return false;
   const updated = c.updated_at ? Date.parse(c.updated_at) : NaN;
   return Number.isFinite(updated) && Date.now() - updated < SETTLE_MS;
 }
@@ -66,18 +73,11 @@ export function useSubmitFollowUp() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (v: { id: string; answer: string }) => api.submitFollowUp(v.id, v.answer),
-    onSuccess: (_res, v) => {
-      // Pass 2 was accepted (202) and runs async, cycling status indexed→organizing→…→indexed
-      // AFTER this response (ADR-019 §2). A single refetch would race that flip and often catch
-      // the capture still at `indexed`, so polling would never restart. Optimistically mark it
-      // `organizing` so the strip resumes live polling deterministically and renders the
-      // re-processing; the subsequent invalidate reconciles with the real server states.
-      qc.setQueryData<CaptureView[]>(CAPTURES_KEY, (list) =>
-        list?.map((c) =>
-          c.capture_id === v.id ? { ...c, status: 'organizing', follow_up_answer: v.answer } : c,
-        ),
-      );
-      void qc.invalidateQueries({ queryKey: CAPTURES_KEY });
-    },
+    // Pass 2 was accepted (202) and re-cycles the capture indexed→organizing→…→indexed AFTER
+    // this response (ADR-019 §2). Invalidating re-engages the (now idle) list query; polling
+    // then keeps running because `isSettling` treats an `indexed` capture whose nudge has been
+    // answered as still-in-flight for a bounded window (the answer bumps updated_at), so the
+    // re-processing renders live without depending on a single refetch winning the race.
+    onSuccess: () => qc.invalidateQueries({ queryKey: CAPTURES_KEY }),
   });
 }

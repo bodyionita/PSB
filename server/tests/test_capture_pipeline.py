@@ -49,6 +49,7 @@ def _make_pipeline(
     *,
     chat: FakeChatProvider | None = None,
     stt: FakeSTTProvider | None = None,
+    run_store: object | None = None,
 ):
     settings = Settings(
         vault_path=str(tmp_path / "vault"),
@@ -67,7 +68,7 @@ def _make_pipeline(
     )
     store = FakeCaptureStore()
     backup = FakeVaultBackup()
-    runs = FakeAgentRunStore()
+    runs = run_store if run_store is not None else FakeAgentRunStore()
     pipeline = CapturePipeline(
         settings=settings,
         store=store,
@@ -109,7 +110,11 @@ async def test_capture_writes_agent_runs_interaction_row(tmp_path: Path):
     assert run.fallback_used is False
     assert run.details["capture_id"] == cid
     assert run.details["stt"] == {"provider": "fake-stt", "fallback_used": False, "error": None}
-    assert run.details["organize"] == {"model": "fake-chat", "fallback_used": False}
+    assert run.details["organize"] == {
+        "model": "fake-chat",
+        "fallback_used": False,
+        "inbox_fallback": False,
+    }
     assert "total" in run.details["timings_ms"]
 
 
@@ -128,6 +133,44 @@ async def test_capture_failure_closes_agent_runs_row_failed(tmp_path: Path):
     assert "transcription failed" in (run.error or "")
     assert run.details["capture_id"] == cid
     assert run.details["stt"]["provider"] is None
+
+
+async def test_logging_store_failure_does_not_break_capture(tmp_path: Path):
+    # ADR-021: "logging never changes capture behavior." If the agent_runs store raises on
+    # start AND finish, the capture must still reach `indexed` with its note on disk (rule 2).
+    class BrokenRunStore:
+        async def start(self, agent: str) -> str:
+            raise RuntimeError("agent_runs DB down")
+
+        async def finish(self, *a, **k) -> None:
+            raise RuntimeError("agent_runs DB down")
+
+        async def latest(self, agent: str, *, status: str | None = None):
+            return None
+
+    pipeline, store, _, _, vault = _make_pipeline(tmp_path, run_store=BrokenRunStore())
+    cid = await pipeline.create_text_capture("survive broken logging", created_at=CREATED)
+    await pipeline.drain()
+
+    rec = store.records[cid]
+    assert rec.status == INDEXED
+    assert rec.note_paths and (vault / rec.note_paths[0]).exists()
+
+
+async def test_inbox_fallback_run_succeeds_and_is_flagged(tmp_path: Path):
+    # ADR-021 (reconciled): an organize-chain outage degrades to an Inbox note — a capture
+    # SUCCESS (never-lose), so the run is `succeeded`, but the degradation stays queryable via
+    # details.organize.inbox_fallback.
+    chat = FakeChatProvider("fake-chat", available=False)
+    pipeline, store, _, runs, _ = _make_pipeline(tmp_path, chat=chat)
+    cid = await pipeline.create_text_capture("organizer is down", created_at=CREATED)
+    await pipeline.drain()
+
+    assert store.records[cid].status == INDEXED
+    run = next(r for r in runs.runs.values() if r.agent == "capture")
+    assert run.status == "succeeded"
+    assert run.details["organize"]["inbox_fallback"] is True
+    assert run.details["organize"]["model"] is None
 
 
 async def test_unparseable_organize_uses_inbox_and_no_nudge(tmp_path: Path):

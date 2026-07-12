@@ -32,6 +32,7 @@ def upgrade() -> None:
             details -> 'stt'  ->> 'provider'               AS stt_provider,
             (details -> 'stt' ->> 'fallback_used')::boolean AS stt_fallback,
             details -> 'organize' ->> 'model'              AS organize_model,
+            (details -> 'organize' ->> 'inbox_fallback')::boolean AS inbox_fallback,
             fallback_used,
             status,
             error,
