@@ -101,17 +101,28 @@ class Settings(BaseSettings):
     nebius_api_key: str = ""
     nebius_base_url: str = "https://api.studio.nebius.ai/v1"
     nebius_chat_model: str = "meta-llama/Meta-Llama-3.1-70B-Instruct"
+    # Groq — STT primary (ADR-020). OpenAI-compatible /audio/transcriptions endpoint, so it
+    # reuses OpenAICompatibleProvider; generous free tier + whisper-large-v3 quality.
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_stt_model: str = "whisper-large-v3"
 
     # Fixed, not UI-selectable — changing either means a migration + full reindex.
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
+    # OpenAI's STT model — used when the chain falls back to the "openai" provider.
     stt_model: str = "whisper-1"
 
     # Chat/distill fallback chains, by provider id. First entry is primary.
     chat_chain: CsvList = Field(default=["claude-max", "nebius"])
     distill_chain: CsvList = Field(default=["claude-max", "nebius"])
+    # STT fallback chain (ADR-020): Groq (whisper-large-v3) primary, OpenAI (whisper-1) fallback.
+    stt_chain: CsvList = Field(default=["groq", "openai"])
     # Model the claude-max provider drives through the Agent SDK / CLI.
     claude_max_model: str = "claude-opus-4-8"
+    # Reasoning-effort level passed to every claude-max CLI call (`--effort`). Global in v1;
+    # per-task effort is a post-v1 extension (ADR-004 / M1 replan). low|medium|high|xhigh|max.
+    claude_max_effort: str = "medium"
 
     # --- Chunking (02-data-model §4) ---
     chunk_size: int = 1200
@@ -150,7 +161,13 @@ class Settings(BaseSettings):
     cors_origins: CsvList = Field(default=["http://localhost:5173"])
 
     @field_validator(
-        "planes", "vault_ignore", "chat_chain", "distill_chain", "cors_origins", mode="before"
+        "planes",
+        "vault_ignore",
+        "chat_chain",
+        "distill_chain",
+        "stt_chain",
+        "cors_origins",
+        mode="before",
     )
     @classmethod
     def _coerce_lists(cls, value: str | list[str]) -> list[str]:

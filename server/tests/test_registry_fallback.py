@@ -9,18 +9,18 @@ import pytest
 from app.providers.base import ChatMessage, ProviderUnavailable
 from app.providers.registry import ProviderRegistry, RegistryExhausted
 
-from .fakes import FakeChatProvider, FakeEmbeddingProvider
+from .fakes import FakeChatProvider, FakeEmbeddingProvider, FakeSTTProvider
 
 MESSAGES = [ChatMessage(role="user", content="hello")]
 
 
-def _registry(providers, *, chat_chain, distill_chain=None, embed_id="openai", stt_id="openai"):
+def _registry(providers, *, chat_chain, distill_chain=None, embed_id="openai", stt_chain=None):
     return ProviderRegistry(
         {p.id: p for p in providers},
         chat_chain=chat_chain,
         distill_chain=distill_chain or chat_chain,
         embedding_provider_id=embed_id,
-        stt_provider_id=stt_id,
+        stt_chain=stt_chain if stt_chain is not None else ["openai"],
     )
 
 
@@ -121,3 +121,60 @@ async def test_embed_without_provider_raises():
     reg = _registry([], chat_chain=[], embed_id="missing")
     with pytest.raises(ProviderUnavailable):
         await reg.embed(["x"])
+
+
+# --- STT fallback chain (ADR-020) --------------------------------------------------------
+
+
+async def test_stt_primary_answers_no_fallback():
+    groq = FakeSTTProvider("groq", transcript="from groq")
+    openai = FakeSTTProvider("openai", transcript="from openai")
+    reg = ProviderRegistry(
+        {"groq": groq, "openai": openai},
+        chat_chain=[],
+        distill_chain=[],
+        embedding_provider_id="none",
+        stt_chain=["groq", "openai"],
+    )
+
+    result = await reg.transcribe(b"audio", filename="a.webm")
+
+    assert result.text == "from groq"
+    assert result.model_used == "groq"
+    assert result.fallback_used is False
+    assert openai.calls == 0  # fallback never touched
+
+
+async def test_stt_falls_back_to_openai_on_groq_429_and_records_it():
+    # A 429 surfaces as ProviderUnavailable → chain advances (ADR-020).
+    groq = FakeSTTProvider("groq", available=False)
+    openai = FakeSTTProvider("openai", transcript="from openai")
+    reg = ProviderRegistry(
+        {"groq": groq, "openai": openai},
+        chat_chain=[],
+        distill_chain=[],
+        embedding_provider_id="none",
+        stt_chain=["groq", "openai"],
+    )
+
+    result = await reg.transcribe(b"audio", filename="a.webm")
+
+    assert result.text == "from openai"
+    assert result.model_used == "openai"
+    assert result.fallback_used is True
+    assert groq.calls == 1 and openai.calls == 1
+
+
+async def test_stt_all_providers_down_raises_exhausted():
+    groq = FakeSTTProvider("groq", available=False)
+    openai = FakeSTTProvider("openai", available=False)
+    reg = ProviderRegistry(
+        {"groq": groq, "openai": openai},
+        chat_chain=[],
+        distill_chain=[],
+        embedding_provider_id="none",
+        stt_chain=["groq", "openai"],
+    )
+
+    with pytest.raises(RegistryExhausted):
+        await reg.transcribe(b"audio", filename="a.webm")

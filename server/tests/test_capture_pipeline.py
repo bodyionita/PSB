@@ -20,7 +20,13 @@ from app.services.capture_pipeline import (
 )
 from app.services.capture_store import FAILED, INDEXED, ORGANIZING, RECEIVED
 
-from .fakes import FakeCaptureStore, FakeChatProvider, FakeSTTProvider, FakeVaultBackup
+from .fakes import (
+    FakeAgentRunStore,
+    FakeCaptureStore,
+    FakeChatProvider,
+    FakeSTTProvider,
+    FakeVaultBackup,
+)
 
 CREATED = datetime(2026, 7, 12, 12, 0, 0, tzinfo=UTC)
 
@@ -57,22 +63,24 @@ def _make_pipeline(
         chat_chain=["fake-chat"],
         distill_chain=["fake-chat"],
         embedding_provider_id="none",
-        stt_provider_id="fake-stt",
+        stt_chain=["fake-stt"],
     )
     store = FakeCaptureStore()
     backup = FakeVaultBackup()
+    runs = FakeAgentRunStore()
     pipeline = CapturePipeline(
         settings=settings,
         store=store,
         registry=registry,
         note_writer=NoteWriter(str(tmp_path / "vault")),
         vault_backup=backup,
+        run_store=runs,
     )
-    return pipeline, store, backup, tmp_path / "vault"
+    return pipeline, store, backup, runs, tmp_path / "vault"
 
 
 async def test_text_capture_happy_path(tmp_path: Path):
-    pipeline, store, backup, vault = _make_pipeline(tmp_path)
+    pipeline, store, backup, _, vault = _make_pipeline(tmp_path)
     cid = await pipeline.create_text_capture("I had a calm, productive day.", created_at=CREATED)
     await pipeline.drain()
 
@@ -86,9 +94,45 @@ async def test_text_capture_happy_path(tmp_path: Path):
     assert backup.reasons == [f"capture {cid}"]
 
 
+async def test_capture_writes_agent_runs_interaction_row(tmp_path: Path):
+    # ADR-021: a successful voice capture logs one agent_runs row with the STT/organize
+    # resolution + details, so the interaction is queryable (Supabase dashboard / view).
+    pipeline, store, _, runs, _ = _make_pipeline(tmp_path)
+    cid = await pipeline.create_voice_capture(b"audio", filename="memo.m4a")
+    await pipeline.drain()
+
+    capture_runs = [r for r in runs.runs.values() if r.agent == "capture"]
+    assert len(capture_runs) == 1
+    run = capture_runs[0]
+    assert run.status == "succeeded"
+    assert run.model_used == "fake-chat"  # organize model
+    assert run.fallback_used is False
+    assert run.details["capture_id"] == cid
+    assert run.details["stt"] == {"provider": "fake-stt", "fallback_used": False, "error": None}
+    assert run.details["organize"] == {"model": "fake-chat", "fallback_used": False}
+    assert "total" in run.details["timings_ms"]
+
+
+async def test_capture_failure_closes_agent_runs_row_failed(tmp_path: Path):
+    # ADR-021 + rule 7: STT chain exhausted → the run is closed `failed` with context, not left
+    # dangling; the STT error is recorded in details.
+    stt = FakeSTTProvider(available=False)
+    pipeline, store, _, runs, _ = _make_pipeline(tmp_path, stt=stt)
+    cid = await pipeline.create_voice_capture(b"audio", filename="memo.wav")
+    await pipeline.drain()
+
+    capture_runs = [r for r in runs.runs.values() if r.agent == "capture"]
+    assert len(capture_runs) == 1
+    run = capture_runs[0]
+    assert run.status == "failed"
+    assert "transcription failed" in (run.error or "")
+    assert run.details["capture_id"] == cid
+    assert run.details["stt"]["provider"] is None
+
+
 async def test_unparseable_organize_uses_inbox_and_no_nudge(tmp_path: Path):
     chat = FakeChatProvider("fake-chat", reply="totally not json")
-    pipeline, store, _, vault = _make_pipeline(tmp_path, chat=chat)
+    pipeline, store, _, _, vault = _make_pipeline(tmp_path, chat=chat)
     cid = await pipeline.create_text_capture("raw thought that survives", created_at=CREATED)
     await pipeline.drain()
 
@@ -102,7 +146,7 @@ async def test_unparseable_organize_uses_inbox_and_no_nudge(tmp_path: Path):
 
 async def test_organize_chain_exhausted_falls_back_to_inbox(tmp_path: Path):
     chat = FakeChatProvider("fake-chat", available=False)
-    pipeline, store, _, vault = _make_pipeline(tmp_path, chat=chat)
+    pipeline, store, _, _, vault = _make_pipeline(tmp_path, chat=chat)
     cid = await pipeline.create_text_capture("never lose me", created_at=CREATED)
     await pipeline.drain()
 
@@ -113,7 +157,7 @@ async def test_organize_chain_exhausted_falls_back_to_inbox(tmp_path: Path):
 
 
 async def test_voice_happy_path_transcribes_then_organizes(tmp_path: Path):
-    pipeline, store, _, vault = _make_pipeline(tmp_path)
+    pipeline, store, _, _, vault = _make_pipeline(tmp_path)
     cid = await pipeline.create_voice_capture(b"fake-audio-bytes", filename="memo.m4a")
     await pipeline.drain()
 
@@ -127,7 +171,7 @@ async def test_voice_happy_path_transcribes_then_organizes(tmp_path: Path):
 
 async def test_voice_stt_down_marks_failed(tmp_path: Path):
     stt = FakeSTTProvider(available=False)
-    pipeline, store, _, _ = _make_pipeline(tmp_path, stt=stt)
+    pipeline, store, _, _, _ = _make_pipeline(tmp_path, stt=stt)
     cid = await pipeline.create_voice_capture(b"audio", filename="memo.wav")
     await pipeline.drain()
 
@@ -139,7 +183,7 @@ async def test_voice_stt_down_marks_failed(tmp_path: Path):
 
 
 async def test_voice_rejects_oversized_and_unsupported(tmp_path: Path):
-    pipeline, _, _, _ = _make_pipeline(tmp_path)
+    pipeline, _, _, _, _ = _make_pipeline(tmp_path)
     with pytest.raises(UnsupportedAudio):
         await pipeline.create_voice_capture(b"x", filename="memo.txt")
     settings_max = pipeline._settings.audio_max_bytes
@@ -148,7 +192,7 @@ async def test_voice_rejects_oversized_and_unsupported(tmp_path: Path):
 
 
 async def test_sweep_orphans_marks_inflight_failed(tmp_path: Path):
-    pipeline, store, _, _ = _make_pipeline(tmp_path)
+    pipeline, store, _, _, _ = _make_pipeline(tmp_path)
     await store.create(capture_id="a", kind="text", status=RECEIVED)
     await store.create(capture_id="b", kind="text", status=ORGANIZING)
     await store.create(capture_id="c", kind="text", status=INDEXED)  # terminal, untouched
@@ -173,7 +217,7 @@ async def test_follow_up_pass2_replaces_notes(tmp_path: Path):
         return "Tell me more about how that felt?"
 
     chat = FakeChatProvider("fake-chat", responder=responder)
-    pipeline, store, backup, vault = _make_pipeline(tmp_path, chat=chat)
+    pipeline, store, backup, _, vault = _make_pipeline(tmp_path, chat=chat)
 
     cid = await pipeline.create_text_capture("first pass content", created_at=CREATED)
     await pipeline.drain()
@@ -200,7 +244,7 @@ async def test_follow_up_organize_unavailable_keeps_original_notes(tmp_path: Pat
     # Pass 1 succeeds; the organize chain then goes down before the user answers. Pass 2 must
     # NOT delete the good notes — it fails retryably and leaves them intact (ADR-019 §2).
     chat = FakeChatProvider("fake-chat", responder=_responder)
-    pipeline, store, backup, vault = _make_pipeline(tmp_path, chat=chat)
+    pipeline, store, backup, _, vault = _make_pipeline(tmp_path, chat=chat)
 
     cid = await pipeline.create_text_capture("keep me organized", created_at=CREATED)
     await pipeline.drain()
@@ -227,7 +271,7 @@ async def test_nudge_store_failure_does_not_fail_capture(tmp_path: Path):
         async def set_follow_up_question(self, capture_id: str, question: str) -> None:
             raise RuntimeError("transient store failure")
 
-    pipeline, store, _, vault = _make_pipeline(tmp_path)
+    pipeline, store, _, _, vault = _make_pipeline(tmp_path)
     pipeline._store = store = FlakyNudgeStore()  # swap in the flaky store
 
     cid = await pipeline.create_text_capture("a calm productive day", created_at=CREATED)
@@ -242,7 +286,7 @@ async def test_nudge_store_failure_does_not_fail_capture(tmp_path: Path):
 async def test_retry_reruns_failed_voice_capture(tmp_path: Path):
     # STT down → failed (audio kept). Bring STT up and retry → transcribes + organizes to indexed.
     stt = FakeSTTProvider(transcript="a recovered memo", available=False)
-    pipeline, store, _, vault = _make_pipeline(tmp_path, stt=stt)
+    pipeline, store, _, _, vault = _make_pipeline(tmp_path, stt=stt)
     cid = await pipeline.create_voice_capture(b"audio", filename="memo.m4a")
     await pipeline.drain()
     assert store.records[cid].status == FAILED
@@ -261,7 +305,7 @@ async def test_retry_reruns_failed_voice_capture(tmp_path: Path):
 async def test_retry_removes_partial_notes_before_rerun(tmp_path: Path):
     # A capture that failed after notes landed (e.g. a boot-swept orphan at `written`). Retry must
     # remove the prior notes first so the re-run cannot leave a numeric-suffix duplicate (rule 6).
-    pipeline, store, _, vault = _make_pipeline(tmp_path)
+    pipeline, store, _, _, vault = _make_pipeline(tmp_path)
     cid = await pipeline.create_text_capture("I had a calm day.", created_at=CREATED)
     await pipeline.drain()
     original = store.records[cid].note_paths[0]
@@ -290,7 +334,7 @@ async def test_retry_follow_up_reapplies_answer(tmp_path: Path):
         return "Tell me more?"
 
     chat = FakeChatProvider("fake-chat", responder=responder)
-    pipeline, store, backup, vault = _make_pipeline(tmp_path, chat=chat)
+    pipeline, store, backup, _, vault = _make_pipeline(tmp_path, chat=chat)
     cid = await pipeline.create_text_capture("first pass", created_at=CREATED)
     await pipeline.drain()
     original = store.records[cid].note_paths[0]
@@ -313,7 +357,7 @@ async def test_retry_follow_up_reapplies_answer(tmp_path: Path):
 
 
 async def test_retry_non_failed_capture_raises(tmp_path: Path):
-    pipeline, store, _, _ = _make_pipeline(tmp_path)
+    pipeline, store, _, _, _ = _make_pipeline(tmp_path)
     cid = await pipeline.create_text_capture("all good", created_at=CREATED)
     await pipeline.drain()
     assert store.records[cid].status == INDEXED
@@ -322,20 +366,20 @@ async def test_retry_non_failed_capture_raises(tmp_path: Path):
 
 
 async def test_retry_missing_capture_raises(tmp_path: Path):
-    pipeline, _, _, _ = _make_pipeline(tmp_path)
+    pipeline, _, _, _, _ = _make_pipeline(tmp_path)
     with pytest.raises(CaptureNotFound):
         await pipeline.retry_capture("no-such-id")
 
 
 async def test_follow_up_guard_when_none_pending(tmp_path: Path):
-    pipeline, store, _, _ = _make_pipeline(tmp_path)
+    pipeline, store, _, _, _ = _make_pipeline(tmp_path)
     await store.create(capture_id="x", kind="text", status=INDEXED)  # no follow_up_question
     with pytest.raises(FollowUpNotPending):
         await pipeline.submit_follow_up("x", "answer")
 
 
 async def test_follow_up_guard_when_already_answered(tmp_path: Path):
-    pipeline, store, _, _ = _make_pipeline(tmp_path)
+    pipeline, store, _, _, _ = _make_pipeline(tmp_path)
     await store.create(capture_id="y", kind="text", status=INDEXED)
     store.records["y"].follow_up_question = "q?"
     store.records["y"].follow_up_answer = "already"

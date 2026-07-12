@@ -72,10 +72,18 @@ class OrganizeResult:
 
     ``used_fallback`` is True when the output was unusable and the caller must synthesise an
     Inbox note — in which case NO follow-up nudge is generated (ADR-019 §1).
+
+    ``model_used`` / ``provider_fallback_used`` carry the *provider-chain* resolution of the
+    organize call (which chat provider answered, and whether the chain fell back) for the
+    capture ``agent_runs`` interaction log (ADR-021). Distinct from ``used_fallback``, which is
+    about the *Inbox* fallback (the chain was exhausted and no model answered → both empty/False
+    here with ``used_fallback`` True).
     """
 
     notes: tuple[OrganizerNote, ...]
     used_fallback: bool = field(default=False)
+    model_used: str = field(default="")
+    provider_fallback_used: bool = field(default=False)
 
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)

@@ -50,6 +50,8 @@ class AgentRunStore(Protocol):
         summary: str | None = None,
         details: dict[str, Any] | None = None,
         error: str | None = None,
+        model_used: str | None = None,
+        fallback_used: bool = False,
     ) -> None: ...
 
     async def latest(self, agent: str, *, status: str | None = None) -> AgentRun | None: ...
@@ -87,13 +89,15 @@ class PgAgentRunStore:
         summary: str | None = None,
         details: dict[str, Any] | None = None,
         error: str | None = None,
+        model_used: str | None = None,
+        fallback_used: bool = False,
     ) -> None:
         async with self._db.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE agent_runs
                    SET status = $2, summary = $3, details = $4::jsonb,
-                       error = $5, finished_at = now()
+                       error = $5, model_used = $6, fallback_used = $7, finished_at = now()
                  WHERE id = $1
                 """,
                 run_id,
@@ -101,6 +105,8 @@ class PgAgentRunStore:
                 summary,
                 json.dumps(details or {}),
                 error,
+                model_used,
+                fallback_used,
             )
 
     async def latest(self, agent: str, *, status: str | None = None) -> AgentRun | None:

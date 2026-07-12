@@ -42,6 +42,14 @@ class EmbeddingResult:
     model_used: str = ""
 
 
+@dataclass(frozen=True)
+class TranscriptResult:
+    text: str
+    # Registry-level fields, filled in by ProviderRegistry, not the leaf provider (ADR-020):
+    model_used: str = ""
+    fallback_used: bool = False
+
+
 @dataclass
 class Provider(ABC):
     """Common base: a stable id and a cheap, non-raising health probe."""

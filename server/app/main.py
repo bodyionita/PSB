@@ -19,6 +19,7 @@ from .db import Database
 from .migration_check import warn_if_behind_head
 from .providers.registry import build_registry
 from .routers import admin, auth, capture, health
+from .services.agent_runs import PgAgentRunStore
 from .services.auth_service import AuthService
 from .services.backup_jobs import build_backup_jobs
 from .services.capture_pipeline import CapturePipeline
@@ -58,6 +59,7 @@ async def lifespan(app: FastAPI):
         registry=app.state.registry,
         note_writer=NoteWriter(settings.vault_path),
         vault_backup=vault_backup,
+        run_store=PgAgentRunStore(db),
     )
     app.state.capture_pipeline = pipeline
 

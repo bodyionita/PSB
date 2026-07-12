@@ -33,9 +33,17 @@ def _render_prompt(messages: list[ChatMessage]) -> str:
 
 
 class ClaudeMaxProvider(ChatProvider):
-    def __init__(self, *, id: str = "claude-max", model: str, cli_path: str = "claude") -> None:
+    def __init__(
+        self,
+        *,
+        id: str = "claude-max",
+        model: str,
+        effort: str = "medium",
+        cli_path: str = "claude",
+    ) -> None:
         self.id = id
         self._model = model
+        self._effort = effort
         self._cli_name = cli_path
 
     def _resolve_cli(self) -> str | None:
@@ -68,7 +76,7 @@ class ClaudeMaxProvider(ChatProvider):
         prompt = _render_prompt(messages)
         try:
             result = await asyncio.to_thread(
-                self._run_cli, cli, prompt, model or self._model
+                self._run_cli, cli, prompt, model or self._model, self._effort
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise ProviderUnavailable(f"claude-max invocation failed: {exc}") from exc
@@ -83,9 +91,11 @@ class ClaudeMaxProvider(ChatProvider):
         return text
 
     @staticmethod
-    def _run_cli(cli: str, prompt: str, model: str) -> subprocess.CompletedProcess[str]:
+    def _run_cli(
+        cli: str, prompt: str, model: str, effort: str
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [cli, "--print", "--model", model, prompt],
+            [cli, "--print", "--model", model, "--effort", effort, prompt],
             capture_output=True,
             text=True,
             timeout=300,

@@ -227,12 +227,24 @@ class FakeAgentRunStore:
         self.runs[run_id] = AgentRun(id=run_id, agent=agent, status=RUNNING)
         return run_id
 
-    async def finish(self, run_id, *, status, summary=None, details=None, error=None) -> None:
+    async def finish(
+        self,
+        run_id,
+        *,
+        status,
+        summary=None,
+        details=None,
+        error=None,
+        model_used=None,
+        fallback_used=False,
+    ) -> None:
         run = self.runs[run_id]
         run.status = status
         run.summary = summary
         run.details = details or {}
         run.error = error
+        run.model_used = model_used
+        run.fallback_used = fallback_used
 
     async def latest(self, agent: str, *, status: str | None = None) -> AgentRun | None:
         if agent in self.preloaded:
