@@ -38,6 +38,7 @@ from ..config import Settings
 from ..providers.base import ChatMessage, ProviderUnavailable
 from ..providers.registry import ProviderRegistry
 from .capture_store import (
+    FAILED,
     INDEXED,
     KIND_TEXT,
     KIND_VOICE,
@@ -45,6 +46,7 @@ from .capture_store import (
     RECEIVED,
     TRANSCRIBING,
     WRITTEN,
+    CaptureRecord,
     CaptureStore,
 )
 from .vault_backup import VaultBackup
@@ -71,6 +73,10 @@ class CaptureNotFound(CaptureError):
 
 class FollowUpNotPending(CaptureError):
     """The capture has no pending follow-up question to answer (409)."""
+
+
+class NotRetryable(CaptureError):
+    """Retry was requested on a capture that is not ``failed`` (409)."""
 
 
 class CapturePipeline:
@@ -128,6 +134,14 @@ class CapturePipeline:
         self._spawn(self._process(capture_id))
         return capture_id
 
+    async def get(self, capture_id: str) -> CaptureRecord | None:
+        """Read a capture's current pipeline state (GET /captures/{id})."""
+        return await self._store.get(capture_id)
+
+    async def list_recent(self, limit: int) -> list[CaptureRecord]:
+        """Recent captures, newest first, for the capture-screen strip (GET /captures)."""
+        return await self._store.list_recent(limit)
+
     async def submit_follow_up(self, capture_id: str, answer: str) -> None:
         """Record the nudge answer and kick off Pass 2 (re-organize + replace). 202 semantics."""
         record = await self._store.get(capture_id)
@@ -137,6 +151,36 @@ class CapturePipeline:
             raise FollowUpNotPending(capture_id)
         await self._store.set_follow_up_answer(capture_id, answer)
         self._spawn(self._reprocess_with_follow_up(capture_id))
+
+    async def retry_capture(self, capture_id: str) -> None:
+        """Re-run a ``failed`` capture from its first incomplete step (03-api; 409 otherwise).
+
+        The raw input is always still on disk / in the row (never-lose), so retry is safe to
+        re-drive. Two cases, kept idempotent (rule 6):
+
+        * A **follow-up** answer was recorded but its Pass 2 didn't land (chain was down — the
+          notes were deliberately kept). Re-run Pass 2; it re-organizes original+answer and
+          only replaces the notes on success, so re-applying is safe.
+        * Otherwise the main pipeline failed (STT down, vault write, or a boot-swept orphan).
+          Remove the **recorded** notes (``note_paths``) first so re-running can't duplicate
+          that set, then re-drive ``_process`` from the top. (A note that landed in a batch
+          that crashed *before* ``set_note_paths`` recorded it is not tracked here; that
+          partial-write edge is a known follow-up — see 08 M1 progress.)
+        """
+        record = await self._store.get(capture_id)
+        if record is None:
+            raise CaptureNotFound(capture_id)
+        if record.status != FAILED:
+            raise NotRetryable(capture_id)
+
+        await self._store.reset_for_retry(capture_id)
+        if record.follow_up_answer:
+            self._spawn(self._reprocess_with_follow_up(capture_id))
+            return
+        if record.note_paths:
+            await asyncio.to_thread(self._notes.remove_notes, list(record.note_paths))
+            await self._store.set_note_paths(capture_id, [])
+        self._spawn(self._process(capture_id))
 
     async def sweep_orphans(self) -> int:
         """Boot recovery: mark interrupted in-flight captures failed (retryable)."""

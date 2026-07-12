@@ -13,7 +13,7 @@ from app.providers.base import (
     ProviderUnavailable,
     STTProvider,
 )
-from app.services.capture_store import FAILED, TERMINAL_STATUSES, CaptureRecord
+from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 
 
 class FakeChatProvider(ChatProvider):
@@ -148,6 +148,11 @@ class FakeCaptureStore:
 
     async def set_follow_up_answer(self, capture_id: str, answer: str) -> None:
         self.records[capture_id].follow_up_answer = answer
+
+    async def reset_for_retry(self, capture_id: str) -> None:
+        rec = self.records[capture_id]
+        rec.status = RECEIVED
+        rec.error = None
 
     async def sweep_orphans(self, error: str) -> int:
         count = 0

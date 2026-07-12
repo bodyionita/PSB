@@ -75,6 +75,10 @@ class CaptureStore(Protocol):
 
     async def set_follow_up_answer(self, capture_id: str, answer: str) -> None: ...
 
+    async def reset_for_retry(self, capture_id: str) -> None:
+        """Clear the failure and put the capture back in-flight (``received``, no error)."""
+        ...
+
     async def sweep_orphans(self, error: str) -> int:
         """Mark every non-terminal capture as failed (boot recovery). Returns the count."""
         ...
@@ -173,6 +177,9 @@ class PgCaptureStore:
 
     async def set_follow_up_answer(self, capture_id: str, answer: str) -> None:
         await self._set(capture_id, "follow_up_answer = $2", answer)
+
+    async def reset_for_retry(self, capture_id: str) -> None:
+        await self._set(capture_id, "status = $2, error = NULL", RECEIVED)
 
     async def sweep_orphans(self, error: str) -> int:
         async with self._db.acquire() as conn:

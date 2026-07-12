@@ -12,8 +12,10 @@ from app.capture.notes import NoteWriter
 from app.config import Settings
 from app.providers.registry import ProviderRegistry
 from app.services.capture_pipeline import (
+    CaptureNotFound,
     CapturePipeline,
     FollowUpNotPending,
+    NotRetryable,
     UnsupportedAudio,
 )
 from app.services.capture_store import FAILED, INDEXED, ORGANIZING, RECEIVED
@@ -235,6 +237,94 @@ async def test_nudge_store_failure_does_not_fail_capture(tmp_path: Path):
     assert rec.status == INDEXED  # nudge failure swallowed; capture stays healthy
     assert rec.follow_up_question is None
     assert rec.note_paths and (vault / rec.note_paths[0]).exists()
+
+
+async def test_retry_reruns_failed_voice_capture(tmp_path: Path):
+    # STT down → failed (audio kept). Bring STT up and retry → transcribes + organizes to indexed.
+    stt = FakeSTTProvider(transcript="a recovered memo", available=False)
+    pipeline, store, _, vault = _make_pipeline(tmp_path, stt=stt)
+    cid = await pipeline.create_voice_capture(b"audio", filename="memo.m4a")
+    await pipeline.drain()
+    assert store.records[cid].status == FAILED
+
+    stt._available = True
+    await pipeline.retry_capture(cid)
+    await pipeline.drain()
+
+    rec = store.records[cid]
+    assert rec.status == INDEXED
+    assert rec.error is None  # reset_for_retry cleared the stale failure
+    assert rec.raw_text == "a recovered memo"
+    assert rec.note_paths and (vault / rec.note_paths[0]).exists()
+
+
+async def test_retry_removes_partial_notes_before_rerun(tmp_path: Path):
+    # A capture that failed after notes landed (e.g. a boot-swept orphan at `written`). Retry must
+    # remove the prior notes first so the re-run cannot leave a numeric-suffix duplicate (rule 6).
+    pipeline, store, _, vault = _make_pipeline(tmp_path)
+    cid = await pipeline.create_text_capture("I had a calm day.", created_at=CREATED)
+    await pipeline.drain()
+    original = store.records[cid].note_paths[0]
+    assert original == "Ideas/2026-07-12 A thought.md"
+
+    await store.mark_failed(cid, "interrupted by restart")  # simulate an orphaned in-flight row
+    await pipeline.retry_capture(cid)
+    await pipeline.drain()
+
+    rec = store.records[cid]
+    assert rec.status == INDEXED
+    # Exactly one note on disk — the old one was removed, not shadowed by a " 2" duplicate.
+    assert rec.note_paths == [original]
+    ideas_notes = list((vault / "Ideas").glob("*.md"))
+    assert ideas_notes == [vault / original]
+
+
+async def test_retry_follow_up_reapplies_answer(tmp_path: Path):
+    # Pass-2 failed because the chain was down (notes kept). Retry re-applies the held answer.
+    def responder(messages):
+        system = messages[0].content
+        if "organize a person's raw capture" in system:
+            if "[Answer]" in messages[1].content:
+                return _organizer_json(plane="Personal", title="Enriched")
+            return _organizer_json(plane="Ideas", title="Initial")
+        return "Tell me more?"
+
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, store, backup, vault = _make_pipeline(tmp_path, chat=chat)
+    cid = await pipeline.create_text_capture("first pass", created_at=CREATED)
+    await pipeline.drain()
+    original = store.records[cid].note_paths[0]
+
+    chat._available = False
+    await pipeline.submit_follow_up(cid, "here is more")
+    await pipeline.drain()
+    assert store.records[cid].status == FAILED  # Pass 2 couldn't organize; notes kept
+
+    chat._available = True
+    await pipeline.retry_capture(cid)
+    await pipeline.drain()
+
+    rec = store.records[cid]
+    assert rec.status == INDEXED
+    assert rec.follow_up_answer == "here is more"
+    assert rec.note_paths == ["Personal/2026-07-12 Enriched.md"]
+    assert (vault / rec.note_paths[0]).exists()
+    assert not (vault / original).exists()  # Pass-1 note superseded
+
+
+async def test_retry_non_failed_capture_raises(tmp_path: Path):
+    pipeline, store, _, _ = _make_pipeline(tmp_path)
+    cid = await pipeline.create_text_capture("all good", created_at=CREATED)
+    await pipeline.drain()
+    assert store.records[cid].status == INDEXED
+    with pytest.raises(NotRetryable):
+        await pipeline.retry_capture(cid)
+
+
+async def test_retry_missing_capture_raises(tmp_path: Path):
+    pipeline, _, _, _ = _make_pipeline(tmp_path)
+    with pytest.raises(CaptureNotFound):
+        await pipeline.retry_capture("no-such-id")
 
 
 async def test_follow_up_guard_when_none_pending(tmp_path: Path):

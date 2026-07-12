@@ -13,13 +13,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .capture.notes import NoteWriter
 from .config import Settings, get_settings
 from .db import Database
 from .migration_check import warn_if_behind_head
 from .providers.registry import build_registry
-from .routers import auth, health
+from .routers import auth, capture, health
 from .services.auth_service import AuthService
+from .services.capture_pipeline import CapturePipeline
+from .services.capture_store import PgCaptureStore
 from .services.rate_limit import RateLimiter
+from .services.vault_backup import LoggingVaultBackup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -38,11 +42,25 @@ async def lifespan(app: FastAPI):
         max_events=settings.login_rate_limit_per_min, window_seconds=60.0
     )
 
+    # Capture pipeline (M1, ADR-019): in-process, notes-to-vault. The real git-backed
+    # VaultBackupService lands in the durability task; until then commits are logged, not pushed.
+    pipeline = CapturePipeline(
+        settings=settings,
+        store=PgCaptureStore(db),
+        registry=app.state.registry,
+        note_writer=NoteWriter(settings.vault_path),
+        vault_backup=LoggingVaultBackup(),
+    )
+    app.state.capture_pipeline = pipeline
+
     await warn_if_behind_head(db)
+    # Boot recovery: any capture left in-flight by a restart is marked failed (retryable).
+    await pipeline.sweep_orphans()
 
     try:
         yield
     finally:
+        await pipeline.drain()
         await db.disconnect()
 
 
@@ -70,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # All endpoints live under /api/v1 (Caddy proxies /api -> FastAPI). 03-api.md.
     app.include_router(health.router, prefix=settings.api_prefix)
     app.include_router(auth.router, prefix=settings.api_prefix)
+    app.include_router(capture.router, prefix=settings.api_prefix)
 
     return app
 

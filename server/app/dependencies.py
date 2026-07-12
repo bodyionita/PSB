@@ -12,6 +12,7 @@ from .config import Settings
 from .db import Database
 from .providers.registry import ProviderRegistry
 from .services.auth_service import AuthService, SessionInfo
+from .services.capture_pipeline import CapturePipeline
 
 
 def get_settings(request: Request) -> Settings:
@@ -28,6 +29,10 @@ def get_registry(request: Request) -> ProviderRegistry:
 
 def get_auth_service(request: Request) -> AuthService:
     return request.app.state.auth_service
+
+
+def get_capture_pipeline(request: Request) -> CapturePipeline:
+    return request.app.state.capture_pipeline
 
 
 async def require_session(
