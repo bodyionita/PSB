@@ -102,7 +102,10 @@ jobs:
           ORIGIN_CERT_PEM: ${{ secrets.ORIGIN_CERT_PEM }}
           ORIGIN_KEY_PEM: ${{ secrets.ORIGIN_KEY_PEM }}
         run: |
-          umask 077
+          # No restrictive umask here: appleboy/scp-action tars these as a different
+          # container user, so 600 -> "Permission denied". The runner is ephemeral and
+          # single-tenant; the real lock-down (mode 600) is applied on the VPS by the
+          # deploy step's `chmod 600`. Keep them group/other-readable so scp can pack them.
           cp deploy/defaults.env deploy/.env
           # printf %s writes each value literally — safe for $, %, backticks in
           # Argon2 hashes / DB URLs (the shell never re-parses the value).
@@ -121,6 +124,9 @@ jobs:
           # printf %s writes the PEM literally; trailing newline is harmless to Caddy.
           printf '%s\n' "$ORIGIN_CERT_PEM" > deploy/origin.crt
           printf '%s\n' "$ORIGIN_KEY_PEM" > deploy/origin.key
+          # Readable on the ephemeral runner so scp-action's container can pack them;
+          # secured to 600 on the VPS by the deploy step.
+          chmod 644 deploy/.env deploy/origin.crt deploy/origin.key
           # Diagnostic only (names/sizes/perms — no secret content is printed).
           ls -l deploy/.env deploy/origin.crt deploy/origin.key
 
