@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useState, type FormEvent } from 'react';
 import type { CaptureStatus, CaptureView } from '../../api/types';
 import { Surface } from '../../ui/Surface';
@@ -43,6 +43,9 @@ function baseName(path: string): string {
 function StatusPill({ status }: { status: CaptureStatus }) {
   const { label, tone } = metaFor(status);
   const color = tone === 'fail' ? FAIL_COLOR : tone === 'done' ? 'var(--accent)' : 'var(--muted)';
+  // Respect prefers-reduced-motion (06 / CLAUDE.md): the progress dot is an autonomous, infinite
+  // pulse — exactly what reduced-motion suppresses. Render it static when reduced motion is on.
+  const reduceMotion = useReducedMotion();
   return (
     <span
       style={{
@@ -59,8 +62,10 @@ function StatusPill({ status }: { status: CaptureStatus }) {
       {tone === 'progress' && (
         <motion.span
           aria-hidden
-          animate={{ opacity: [1, 0.25, 1] }}
-          transition={{ duration: 1.1, repeat: Infinity, ease: 'easeInOut' }}
+          animate={reduceMotion ? undefined : { opacity: [1, 0.25, 1] }}
+          transition={
+            reduceMotion ? undefined : { duration: 1.1, repeat: Infinity, ease: 'easeInOut' }
+          }
           style={{ width: 7, height: 7, borderRadius: '50%', background: 'currentColor' }}
         />
       )}
