@@ -13,6 +13,7 @@ from .db import Database
 from .providers.registry import ProviderRegistry
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
+from .services.vault_backup import VaultBackupService
 
 
 def get_settings(request: Request) -> Settings:
@@ -33,6 +34,10 @@ def get_auth_service(request: Request) -> AuthService:
 
 def get_capture_pipeline(request: Request) -> CapturePipeline:
     return request.app.state.capture_pipeline
+
+
+def get_vault_backup(request: Request) -> VaultBackupService:
+    return request.app.state.vault_backup
 
 
 async def require_session(

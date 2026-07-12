@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from app.providers.base import (
     STTProvider,
 )
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
+from app.services.git_repo import PushOutcome
 
 
 class FakeChatProvider(ChatProvider):
@@ -89,6 +91,91 @@ class FakeVaultBackup:
 
     async def request_commit(self, reason: str) -> None:
         self.reasons.append(reason)
+
+
+class FakeGitRepo:
+    """In-memory GitClient for VaultBackupService orchestration tests (no real git).
+
+    Push behaviour is scriptable: ``non_ff_times`` rejects that many pushes as non-fast-forward
+    (to exercise heal-on-reject), and ``push_ok`` controls the plain-failure path."""
+
+    def __init__(
+        self, *, is_repo: bool = True, has_head: bool = True, has_remote: bool = True
+    ) -> None:
+        self._is_repo = is_repo
+        self._has_head = has_head
+        self._has_remote = has_remote
+        self._staged = False
+        self.staged_after_add = True  # what add_all leaves staged (set False for "no changes")
+        self.config: dict[str, str] = {}
+        self.commits: list[str] = []
+        self.pushes = 0
+        self.pulls = 0
+        self.aborts = 0
+        self.inited = False
+        self.non_ff_times = 0
+        self.push_ok = True
+        self.pull_ok = True
+        self._merging = False
+        # Optional gates to drive the concurrency regression test: commit() sets `commit_entered`
+        # on entry and, if `commit_gate` is set, blocks until it is fired.
+        self.commit_entered: asyncio.Event | None = None
+        self.commit_gate: asyncio.Event | None = None
+
+    async def is_repo(self) -> bool:
+        return self._is_repo
+
+    async def has_head(self) -> bool:
+        return self._has_head
+
+    async def init(self, branch: str) -> None:
+        self.inited = True
+        self._is_repo = True
+
+    async def set_config(self, key: str, value: str) -> None:
+        self.config[key] = value
+
+    async def has_remote(self, name: str) -> bool:
+        return self._has_remote
+
+    async def add_all(self) -> None:
+        self._staged = self.staged_after_add
+
+    async def has_staged_changes(self) -> bool:
+        return self._staged
+
+    async def commit(self, message: str) -> None:
+        if self.commit_entered is not None:
+            self.commit_entered.set()
+        if self.commit_gate is not None:
+            await self.commit_gate.wait()
+        self.commits.append(message)
+        self._staged = False
+        self._has_head = True
+
+    async def push(self, remote: str, branch: str, *, set_upstream: bool = False) -> PushOutcome:
+        self.pushes += 1
+        if self.non_ff_times > 0:
+            self.non_ff_times -= 1
+            return PushOutcome(ok=False, non_fast_forward=True)
+        if not self.push_ok:
+            return PushOutcome(ok=False, non_fast_forward=False)
+        return PushOutcome(ok=True)
+
+    async def pull_merge(self, remote: str, branch: str) -> bool:
+        self.pulls += 1
+        return self.pull_ok
+
+    async def is_merging(self) -> bool:
+        return self._merging
+
+    async def abort_merge(self) -> bool:
+        self.aborts += 1
+        self._merging = False
+        return True
+
+    async def head_sha(self) -> str | None:
+        return "deadbeef" if self._has_head else None
 
 
 class FakeCaptureStore:

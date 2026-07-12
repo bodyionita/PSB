@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     organizer_max_notes: int = 8
     organizer_max_tags: int = 12
 
+    # --- Vault backup / durability (ADR-014) ---
+    # The server only ever fast-forward pushes to this remote/branch; never force/rebase/reset.
+    vault_git_remote: str = "origin"
+    vault_git_branch: str = "main"
+    # Writes are coalesced into one commit per debounce window (~60s batch commits, §3).
+    vault_backup_debounce_seconds: float = 60.0
+    # Commit identity (set in the repo config so `git commit` works inside the container).
+    git_user_name: str = "Braindan"
+    git_user_email: str = "braindan@braindan.local"
+
     # --- Provider registry (ADR-004) ---
     # OpenAI-compatible endpoints share one client; a new compatible provider is config-only.
     openai_api_key: str = ""

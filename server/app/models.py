@@ -75,6 +75,14 @@ class CaptureView(BaseModel):
         )
 
 
+# --- Admin (03-api.md §Agents & admin) ---
+class BackupResponse(BaseModel):
+    """POST /admin/backup result — did this force a new commit, and did the push reach remote."""
+
+    committed: bool
+    pushed: bool
+
+
 # --- Health ---
 class HealthResponse(BaseModel):
     status: str  # "ok" | "degraded"
