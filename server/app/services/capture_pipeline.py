@@ -31,7 +31,6 @@ from ..capture.organizer import (
     NUDGE_SYSTEM_PROMPT,
     ORGANIZER_SYSTEM_PROMPT,
     OrganizeResult,
-    OrganizerNote,
     inbox_fallback_note,
     parse_organizer_json,
     validate_organizer_output,
@@ -318,9 +317,10 @@ class CapturePipeline:
             await self._backup.request_commit(f"capture {capture_id}")
 
             # Trailing, non-blocking nudge — notes have already landed. Skipped on the Inbox
-            # fallback path (there is no understanding to dig into — ADR-019 §1).
+            # fallback path (there is no understanding to dig into — ADR-019 §1). Sourced from
+            # the raw capture (not the notes) so it matches the person's language.
             if not organize.used_fallback:
-                nudge_model = await self._generate_nudge(capture_id, organize.notes)
+                nudge_model = await self._generate_nudge(capture_id, transcript)
                 inter.nudge = {"model": nudge_model}
 
             await self._finish_run(
@@ -433,22 +433,21 @@ class CapturePipeline:
         note = inbox_fallback_note(text, inbox_plane=self._settings.inbox_plane)
         return OrganizeResult(notes=(note,), used_fallback=True)
 
-    async def _generate_nudge(
-        self, capture_id: str, notes: tuple[OrganizerNote, ...]
-    ) -> str | None:
-        """Best-effort trailing nudge, generated from the held organize result (ADR-019 §1).
+    async def _generate_nudge(self, capture_id: str, capture_text: str) -> str | None:
+        """Best-effort trailing nudge, generated from the person's ORIGINAL capture (ADR-019 §1).
 
-        MUST never fail the capture: it is already ``indexed`` with notes on disk, so ANY error
-        here (chain unavailable, an errant store write) is swallowed and logged — never
-        propagated to flip the capture to ``failed``. Returns the model that generated the nudge
-        (for the interaction log), or ``None`` if it was skipped.
+        Sourced from the raw capture text (not the organized notes) so the question lands in the
+        same language the person used and stays faithful to what they actually said. MUST never
+        fail the capture: it is already ``indexed`` with notes on disk, so ANY error here (chain
+        unavailable, an errant store write) is swallowed and logged — never propagated to flip
+        the capture to ``failed``. Returns the model that generated the nudge (for the
+        interaction log), or ``None`` if it was skipped.
         """
         try:
-            summary = "\n\n".join(f"{n.title}\n{n.body}" for n in notes)
             result = await self._registry.distill(
                 [
                     ChatMessage(role="system", content=NUDGE_SYSTEM_PROMPT),
-                    ChatMessage(role="user", content=summary),
+                    ChatMessage(role="user", content=capture_text),
                 ]
             )
             question = result.text.strip()[:_MAX_NUDGE_CHARS].strip()

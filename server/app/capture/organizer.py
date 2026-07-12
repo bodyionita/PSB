@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 # --- Versioned prompt constants (ADR-019 §4). Bump the suffix on any wording change. ---
 
 ORGANIZER_PROMPT_VERSION = "organizer-v1"
-NUDGE_PROMPT_VERSION = "nudge-v1"
+NUDGE_PROMPT_VERSION = "nudge-v2"  # v2: sourced from the raw capture; explicit language match
 
 # Organic tagging (ADR-019 / M1 build decisions): emotional tone + the what/why around the
 # feelings, free-form — no rigid taxonomy. Splitting per plane produces atomic notes (ADR-005).
@@ -48,10 +48,12 @@ Configured planes: {planes}
 """
 
 NUDGE_SYSTEM_PROMPT = """\
-You just helped organize a person's capture into notes. Ask ONE short, warm, open question
-inviting them to expand on the most emotionally or substantively significant thread — the
-kind of gentle nudge that draws a thought out. At most 20 words. Never an interrogation, never
-multiple questions. Preserve the language of the capture. Return only the question text.
+Below is a person's raw capture (a voice memo transcript or a typed note) that was just saved
+to their vault. Ask ONE short, warm, open question inviting them to expand on the most
+emotionally or substantively significant thread — the kind of gentle nudge that draws a thought
+out. At most 20 words. Never an interrogation, never multiple questions. Detect the language of
+the capture and write the question in that SAME language (e.g. an English capture gets an
+English question). Return only the question text.
 """
 
 

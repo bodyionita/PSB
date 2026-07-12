@@ -95,6 +95,27 @@ async def test_text_capture_happy_path(tmp_path: Path):
     assert backup.reasons == [f"capture {cid}"]
 
 
+async def test_nudge_is_generated_from_raw_capture_not_notes(tmp_path: Path):
+    # ADR-019 v2: the nudge is sourced from the person's ORIGINAL capture text (so it matches
+    # their language), not the organized notes. Assert the nudge call saw the raw capture.
+    seen_nudge_input: list[str] = []
+
+    def responder(messages):
+        system = messages[0].content
+        if "organize a person's raw capture" in system:
+            return _organizer_json()
+        seen_nudge_input.append(messages[1].content)
+        return "Ce te-a bucurat azi?"
+
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, store, _, _, _ = _make_pipeline(tmp_path, chat=chat)
+    cid = await pipeline.create_text_capture("I had a calm, productive day.", created_at=CREATED)
+    await pipeline.drain()
+
+    assert store.records[cid].follow_up_question == "Ce te-a bucurat azi?"
+    assert seen_nudge_input == ["I had a calm, productive day."]  # raw capture, not notes summary
+
+
 async def test_capture_writes_agent_runs_interaction_row(tmp_path: Path):
     # ADR-021: a successful voice capture logs one agent_runs row with the STT/organize
     # resolution + details, so the interaction is queryable (Supabase dashboard / view).
