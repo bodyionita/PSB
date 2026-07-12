@@ -12,7 +12,7 @@ organization, whether or not the software itself is sold or distributed.
 
 ## Getting a commercial license
 
-Contact **Bogdan Ionita** — <bogdan.ionita96@gmail.com> — to arrange terms.
+To arrange terms, contact the copyright holder, **Bogdan Ionita**.
 
 Commercial licenses are granted only by a signed written agreement and typically set out:
 
