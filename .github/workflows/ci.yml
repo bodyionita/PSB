@@ -7,6 +7,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:        # manual "Run workflow" — lets provisioning trigger a deploy
+                            # without a code change (referenced by deploy/provision.sh).
 
 jobs:
   secrets:
@@ -58,7 +60,7 @@ jobs:
     # CI is the sole writer of deploy/.env (ADR-016): render defaults.env + GitHub
     # secrets -> scp to VPS (mode 600) -> compose up. Dormant until VPS_HOST is set.
     needs: [server, web, secrets]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     environment: production          # secrets live in the "production" environment
     env:
