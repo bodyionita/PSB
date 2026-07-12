@@ -32,7 +32,7 @@ done
 added=$(git diff --cached -U0 --no-color | grep -E '^\+' | grep -Ev '^\+\+\+')
 
 # 2) Secret-shaped values — high signal, low false-positive.
-patterns='-----BEGIN[A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}'
+patterns='-----BEGIN[A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|sbp_[A-Za-z0-9]{40,}'
 hits=$(printf '%s\n' "$added" | grep -En -- "$patterns")
 if [ -n "$hits" ]; then
   red "BLOCKED (secret-shaped value in staged changes):"
