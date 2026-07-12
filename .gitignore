@@ -27,6 +27,19 @@ srv/
 /data/
 *.log
 
+# --- secrets & key material (never commit; enforced by .githooks/pre-commit) ---
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+!*.pub
+
 # --- editors / OS ---
 .DS_Store
 .idea/

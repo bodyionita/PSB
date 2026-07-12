@@ -9,6 +9,20 @@ on:
   pull_request:
 
 jobs:
+  secrets:
+    # Backstop for .githooks/pre-commit (which is local + --no-verify-bypassable).
+    # Scans the repo/history for committed credentials; see 09-session-protocol.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
+            | tar -xz gitleaks
+          ./gitleaks detect --source . --config .gitleaks.toml --redact --no-banner -v
+
   server:
     runs-on: ubuntu-latest
     defaults:

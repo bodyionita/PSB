@@ -1,0 +1,21 @@
+# gitleaks config — CI backstop for the pre-commit secret guard (.githooks/pre-commit).
+# Extends the built-in rules; allowlists known-benign, non-secret content so CI stays
+# green on placeholders and dev defaults while still catching real credentials.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Non-secret placeholders, dev defaults, and the guard's own pattern files"
+paths = [
+  '''\.env\.example$''',
+  '''deploy/\.env\.example$''',
+  '''\.githooks/pre-commit$''',   # contains secret *patterns*, not secrets
+  '''\.gitleaks\.toml$''',
+]
+regexes = [
+  # Local dev-default DSN (config.py) — localhost, no real credentials.
+  '''postgres(ql)?://[^:@/]+:[^@/]+@(localhost|127\.0\.0\.1)''',
+  # Uppercase placeholder connection string in docs/examples.
+  '''://USER:PASSWORD@''',
+]

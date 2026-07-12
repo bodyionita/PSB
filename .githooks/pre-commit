@@ -1,0 +1,61 @@
+#!/bin/sh
+# Braindan pre-commit secret guard — enforces the session-protocol security rule:
+# private keys, passwords, tokens and other credentials must NEVER be committed.
+# Zero dependencies (POSIX sh + git). Wired via: git config core.hooksPath .githooks
+#
+# Bypassing this with `git commit --no-verify` is forbidden for secret material
+# (09-session-protocol.md, "Security & secrets discipline"). A committed secret is
+# the single worst outcome — rotate it immediately if it ever lands.
+
+fail=0
+red() { printf '\033[31m%s\033[0m\n' "$1" >&2; }
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+
+# 1) Filename block — credential / key material that must never be tracked.
+for f in $staged; do
+  base=${f##*/}
+  case "$base" in
+    *.pub) : ;;                                   # public keys are safe
+    .env|.env.*)
+      case "$base" in
+        *.example|*.sample|*.template) : ;;       # placeholders are fine
+        *) red "BLOCKED (secret file): $f"; fail=1 ;;
+      esac ;;
+    id_rsa|id_dsa|id_ecdsa|id_ed25519|id_rsa.*|id_ed25519.*|id_ecdsa.*|id_dsa.* \
+    |*.pem|*.key|*.p12|*.pfx|*.jks|*.keystore|*_rsa|*_ed25519)
+      red "BLOCKED (key material): $f"; fail=1 ;;
+  esac
+done
+
+# Added lines in the staged diff (strip the +++ file-header lines).
+added=$(git diff --cached -U0 --no-color | grep -E '^\+' | grep -Ev '^\+\+\+')
+
+# 2) Secret-shaped values — high signal, low false-positive.
+patterns='-----BEGIN[A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}'
+hits=$(printf '%s\n' "$added" | grep -En -- "$patterns")
+if [ -n "$hits" ]; then
+  red "BLOCKED (secret-shaped value in staged changes):"
+  printf '%s\n' "$hits" >&2
+  fail=1
+fi
+
+# 3) Database URL with a real host + inline password (localhost/UPPER placeholders allowed).
+dburl=$(printf '%s\n' "$added" \
+  | grep -E 'postgres(ql)?://[^:@ ]+:[^@ ]+@[^/ ]*\.[^/ ]+' \
+  | grep -Eiv ':(password|changeme|your[-_]?password|xxx+)@')
+if [ -n "$dburl" ]; then
+  red "BLOCKED (database URL with inline password):"
+  printf '%s\n' "$dburl" >&2
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  red ""
+  red "Commit refused: credentials must never enter git (09-session-protocol.md)."
+  red "Real secrets belong only in deploy/.env on the VPS (gitignored), the process"
+  red "environment, or GitHub Actions secrets — never in a tracked file."
+  exit 1
+fi
+
+exit 0

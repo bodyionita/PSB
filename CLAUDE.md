@@ -44,6 +44,14 @@ freely while implementing but **push code only when the user asks**.
     providers, connectors), type hints everywhere (Python) / strict TS (web). Follow the
     testing policy in docs 08 — pure logic unit-tested, fakes for services, no live
     APIs/LLMs in tests.
+11. **Secrets never touch git or the agent** ([09-session-protocol.md](../second-brain-docs/09-session-protocol.md)
+    "Security & secrets discipline"). No private key, password, API token, session secret
+    or connection string is ever pasted into chat, echoed by the agent, or written to a
+    tracked file. Real values live only in `deploy/.env` on the VPS (gitignored), the
+    process environment, or GitHub Actions secrets; only `.env.example` placeholders are
+    committed. Enforced by `.githooks/pre-commit` (enable once: `git config core.hooksPath
+    .githooks`) + a gitleaks CI job. `--no-verify` is forbidden for secret material; a
+    leaked secret is treated as compromised and rotated immediately.
 
 ## Conventions
 
