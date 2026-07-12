@@ -27,6 +27,6 @@ def test_embedding_dim_matches_schema():
     assert Settings().embedding_dim == 1536
 
 
-def test_compute_head_is_migration_001():
-    # M0 ships exactly one revision; head must resolve to it (used by the startup warning).
-    assert compute_head() == "001"
+def test_compute_head_is_migration_002():
+    # M1 adds revision 002 (capture follow-up columns); head must advance to it.
+    assert compute_head() == "002"

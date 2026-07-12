@@ -59,8 +59,21 @@ class Settings(BaseSettings):
     planes: CsvList = Field(
         default=["Professional", "Personal", "Family", "Friends", "Health", "Ideas"]
     )
+    # System plane/folder for the organizer's "don't know" + failure fallback (ADR-005/019).
+    # Always present; not part of PLANES.
+    inbox_plane: str = "Inbox"
     # Path prefixes the indexer skips.
     vault_ignore: CsvList = Field(default=[".obsidian", ".trash", ".git", "templates"])
+
+    # --- Capture pipeline (M1, ADR-019) ---
+    # Raw capture inputs that are not text (audio) are persisted here before any model call
+    # as {capture_id}.{ext} (never-lose, CLAUDE.md rule 2). Prod = /srv/data (07-infra).
+    data_path: str = "../data"
+    # Whisper hard limit; larger uploads are rejected before persistence.
+    audio_max_bytes: int = 25 * 1024 * 1024
+    # Bounds on a single organize result, enforced by validate_organizer_output.
+    organizer_max_notes: int = 8
+    organizer_max_tags: int = 12
 
     # --- Provider registry (ADR-004) ---
     # OpenAI-compatible endpoints share one client; a new compatible provider is config-only.
@@ -90,6 +103,9 @@ class Settings(BaseSettings):
 
     # --- Scheduler (ADR-010) ---
     enable_scheduler: bool = False
+    # The app's single local timezone: drives scheduling AND vault-facing formatting
+    # (frontmatter `created`, note filename dates) — the only two uses of TZ (CLAUDE.md
+    # conventions). DB timestamps stay UTC.
     scheduler_tz: str = "Europe/Bucharest"
     agent_window_start_hour: int = 3
     agent_window_end_hour: int = 5
