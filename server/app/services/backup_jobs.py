@@ -24,9 +24,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..config import Settings
-from .agent_runs import FAILED, SKIPPED, SUCCEEDED, AgentRunStore
+from ..db import Database
+from .agent_runs import FAILED, SKIPPED, SUCCEEDED, AgentRunStore, PgAgentRunStore
 from .git_repo import GitRepo
-from .object_store import ObjectStore
+from .object_store import ObjectStore, build_object_store
 from .vault_backup import Fingerprint, VaultBackupService
 
 logger = logging.getLogger(__name__)
@@ -235,3 +236,20 @@ def _pg_dump_sync(database_url: str) -> bytes:
 
 async def _to_thread(func, /, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def build_backup_jobs(
+    settings: Settings, db: Database, vault_backup: VaultBackupService
+) -> BackupJobs:
+    """Construct the durability jobs from settings + an (already-connected) db + vault backup.
+
+    Shared by the CLI entrypoint (:mod:`app.cli`) and the in-process scheduler wiring
+    (:mod:`app.main`) so both drive the same jobs. ``object_store`` is ``None`` when R2 creds
+    are absent (dev) ⇒ the R2 jobs record a skipped run.
+    """
+    return BackupJobs(
+        settings=settings,
+        store=PgAgentRunStore(db),
+        object_store=build_object_store(settings),
+        vault_backup=vault_backup,
+    )

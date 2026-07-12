@@ -27,4 +27,5 @@ async def health(
         db=report.db,
         vault=report.vault,
         git_remote=report.git_remote,
+        backups=report.backups,
     )

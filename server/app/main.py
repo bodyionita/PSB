@@ -20,10 +20,12 @@ from .migration_check import warn_if_behind_head
 from .providers.registry import build_registry
 from .routers import admin, auth, capture, health
 from .services.auth_service import AuthService
+from .services.backup_jobs import build_backup_jobs
 from .services.capture_pipeline import CapturePipeline
 from .services.capture_store import PgCaptureStore
 from .services.git_repo import GitRepo
 from .services.rate_limit import RateLimiter
+from .services.scheduler import BackupScheduler
 from .services.vault_backup import VaultBackupService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -63,11 +65,24 @@ async def lifespan(app: FastAPI):
     # Boot recovery: any capture left in-flight by a restart is marked failed (retryable).
     await pipeline.sweep_orphans()
 
+    # Durability scheduler (ADR-010): the in-process APScheduler running the M1 backup jobs.
+    # Off unless enable_scheduler — exactly one prod instance runs it. Started inside the
+    # lifespan's event loop so the coroutine jobs fire on it.
+    scheduler: BackupScheduler | None = None
+    if settings.enable_scheduler:
+        scheduler = BackupScheduler(
+            settings=settings, jobs=build_backup_jobs(settings, db, vault_backup)
+        )
+        scheduler.start()
+    app.state.scheduler = scheduler
+
     try:
         yield
     finally:
-        # Drain in-flight captures first (they may enqueue a backup), then flush the last
-        # pending commit before dropping the DB pool.
+        # Stop scheduling new jobs first (a job may enqueue a vault commit), then drain
+        # in-flight captures, flush the last pending commit, and drop the DB pool.
+        if scheduler is not None:
+            scheduler.shutdown()
         await pipeline.drain()
         await vault_backup.flush()
         await db.disconnect()

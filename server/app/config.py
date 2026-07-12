@@ -121,6 +121,8 @@ class Settings(BaseSettings):
     slack_user_token: str = ""
 
     # --- Scheduler (ADR-010) ---
+    # In-process APScheduler. Off by default; exactly one prod instance sets it true so the
+    # durability jobs (below) fire once. M4 extends the same scheduler with the agent window.
     enable_scheduler: bool = False
     # The app's single local timezone: drives scheduling AND vault-facing formatting
     # (frontmatter `created`, note filename dates) — the only two uses of TZ (CLAUDE.md
@@ -128,6 +130,21 @@ class Settings(BaseSettings):
     scheduler_tz: str = "Europe/Bucharest"
     agent_window_start_hour: int = 3
     agent_window_end_hour: int = 5
+    # A job whose fire time was missed by more than this (VPS down/restart) is skipped, not
+    # run late — the next night covers it (ADR-010). Tolerates in-window restart jitter.
+    scheduler_misfire_grace_seconds: int = 3600
+
+    # --- Durability schedule (ADR-010 window, ADR-014 §1/§6). Standard 5-field crontab, all
+    # evaluated in scheduler_tz. Staggered inside 03:00–05:00 to avoid RAM stacking on the VPS;
+    # M4 slots (Slack 03:00 / rescan 03:40 / summary 04:10 / review 04:40) are left free. ---
+    backup_data_sync_cron: str = "10 3 * * *"  # nightly /srv/data raw inputs → R2
+    backup_db_backup_cron: str = "25 3 * * *"  # nightly pg_dump → R2
+    integrity_drill_cron: str = "30 4 * * sun"  # weekly verify+clone drill (ADR-014 §6)
+    backup_vault_sweep_cron: str = "55 4 * * *"  # ADR-010 04:55 commit+push sweep
+    backup_vault_bundle_cron: str = "57 4 * * *"  # WORM `git bundle` right after the sweep
+    # /health `backups` leg degrades when the last successful integrity-drill is older than this
+    # (weekly cadence + one night of grace) or the latest drill failed (ADR-014 §6).
+    integrity_drill_max_age_days: int = 8
 
     # --- Web / CORS (dev only; in prod Caddy same-origins the app) ---
     cors_origins: CsvList = Field(default=["http://localhost:5173"])

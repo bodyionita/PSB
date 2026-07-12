@@ -89,3 +89,4 @@ class HealthResponse(BaseModel):
     db: bool
     vault: bool
     git_remote: bool
+    backups: bool  # M1 (ADR-014 §6): latest integrity-drill fresh + not failed

@@ -14,17 +14,15 @@ import asyncio
 import logging
 import sys
 
-from .config import Settings, get_settings
+from .config import get_settings
 from .db import Database
-from .services.agent_runs import PgAgentRunStore
-from .services.backup_jobs import BackupJobs
+from .services.backup_jobs import build_backup_jobs
 from .services.git_repo import GitRepo
-from .services.object_store import build_object_store
 from .services.vault_backup import VaultBackupService
 
 logger = logging.getLogger(__name__)
 
-# CLI name → BackupJobs method. Shared with the in-process scheduler (durability Slice B).
+# CLI name → BackupJobs method. Shared with the in-process scheduler (durability Slice B2).
 JOBS: dict[str, str] = {
     "vault-backup": "run_vault_bundle",
     "integrity-drill": "run_integrity_drill",
@@ -32,18 +30,6 @@ JOBS: dict[str, str] = {
     "data-sync": "run_data_sync",
     "vault-sweep": "run_vault_sweep",
 }
-
-
-def build_backup_jobs(
-    settings: Settings, db: Database, vault_backup: VaultBackupService
-) -> BackupJobs:
-    """Construct the durability jobs from settings + an (already-connected) db + vault backup."""
-    return BackupJobs(
-        settings=settings,
-        store=PgAgentRunStore(db),
-        object_store=build_object_store(settings),
-        vault_backup=vault_backup,
-    )
 
 
 async def run_job(name: str) -> None:
