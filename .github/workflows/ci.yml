@@ -55,6 +55,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm build        # tsc (strict) + vite production build
+      - name: Upload web build for the deploy job (Caddy serves this statically)
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 1
 
   deploy:
     # CI is the sole writer of deploy/.env (ADR-016): render defaults.env + GitHub
@@ -67,6 +74,13 @@ jobs:
       HAVE_VPS: ${{ secrets.VPS_HOST != '' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download the web build (from the web job) -> web/dist
+        if: env.HAVE_VPS == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
 
       - name: Render deploy/.env + origin TLS files (defaults.env + secrets)
         if: env.HAVE_VPS == 'true'
@@ -114,6 +128,17 @@ jobs:
             deploy/.env
             deploy/origin.crt
             deploy/origin.key
+          target: /srv/app
+          overwrite: true
+
+      - name: Copy the built PWA to the VPS (Caddy serves /srv/app/web/dist)
+        if: env.HAVE_VPS == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: web/dist              # path preserved -> /srv/app/web/dist
           target: /srv/app
           overwrite: true
 
