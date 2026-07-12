@@ -13,6 +13,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl ca-certificates nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
+# /srv/vault is bind-mounted and owned by the host 'deploy' user, but this container runs
+# as root — git refuses ("dubious ownership"). Mark it safe so the /health git-remote probe
+# and the M1 vault auto-backup (commit/push) work.
+RUN git config --global --add safe.directory /srv/vault
+
 # uv for env + lockfile + running (ADR-012), same tool as local dev.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv /root/.local/bin/uv /usr/local/bin/uv

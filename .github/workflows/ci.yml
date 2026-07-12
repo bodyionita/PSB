@@ -164,8 +164,11 @@ jobs:
             cd /srv/app
             chmod 600 deploy/.env deploy/origin.crt deploy/origin.key
             git pull --ff-only
-            docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
-            docker compose -f deploy/docker-compose.yml exec -T api uv run alembic upgrade head
+            # Interpolate compose vars (BRAINDAN_DOMAIN) from the NON-secret defaults.env, so
+            # compose never tries to interpolate the $-laden argon2 hash in .env. The api
+            # container still receives the real secrets via its `env_file: .env` (literal).
+            docker compose --env-file deploy/defaults.env -f deploy/docker-compose.yml up -d --build
+            docker compose --env-file deploy/defaults.env -f deploy/docker-compose.yml exec -T api uv run alembic upgrade head
 
       - name: Dormant notice
         if: env.HAVE_VPS != 'true'
