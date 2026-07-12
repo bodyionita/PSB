@@ -121,6 +121,8 @@ jobs:
           # printf %s writes the PEM literally; trailing newline is harmless to Caddy.
           printf '%s\n' "$ORIGIN_CERT_PEM" > deploy/origin.crt
           printf '%s\n' "$ORIGIN_KEY_PEM" > deploy/origin.key
+          # Diagnostic only (names/sizes/perms — no secret content is printed).
+          ls -l deploy/.env deploy/origin.crt deploy/origin.key
 
       - name: "Copy rendered .env + origin TLS files to the VPS (ADR-016/017 scp-of-a-file)"
         if: env.HAVE_VPS == 'true'
@@ -129,10 +131,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: |                        # paths preserved -> /srv/app/deploy/<file>
-            deploy/.env
-            deploy/origin.crt
-            deploy/origin.key
+          source: "deploy/.env,deploy/origin.crt,deploy/origin.key"   # -> /srv/app/deploy/<file>
           target: /srv/app
           overwrite: true
 
