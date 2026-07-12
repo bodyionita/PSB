@@ -5,9 +5,11 @@ the contract; this file only enforces it. Do not contradict an ADR without writi
 one in the docs repo.
 
 **Every session follows the [session protocol](../second-brain-docs/09-session-protocol.md):**
-run `/grilling` before coding, record decisions to docs, **pause before implementation** and
-between major tasks, and **commit + push docs at every pause**. Commit code freely while
-implementing; **push code only when the user asks**.
+**planning/replanning** sessions run `/grilling` first, record decisions to docs, and
+**pause before implementation**; **implementation** sessions build against the approved plan
+(no grilling), pausing between major tasks. Hit an unrecorded decision mid-implementation →
+stop and replan, don't decide inline. **Commit + push docs at every pause**; commit code
+freely while implementing but **push code only when the user asks**.
 
 ## Hard rules
 
