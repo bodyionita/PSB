@@ -89,23 +89,37 @@ if [ ! -f "$VAULT_DEPLOY_KEY" ]; then
   echo "    ----8<----"
   cat "${VAULT_DEPLOY_KEY}.pub"
   echo "    ---->8----"
-  echo "    Then re-run this script to clone the vault."
+  echo "    Then re-run this script AS ROOT to clone the vault and finish (incl. SSH hardening)."
 fi
 
 echo "==> Vault: restore from GitHub (source of truth lives in git, ADR-001)"
-if [ ! -d "$VAULT_DIR/.git" ]; then
-  if runuser -u "$DEPLOY_USER" -- \
+# VAULT_READY gates SSH hardening below: on a fresh box the vault deploy key is generated
+# here (private half never leaves), so the FIRST run cannot clone yet — the pubkey isn't on
+# GitHub. We therefore DON'T harden (disable root) until the box is actually complete, so both
+# passes run as root. Pass 1: prints the vault pubkey, clone fails, hardening deferred. Add the
+# key to the vault repo (write), then re-run AS ROOT: pass 2 clones and hardens (final step).
+VAULT_READY=0
+if [ -d "$VAULT_DIR/.git" ]; then
+  echo "    (vault already present)"
+  VAULT_READY=1
+elif runuser -u "$DEPLOY_USER" -- \
        env GIT_SSH_COMMAND="ssh -i $VAULT_DEPLOY_KEY -o IdentitiesOnly=yes" \
        git clone "$VAULT_REPO" "$VAULT_DIR"; then
-    echo "    Vault cloned to $VAULT_DIR"
-  else
-    echo "    (clone failed — add the deploy key above to $VAULT_REPO with write access, then re-run)"
-  fi
+  echo "    Vault cloned to $VAULT_DIR"
+  VAULT_READY=1
 else
-  echo "    (vault already present)"
+  echo "    (clone failed — add the deploy key above to $VAULT_REPO with WRITE access, then re-run)"
 fi
 
 echo "==> Harden SSH (FINAL step, guarded — ADR-018): keys-only, no root login"
+# Defer until the box is fully provisioned (vault cloned) so root stays reachable across the
+# two-pass vault-key bootstrap; re-running as root after adding the key completes + hardens.
+if [ "$VAULT_READY" -ne 1 ]; then
+  echo "    DEFERRED: vault not cloned yet, so the box isn't finished. Root login stays ENABLED." >&2
+  echo "    Add the vault deploy key printed above to $VAULT_REPO (write access), then re-run" >&2
+  echo "    this script AS ROOT to clone the vault and harden SSH. (Nothing else to redo.)" >&2
+  exit 0
+fi
 # Guard (fail-safe): never disable root login + password auth unless deploy has a usable key,
 # or this box locks out. Matches modern types incl. FIDO2 (sk-) and options-prefixed lines.
 if ! grep -qE "$KEYRE" "$DEPLOY_AK"; then
