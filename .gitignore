@@ -23,6 +23,8 @@ dist-ssr/
 # --- deploy / runtime secrets & data ---
 deploy/.env
 deploy/secrets/
+deploy/origin.crt          # CI-rendered origin TLS cert (ADR-017); never committed
+deploy/origin.key          # CI-rendered origin TLS key  (ADR-017); also caught by *.key
 srv/
 /data/
 *.log

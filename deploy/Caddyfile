@@ -1,8 +1,13 @@
 # Caddy: TLS termination + serves the PWA at / and proxies /api -> FastAPI (03-api.md).
-# Cloudflare in front is "Full (strict)"; Caddy gets a real cert for {$BRAINDAN_DOMAIN}.
-# Replace the domain via the BRAINDAN_DOMAIN env var (deploy/.env) at provisioning.
+# Cloudflare in front is "Full (strict)". Caddy serves a Cloudflare Origin CA cert via an
+# explicit `tls` directive (ADR-017) — NOT automatic ACME, which can't complete behind a
+# proxied :443 with :80 firewalled. The cert+key are CI-rendered files (deploy/origin.{crt,key},
+# mounted read-only by docker-compose). Replace the domain via BRAINDAN_DOMAIN (deploy/.env).
 
 {$BRAINDAN_DOMAIN:localhost} {
+	# Origin TLS: Cloudflare Origin CA cert/key, mounted by the caddy service (ADR-017).
+	tls /etc/caddy/origin.crt /etc/caddy/origin.key
+
 	encode zstd gzip
 
 	# API — everything under /api goes to the FastAPI container.

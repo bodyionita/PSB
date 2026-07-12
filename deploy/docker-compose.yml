@@ -14,10 +14,13 @@ services:
       # terminator. Interpolated from deploy/.env via `compose --env-file` (ADR-016).
       BRAINDAN_DOMAIN: ${BRAINDAN_DOMAIN:-localhost}
     ports:
-      - "80:80"
+      # :443 only — Cloudflare (Full strict) connects over HTTPS; the edge does HTTP->HTTPS.
+      # No :80: origin ACME is not used (explicit Origin CA cert, ADR-017) and UFW blocks 80.
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./origin.crt:/etc/caddy/origin.crt:ro   # Cloudflare Origin CA cert (CI-rendered, ADR-017)
+      - ./origin.key:/etc/caddy/origin.key:ro   # Cloudflare Origin CA key  (CI-rendered, ADR-017)
       - ../web/dist:/srv/web:ro          # static PWA build, served at /
       - caddy_data:/data
       - caddy_config:/config

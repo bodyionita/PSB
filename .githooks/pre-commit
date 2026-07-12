@@ -23,8 +23,8 @@ for f in $staged; do
         *) red "BLOCKED (secret file): $f"; fail=1 ;;
       esac ;;
     id_rsa|id_dsa|id_ecdsa|id_ed25519|id_rsa.*|id_ed25519.*|id_ecdsa.*|id_dsa.* \
-    |*.pem|*.key|*.p12|*.pfx|*.jks|*.keystore|*_rsa|*_ed25519)
-      red "BLOCKED (key material): $f"; fail=1 ;;
+    |*.pem|*.key|*.crt|*.p12|*.pfx|*.jks|*.keystore|*_rsa|*_ed25519)
+      red "BLOCKED (key/cert material): $f"; fail=1 ;;
   esac
 done
 

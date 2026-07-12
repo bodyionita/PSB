@@ -66,7 +66,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Render deploy/.env (defaults.env + secrets)
+      - name: Render deploy/.env + origin TLS files (defaults.env + secrets)
         if: env.HAVE_VPS == 'true'
         env:                          # values as env vars — NOT substituted into the script
           API_PASSWORD_HASH: ${{ secrets.API_PASSWORD_HASH }}
@@ -78,6 +78,8 @@ jobs:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          ORIGIN_CERT_PEM: ${{ secrets.ORIGIN_CERT_PEM }}
+          ORIGIN_KEY_PEM: ${{ secrets.ORIGIN_KEY_PEM }}
         run: |
           umask 077
           cp deploy/defaults.env deploy/.env
@@ -94,16 +96,23 @@ jobs:
             printf 'R2_ACCESS_KEY_ID=%s\n'     "$R2_ACCESS_KEY_ID"
             printf 'R2_SECRET_ACCESS_KEY=%s\n' "$R2_SECRET_ACCESS_KEY"
           } >> deploy/.env
+          # Origin CA cert/key as files (multi-line PEM), NOT .env keys (ADR-017).
+          # printf %s writes the PEM literally; trailing newline is harmless to Caddy.
+          printf '%s\n' "$ORIGIN_CERT_PEM" > deploy/origin.crt
+          printf '%s\n' "$ORIGIN_KEY_PEM" > deploy/origin.key
 
-      - name: Copy rendered .env to the VPS (ADR-016: scp-of-a-file)
+      - name: Copy rendered .env + origin TLS files to the VPS (ADR-016/017: scp-of-a-file)
         if: env.HAVE_VPS == 'true'
         uses: appleboy/scp-action@v0.1.7   # verify tag at go-live; job is dormant until then
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: deploy/.env
-          target: /srv/app                 # preserves path -> /srv/app/deploy/.env
+          source: |                        # paths preserved -> /srv/app/deploy/<file>
+            deploy/.env
+            deploy/origin.crt
+            deploy/origin.key
+          target: /srv/app
           overwrite: true
 
       - name: Deploy — secure perms, pull, build, migrate
@@ -116,7 +125,7 @@ jobs:
           script: |
             set -e
             cd /srv/app
-            chmod 600 deploy/.env
+            chmod 600 deploy/.env deploy/origin.crt deploy/origin.key
             git pull --ff-only
             docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
             docker compose -f deploy/docker-compose.yml exec -T api uv run alembic upgrade head
