@@ -56,3 +56,9 @@ pnpm build                                                 # type-check (tsc) + 
 ```
 
 See each subdirectory's `README.md` for details.
+
+## License
+
+Source-available under the **PolyForm Noncommercial License 1.0.0** ([LICENSE.md](LICENSE.md)):
+free for any noncommercial purpose, attribution required (keep the `Required Notice:` line).
+**Commercial use requires a separate paid license** — see [COMMERCIAL.md](COMMERCIAL.md).
