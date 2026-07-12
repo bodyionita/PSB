@@ -31,7 +31,11 @@ services:
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
     env_file:
-      - .env
+      # raw = no interpolation: the $-laden argon2 hash and other secrets pass to the
+      # container literally. Without this, Compose parses "$argon2id$v=19$m=..." as
+      # variables and blanks them, corrupting API_PASSWORD_HASH (and login).
+      - path: .env
+        format: raw
     environment:
       ENABLE_SCHEDULER: "true"           # exactly one instance; there is only one (ADR-003)
     volumes:
