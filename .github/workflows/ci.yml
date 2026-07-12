@@ -95,6 +95,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -115,6 +116,7 @@ jobs:
             printf 'DATABASE_URL=%s\n'         "$DATABASE_URL"
             printf 'OPENAI_API_KEY=%s\n'       "$OPENAI_API_KEY"
             printf 'NEBIUS_API_KEY=%s\n'       "$NEBIUS_API_KEY"
+            printf 'GROQ_API_KEY=%s\n'         "$GROQ_API_KEY"
             printf 'SLACK_USER_TOKEN=%s\n'     "$SLACK_USER_TOKEN"
             printf 'R2_ACCOUNT_ID=%s\n'        "$R2_ACCOUNT_ID"
             printf 'R2_ACCESS_KEY_ID=%s\n'     "$R2_ACCESS_KEY_ID"
