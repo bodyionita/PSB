@@ -50,6 +50,9 @@ class GitClient(Protocol):
     async def is_merging(self) -> bool: ...
     async def abort_merge(self) -> bool: ...
     async def head_sha(self) -> str | None: ...
+    async def commit_count(self) -> int: ...
+    async def tracked_file_count(self) -> int: ...
+    async def bundle_all(self, path: str) -> None: ...
 
 
 class GitRepo:
@@ -159,3 +162,29 @@ class GitRepo:
     async def head_sha(self) -> str | None:
         r = await self._run("rev-parse", "HEAD", check=False)
         return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+    async def commit_count(self) -> int:
+        # Total commits across all refs — a monotonic non-decreasing durability fingerprint (§6).
+        r = await self._run("rev-list", "--all", "--count", check=False)
+        return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else 0
+
+    async def tracked_file_count(self) -> int:
+        r = await self._run("ls-files", check=False)
+        return sum(1 for line in r.stdout.splitlines() if line.strip()) if r.returncode == 0 else 0
+
+    async def bundle_all(self, path: str) -> None:
+        # A self-contained, `git bundle verify`-able snapshot of the ENTIRE history (ADR-014 §1).
+        await self._run("bundle", "create", path, "--all")
+
+    async def verify_bundle(self, path: str) -> bool:
+        r = await self._run("bundle", "verify", path, check=False)
+        return r.returncode == 0
+
+    @staticmethod
+    async def clone_from(source: str, dest: str) -> None:
+        await asyncio.to_thread(
+            lambda: subprocess.run(
+                ["git", "clone", source, dest],
+                capture_output=True, text=True, timeout=120.0, check=True,
+            )
+        )

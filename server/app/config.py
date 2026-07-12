@@ -85,6 +85,15 @@ class Settings(BaseSettings):
     git_user_name: str = "Braindan"
     git_user_email: str = "braindan@braindan.local"
 
+    # --- Object storage / R2 backups (ADR-014 §1, §7) ---
+    # Secrets (rendered by CI into deploy/.env). Empty ⇒ backups disabled (dev), jobs skip.
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    # Non-secret. Endpoint is derived from the account id unless explicitly overridden.
+    r2_bucket: str = "braindan-backups"
+    r2_endpoint_url: str = ""
+
     # --- Provider registry (ADR-004) ---
     # OpenAI-compatible endpoints share one client; a new compatible provider is config-only.
     openai_api_key: str = ""

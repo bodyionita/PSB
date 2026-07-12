@@ -13,8 +13,11 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
+from app.services.backup_jobs import BackupJobs
 from app.services.git_repo import GitRepo
 from app.services.vault_backup import VaultBackupService
+
+from .fakes import FakeAgentRunStore, FakeObjectStore
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 
@@ -111,3 +114,26 @@ async def test_backup_heals_real_non_fast_forward(tmp_path: Path):
     _git(other, "pull")
     assert (other / "Ideas" / "remote.md").exists()
     assert (other / "Ideas" / "local.md").exists()  # both sides preserved by the merge
+
+
+async def test_vault_bundle_and_drill_roundtrip(tmp_path: Path):
+    # End-to-end with REAL git: bundle the live vault → R2 (fake store), then the drill downloads,
+    # verifies, clones, and asserts the fingerprint + monotonic count against the live repo.
+    work, _ = _init_work_with_remote(tmp_path)
+    settings = Settings(
+        vault_path=str(work), data_path=str(tmp_path / "data"), planes=["Ideas"], scheduler_tz="UTC"
+    )
+    vault_backup = VaultBackupService(settings=settings, git=GitRepo(str(work)))
+    await vault_backup.ensure_ready()  # bootstrap commit → a real history to bundle
+
+    obj, store = FakeObjectStore(), FakeAgentRunStore()
+    jobs = BackupJobs(settings=settings, store=store, object_store=obj, vault_backup=vault_backup)
+
+    await jobs.run_vault_bundle()
+    assert store.runs["run-1"].status == "succeeded", store.runs["run-1"].error
+    assert any(k.endswith(".bundle") for k in obj.objects)
+
+    # Uses the real default bundle_inspector (git bundle verify + clone) against the fake R2.
+    await jobs.run_integrity_drill()
+    drill = store.runs["run-2"]
+    assert drill.status == "succeeded", drill.error

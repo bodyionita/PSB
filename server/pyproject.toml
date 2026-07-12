@@ -11,6 +11,9 @@ dependencies = [
     "pydantic-settings>=2.3",
     "argon2-cffi>=23.1",
     "apscheduler>=3.10",
+    # Cloudflare R2 (S3 API) for the durability backups (ADR-014). Imported lazily — only a real
+    # R2ObjectStore pulls it, so tests/CI stay boto3-free.
+    "boto3>=1.34",
     "httpx>=0.27",
     "python-multipart>=0.0.9",
     # IANA tz database for zoneinfo (vault-facing local-time formatting) on platforms

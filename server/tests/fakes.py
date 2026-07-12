@@ -14,6 +14,7 @@ from app.providers.base import (
     ProviderUnavailable,
     STTProvider,
 )
+from app.services.agent_runs import RUNNING, AgentRun
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
 
@@ -116,6 +117,9 @@ class FakeGitRepo:
         self.non_ff_times = 0
         self.push_ok = True
         self.pull_ok = True
+        self.commit_count_value = 3
+        self.file_count_value = 5
+        self.bundles: list[str] = []
         self._merging = False
         # Optional gates to drive the concurrency regression test: commit() sets `commit_entered`
         # on entry and, if `commit_gate` is set, blocks until it is fired.
@@ -176,6 +180,69 @@ class FakeGitRepo:
 
     async def head_sha(self) -> str | None:
         return "deadbeef" if self._has_head else None
+
+    async def commit_count(self) -> int:
+        return self.commit_count_value
+
+    async def tracked_file_count(self) -> int:
+        return self.file_count_value
+
+    async def bundle_all(self, path: str) -> None:
+        # Write a placeholder so the job's read_bytes()/upload path exercises real file IO.
+        from pathlib import Path
+
+        Path(path).write_bytes(b"FAKE-BUNDLE")  # noqa: ASYNC240 — trivial test fake, not prod IO
+        self.bundles.append(path)
+
+
+class FakeObjectStore:
+    """In-memory ObjectStore for backup-job tests — no boto3, no network."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    async def put_bytes(
+        self, key: str, data: bytes, *, content_type: str = "application/octet-stream"
+    ) -> None:
+        self.objects[key] = data
+
+    async def get_bytes(self, key: str) -> bytes:
+        return self.objects[key]  # KeyError signals a missing object (job fails → visible)
+
+    async def list_keys(self, prefix: str) -> list[str]:
+        return sorted(k for k in self.objects if k.startswith(prefix))
+
+
+class FakeAgentRunStore:
+    """In-memory AgentRunStore for backup-job tests. `preloaded` overrides latest(agent)."""
+
+    def __init__(self) -> None:
+        self.runs: dict[str, AgentRun] = {}
+        self.preloaded: dict[str, AgentRun] = {}
+        self._seq = 0
+
+    async def start(self, agent: str) -> str:
+        self._seq += 1
+        run_id = f"run-{self._seq}"
+        self.runs[run_id] = AgentRun(id=run_id, agent=agent, status=RUNNING)
+        return run_id
+
+    async def finish(self, run_id, *, status, summary=None, details=None, error=None) -> None:
+        run = self.runs[run_id]
+        run.status = status
+        run.summary = summary
+        run.details = details or {}
+        run.error = error
+
+    async def latest(self, agent: str, *, status: str | None = None) -> AgentRun | None:
+        if agent in self.preloaded:
+            run = self.preloaded[agent]
+            return run if status is None or run.status == status else None
+        matching = [
+            r for r in self.runs.values()
+            if r.agent == agent and (status is None or r.status == status)
+        ]
+        return matching[-1] if matching else None
 
 
 class FakeCaptureStore:

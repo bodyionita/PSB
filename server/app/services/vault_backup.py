@@ -71,6 +71,22 @@ class BackupResult:
     pushed: bool
 
 
+@dataclass(frozen=True)
+class Fingerprint:
+    """Vault durability fingerprint (ADR-014 §6): HEAD sha + monotonic commit count + file count."""
+
+    head_sha: str | None
+    commit_count: int
+    file_count: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "head_sha": self.head_sha,
+            "commit_count": self.commit_count,
+            "file_count": self.file_count,
+        }
+
+
 class VaultBackupService:
     """Owns every git operation on the vault, behind one lock (ADR-014)."""
 
@@ -137,6 +153,26 @@ class VaultBackupService:
         self._closing = True
         await self._cancel_timer()
         return await self._commit_and_push(self._drain())
+
+    # --- durability snapshots (used by the nightly R2 bundle job) ----------------------------
+
+    async def snapshot_fingerprint(self) -> Fingerprint:
+        """Fingerprint the live repo (under the lock, so it never races a commit)."""
+        async with self._lock:
+            return await self._fingerprint()
+
+    async def write_bundle(self, path: str) -> Fingerprint:
+        """Write a full-history `git bundle` and return its fingerprint (both under the lock)."""
+        async with self._lock:
+            await self._git.bundle_all(path)
+            return await self._fingerprint()
+
+    async def _fingerprint(self) -> Fingerprint:
+        return Fingerprint(
+            head_sha=await self._git.head_sha(),
+            commit_count=await self._git.commit_count(),
+            file_count=await self._git.tracked_file_count(),
+        )
 
     # --- internals ---------------------------------------------------------------------------
 
