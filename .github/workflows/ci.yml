@@ -34,7 +34,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv python install 3.12
-      - run: uv sync --frozen || uv sync
+      # ruff/pytest live in the `dev` extra ([project.optional-dependencies]); plain
+      # `uv sync` installs only main deps, so the dev extra must be requested explicitly.
+      - run: uv sync --extra dev --frozen || uv sync --extra dev
       - run: uv run ruff check .
       - run: uv run pytest -q     # no live LLMs/DB — fakes only (08 testing policy)
 
@@ -45,8 +47,11 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
-      # pnpm version comes from web/package.json "packageManager" (Corepack).
+      # pnpm/action-setup is a `uses:` step, so it ignores this job's working-directory and
+      # can't read web/package.json's "packageManager" — pin the version to match it (9.15.0).
       - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
