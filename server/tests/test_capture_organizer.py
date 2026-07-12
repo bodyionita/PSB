@@ -90,6 +90,24 @@ def test_tags_cleaned_lowercased_deduped_and_capped():
     assert notes[0].tags == ("focus", "energy")
 
 
+def test_tags_slugified_to_valid_obsidian_tags():
+    # Spaces + punctuation → hyphen; purely-numeric dropped; nested-tag slash kept (02-data-model).
+    parsed = {
+        "notes": [
+            {
+                "title": "t",
+                "plane": "Ideas",
+                "tags": ["personal growth", "  self   care!! ", "2026", "work/focus"],
+                "body": "b",
+            }
+        ]
+    }
+    notes = validate_organizer_output(
+        parsed, planes=PLANES, inbox_plane=INBOX, max_notes=8, max_tags=12
+    )
+    assert notes[0].tags == ("personal-growth", "self-care", "work/focus")
+
+
 def test_notes_capped_at_max():
     parsed = {
         "notes": [{"title": f"t{i}", "plane": "Ideas", "body": "b"} for i in range(20)]

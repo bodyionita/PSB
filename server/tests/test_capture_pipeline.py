@@ -116,6 +116,42 @@ async def test_nudge_is_generated_from_raw_capture_not_notes(tmp_path: Path):
     assert seen_nudge_input == ["I had a calm, productive day."]  # raw capture, not notes summary
 
 
+async def test_reorganize_replaces_notes(tmp_path: Path):
+    # Admin re-organize re-runs organize on the stored raw text and replaces the notes (the
+    # English-only migration path). Old note soft-deleted, note_paths replaced.
+    def responder(messages):
+        if "organize a person's raw capture" in messages[0].content:
+            title = "Reorganized" if responder.calls else "Initial"
+            plane = "Personal" if responder.calls else "Ideas"
+            responder.calls += 1
+            return _organizer_json(plane=plane, title=title)
+        return "nudge?"
+
+    responder.calls = 0
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, store, _, runs, vault = _make_pipeline(tmp_path, chat=chat)
+
+    cid = await pipeline.create_text_capture("some raw text", created_at=CREATED)
+    await pipeline.drain()
+    first = store.records[cid].note_paths[0]
+    assert first == "Ideas/2026-07-12 Initial.md"
+
+    await pipeline.reorganize_capture(cid)
+    await pipeline.drain()
+
+    rec = store.records[cid]
+    assert rec.status == INDEXED
+    assert rec.note_paths == ["Personal/2026-07-12 Reorganized.md"]
+    assert not (vault / first).exists()  # old note soft-deleted from disk
+    assert any(r.details.get("kind", "").endswith("-reorganize") for r in runs.runs.values())
+
+
+async def test_reorganize_missing_capture_raises(tmp_path: Path):
+    pipeline, *_ = _make_pipeline(tmp_path)
+    with pytest.raises(CaptureNotFound):
+        await pipeline.reorganize_capture("does-not-exist")
+
+
 async def test_capture_writes_agent_runs_interaction_row(tmp_path: Path):
     # ADR-021: a successful voice capture logs one agent_runs row with the STT/organize
     # resolution + details, so the interaction is queryable (Supabase dashboard / view).

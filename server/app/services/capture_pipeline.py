@@ -21,6 +21,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -202,6 +203,16 @@ class CapturePipeline:
         await self._store.set_follow_up_answer(capture_id, answer)
         self._spawn(self._reprocess_with_follow_up(capture_id))
 
+    async def reorganize_capture(self, capture_id: str) -> None:
+        """Re-run organize on an existing capture's stored raw text and REPLACE its notes — the
+        admin re-run path (e.g. re-deriving notes after the organizer prompt changed to
+        English-only). Safe + idempotent: the raw input is never touched (never-lose), and notes
+        are replaced only on a successful organize. 202 semantics (runs in the background)."""
+        record = await self._store.get(capture_id)
+        if record is None:
+            raise CaptureNotFound(capture_id)
+        self._spawn(self._reorganize(capture_id))
+
     async def retry_capture(self, capture_id: str) -> None:
         """Re-run a ``failed`` capture from its first incomplete step (03-api; 409 otherwise).
 
@@ -332,27 +343,64 @@ class CapturePipeline:
             await self._safe_mark_failed(capture_id, f"{type(exc).__name__}: {exc}")
 
     async def _reprocess_with_follow_up(self, capture_id: str) -> None:
-        # Pass 2 is a second run over the same capture (ADR-019 §2) — its own agent_runs row so
-        # the re-organize model interaction is visible too (ADR-021).
-        run_id = await self._start_run()
-        inter = _Interaction(capture_id=capture_id, kind="")
-        try:
-            record = await self._store.get(capture_id)
-            if record is None:
-                await self._finish_run(
-                    run_id, RUN_SKIPPED, inter, summary="follow-up: capture vanished"
-                )
-                return
-            inter.kind = f"{record.kind}-followup"
-            combined = (
+        # Pass 2 (ADR-019 §2): re-organize the original capture + the follow-up answer.
+        def _combined(record: CaptureRecord) -> str:
+            return (
                 f"{record.raw_text or ''}\n\n"
                 f"[Follow-up] {record.follow_up_question}\n"
                 f"[Answer] {record.follow_up_answer}"
             ).strip()
 
+        await self._replace_notes_via_reorganize(
+            capture_id,
+            text_of=_combined,
+            kind_suffix="-followup",
+            commit_reason=f"capture {capture_id} follow-up",
+            fallback_msg=(
+                "follow-up re-organize unavailable; original notes kept (retry to re-apply)"
+            ),
+        )
+
+    async def _reorganize(self, capture_id: str) -> None:
+        # Admin re-organize: re-run organize on the stored raw capture (e.g. to re-derive notes
+        # under a changed organizer prompt — the English-only migration).
+        await self._replace_notes_via_reorganize(
+            capture_id,
+            text_of=lambda record: record.raw_text or "",
+            kind_suffix="-reorganize",
+            commit_reason=f"capture {capture_id} reorganize",
+            fallback_msg="re-organize unavailable; original notes kept (retry to re-apply)",
+        )
+
+    async def _replace_notes_via_reorganize(
+        self,
+        capture_id: str,
+        *,
+        text_of: Callable[[CaptureRecord], str],
+        kind_suffix: str,
+        commit_reason: str,
+        fallback_msg: str,
+    ) -> None:
+        """Shared re-organize core for Pass-2 (ADR-019 §2) and the admin re-organize path. Re-runs
+        organize on a derived text and, on success, soft-deletes the old notes then writes the
+        fresh set and REPLACES ``note_paths``. On the Inbox fallback (organize chain down) the
+        existing notes are KEPT and the capture fails retryably — a good set is never degraded to
+        an Inbox dump. Its own ``agent_runs`` row keeps the interaction visible (ADR-021)."""
+        run_id = await self._start_run()
+        inter = _Interaction(capture_id=capture_id, kind="")
+        label = kind_suffix.lstrip("-")
+        try:
+            record = await self._store.get(capture_id)
+            if record is None:
+                await self._finish_run(
+                    run_id, RUN_SKIPPED, inter, summary=f"{label}: capture vanished"
+                )
+                return
+            inter.kind = f"{record.kind}{kind_suffix}"
+
             await self._store.mark_status(capture_id, ORGANIZING)
             t0 = time.monotonic()
-            organize = await self._organize(combined)
+            organize = await self._organize(text_of(record))
             inter.timings_ms["organize"] = int((time.monotonic() - t0) * 1000)
             inter.organize = {
                 "model": organize.model_used or None,
@@ -362,17 +410,12 @@ class CapturePipeline:
             inter.model_used = organize.model_used or inter.model_used
             inter.fallback_used = organize.provider_fallback_used
             if organize.used_fallback:
-                # Organize chain unavailable — do NOT destroy the good Pass-1 notes. Keep them
-                # intact and fail retryably so the answer can be re-applied later. ADR-019 §2
-                # is about *enriching* the set; degrading a good set to an Inbox dump would
-                # violate that intent.
-                msg = "follow-up re-organize unavailable; original notes kept (retry to re-apply)"
-                await self._store.mark_failed(capture_id, msg)
-                await self._finish_run(run_id, RUN_FAILED, inter, error=msg)
+                await self._store.mark_failed(capture_id, fallback_msg)
+                await self._finish_run(run_id, RUN_FAILED, inter, error=fallback_msg)
                 return
 
-            # Soft-delete the Pass-1 notes, then write the enriched set and REPLACE note_paths
-            # (ADR-019 §2). Removal is a filesystem unlink; git history retains the content.
+            # Soft-delete the old notes, write the fresh set, REPLACE note_paths. Removal is a
+            # filesystem unlink; git history retains the content (ADR-014 §3).
             await asyncio.to_thread(self._notes.remove_notes, list(record.note_paths))
             created_local = self._local(record.created_at)
             paths = await asyncio.to_thread(
@@ -386,13 +429,12 @@ class CapturePipeline:
             await self._store.mark_status(capture_id, WRITTEN)
 
             await self._store.mark_status(capture_id, INDEXED)
-            await self._backup.request_commit(f"capture {capture_id} follow-up")
-            # No second nudge — ADR-019 ships exactly one.
+            await self._backup.request_commit(commit_reason)
             await self._finish_run(
                 run_id, RUN_SUCCEEDED, inter, summary=self._run_summary(inter, organize)
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("capture %s follow-up reprocess failed", capture_id)
+            logger.exception("capture %s %s failed", capture_id, label)
             await self._finish_run(run_id, RUN_FAILED, inter, error=f"{type(exc).__name__}: {exc}")
             await self._safe_mark_failed(capture_id, f"{type(exc).__name__}: {exc}")
 

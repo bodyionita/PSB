@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 # --- Versioned prompt constants (ADR-019 §4). Bump the suffix on any wording change. ---
 
-ORGANIZER_PROMPT_VERSION = "organizer-v1"
+ORGANIZER_PROMPT_VERSION = "organizer-v2"  # v2: vault is English-only; tags slugified
 NUDGE_PROMPT_VERSION = "nudge-v2"  # v2: sourced from the raw capture; explicit language match
 
 # Organic tagging (ADR-019 / M1 build decisions): emotional tone + the what/why around the
@@ -39,10 +39,12 @@ Rules:
 - "planes" is the full set of life areas the note touches (a superset of "plane"); use the
   configured planes only.
 - "tags" are organic and free-form: capture the emotional tone and the what/why around any
-  feelings, plus salient topics. No rigid taxonomy, lower-case, no "#".
+  feelings, plus salient topics. No rigid taxonomy. Each tag MUST be a valid Obsidian tag:
+  English, lower-case, a single word or hyphenated (e.g. "personal-growth"), NO spaces, no "#".
 - "body" is the cleaned, lightly-structured note content in Markdown (do not invent facts;
-  preserve the person's meaning and language).
-- Write in the same language as the capture.
+  preserve the person's meaning).
+- Write EVERY title, body, and tag in English. If the capture is in another language,
+  translate its meaning into natural English — do not leave phrases in the original language.
 
 Configured planes: {planes}
 """
@@ -121,6 +123,20 @@ def _canonical_plane(value: object, plane_lookup: dict[str, str], inbox_plane: s
     return plane_lookup.get(value.strip().lower(), inbox_plane)
 
 
+# Chars allowed in an Obsidian tag body; anything else (spaces, punctuation) is a separator.
+_TAG_INVALID = re.compile(r"[^a-z0-9_/-]+")
+
+
+def _slugify_tag(raw: str) -> str:
+    """Reduce a free-form tag to a valid Obsidian tag (02-data-model): lower-case, no spaces,
+    hyphenated. Obsidian tags allow letters/digits/``_ - /`` and MUST contain a non-numeric
+    character. Spaces/punctuation collapse to a single hyphen; a purely-numeric or empty result
+    is dropped (returns "")."""
+    tag = _TAG_INVALID.sub("-", raw.strip().lstrip("#").strip().lower())
+    tag = re.sub(r"-{2,}", "-", tag).strip("-/_")
+    return tag if any(c.isalpha() for c in tag) else ""
+
+
 def _clean_tags(value: object, *, max_tags: int) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
@@ -128,7 +144,7 @@ def _clean_tags(value: object, *, max_tags: int) -> tuple[str, ...]:
     for item in value:
         if not isinstance(item, str):
             continue
-        tag = item.strip().lstrip("#").strip().lower()
+        tag = _slugify_tag(item)
         if tag and tag not in seen:
             seen.append(tag)
         if len(seen) >= max_tags:

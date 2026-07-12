@@ -45,19 +45,40 @@ async def test_ensure_ready_bootstraps_empty_repo(tmp_path: Path):
     assert (vault / "Ideas" / ".gitkeep").exists()
     gitignore = (vault / ".gitignore").read_text(encoding="utf-8")
     assert ".obsidian/workspace*" in gitignore
+    assert ".idea/" in gitignore  # JetBrains cruft ignored (added M1)
+    # .gitattributes ships in the bootstrap commit so notes are LF everywhere (no CRLF churn).
+    assert "*.md text eol=lf" in (vault / ".gitattributes").read_text(encoding="utf-8")
     # No active ignore pattern touches .trash — soft-deleted notes stay tracked (ADR-014 §3).
     ignore_lines = [ln for ln in gitignore.splitlines() if ln and not ln.startswith("#")]
     assert not any(".trash" in ln for ln in ignore_lines)
 
 
-async def test_ensure_ready_existing_repo_no_bootstrap(tmp_path: Path):
+async def test_ensure_ready_existing_repo_adds_missing_housekeeping(tmp_path: Path):
+    # An existing vault that predates the housekeeping files gets them added (one commit), but is
+    # NOT re-bootstrapped.
     git = FakeGitRepo(is_repo=True, has_head=True)
     service, git = _service(tmp_path, git)
     await service.ensure_ready()
 
     assert git.inited is False
-    assert git.commits == []  # not empty → no bootstrap commit
+    assert git.commits == ["housekeeping: .gitignore + .gitattributes"]  # no bootstrap commit
     assert git.config["gc.auto"] == "0"  # config still pinned
+    assert (tmp_path / "vault" / ".gitattributes").exists()
+
+
+async def test_ensure_ready_housekeeping_idempotent_when_current(tmp_path: Path):
+    # If the housekeeping files already match, ensure_ready makes no commit (true idempotency).
+    from app.services.vault_backup import _GITATTRIBUTES, _GITIGNORE
+
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    (vault / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
+    (vault / ".gitattributes").write_text(_GITATTRIBUTES, encoding="utf-8")
+    git = FakeGitRepo(is_repo=True, has_head=True)
+    service, git = _service(tmp_path, git)
+    await service.ensure_ready()
+
+    assert git.commits == []
 
 
 async def test_debounced_commit_fires_and_pushes(tmp_path: Path):
@@ -89,7 +110,8 @@ async def test_push_heals_on_non_fast_forward(tmp_path: Path):
     result = await service.backup_now("manual")
 
     assert result.committed is True and result.pushed is True
-    assert git.pushes == 2 and git.pulls == 1 and git.aborts == 0
+    # 1 proactive pull (pull-first) + 1 heal pull on the non-ff rejection; then the retry pushes.
+    assert git.pushes == 2 and git.pulls == 2 and git.aborts == 0
 
 
 async def test_push_heal_merge_failure_aborts_and_keeps_local(tmp_path: Path):

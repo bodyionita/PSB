@@ -42,13 +42,21 @@ _DURABILITY_CONFIG: tuple[tuple[str, str], ...] = (
     ("gc.auto", "0"),
 )
 
-# ADR-014 §3: the vault .gitignore excludes ONLY Obsidian UI cache + OS cruft — never notes,
-# never .trash (soft-deleted notes stay committed and backed up).
+# ADR-014 §3: the vault .gitignore excludes ONLY editor/OS cruft — never notes, never .trash
+# (soft-deleted notes stay committed and backed up).
 _GITIGNORE = """\
-# ADR-014 §3 — exclude only Obsidian UI cache + OS cruft. Never notes, never .trash.
+# ADR-014 §3 — exclude only editor/OS cruft. Never notes, never .trash.
 .obsidian/workspace*
+.idea/
 .DS_Store
 Thumbs.db
+"""
+
+# Normalise line endings so editing a note on any OS (esp. Windows/Obsidian, which rewrites
+# CRLF→LF) doesn't surface spurious whole-file diffs. Notes are always stored LF in the repo.
+_GITATTRIBUTES = """\
+* text=auto eol=lf
+*.md text eol=lf
 """
 
 _MAX_MESSAGE_CHARS = 500
@@ -104,12 +112,22 @@ class VaultBackupService:
     # --- startup -----------------------------------------------------------------------------
 
     async def ensure_ready(self) -> None:
-        """Idempotent boot step: init if needed, pin gc/reflog + identity, bootstrap if empty."""
+        """Idempotent boot step: init if needed, pin gc/reflog + identity, bootstrap if empty,
+        and reconcile the housekeeping files (.gitignore/.gitattributes) with the current repo."""
         if not await self._git.is_repo():
             await self._git.init(self._branch)
         await self._apply_config()
         if not await self._git.has_head():
             await self._bootstrap_skeleton()
+        await self._ensure_housekeeping()
+
+    async def _ensure_housekeeping(self) -> None:
+        """Keep the vault's .gitignore + .gitattributes matching the canonical content on every
+        boot (an existing vault predating a change gets updated), committing + pushing only if
+        they actually changed. Idempotent — a no-op once the repo is current."""
+        changed = await asyncio.to_thread(_write_housekeeping, self._settings.vault_path)
+        if changed:
+            await self._commit_and_push(["housekeeping: .gitignore + .gitattributes"])
 
     async def _apply_config(self) -> None:
         for key, value in _DURABILITY_CONFIG:
@@ -209,8 +227,22 @@ class VaultBackupService:
             if await self._git.has_staged_changes():
                 await self._git.commit(self._message(reasons))
                 committed = True
+            # Pull-first (ADR-014 amendment): integrate remote edits (made on GitHub or another
+            # device) before pushing, so the push is a plain fast-forward and the local vault
+            # stays current. Done AFTER committing local work so the tree is clean for the merge.
+            await self._integrate_remote()
             pushed = await self._push_with_heal()
             return BackupResult(committed=committed, pushed=pushed)
+
+    async def _integrate_remote(self) -> None:
+        """Best-effort merge-pull of the remote before pushing. An unreachable remote or a
+        conflicting merge must never lose the local commit (§5): clean up any half-merge and
+        carry on — ``_push_with_heal`` still tries, and the next backup reconciles."""
+        if not await self._git.has_remote(self._remote):
+            return
+        if not await self._git.pull_merge(self._remote, self._branch):
+            if await self._git.is_merging():
+                await self._git.abort_merge()
 
     async def _push_with_heal(self) -> bool:
         if not await self._git.has_remote(self._remote):
@@ -262,4 +294,21 @@ def _write_skeleton(vault_path: str, planes: list[str], inbox_plane: str) -> Non
         target = root / folder
         target.mkdir(parents=True, exist_ok=True)
         (target / ".gitkeep").touch()
-    (root / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
+    # Housekeeping files in the bootstrap commit so a fresh vault needs no follow-up commit.
+    _write_housekeeping(vault_path)
+
+
+def _write_housekeeping(vault_path: str) -> bool:
+    """Ensure .gitignore + .gitattributes match the canonical content. Writes only files whose
+    content differs; returns True if any changed (so the caller commits). Newline-exact so an
+    unchanged repo is a genuine no-op."""
+    root = Path(vault_path)
+    root.mkdir(parents=True, exist_ok=True)
+    changed = False
+    for name, content in ((".gitignore", _GITIGNORE), (".gitattributes", _GITATTRIBUTES)):
+        path = root / name
+        current = path.read_text(encoding="utf-8") if path.exists() else None
+        if current != content:
+            path.write_text(content, encoding="utf-8")
+            changed = True
+    return changed
