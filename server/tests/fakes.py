@@ -7,6 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from app.indexing.indexer import IndexOutcome
+from app.indexing.store import NoteUpsert
 from app.providers.base import (
     ChatMessage,
     ChatProvider,
@@ -73,15 +75,59 @@ class FakeSTTProvider(STTProvider):
 
 
 class FakeEmbeddingProvider(EmbeddingProvider):
-    def __init__(self, id: str = "fake-embed", dim: int = 8) -> None:
+    """Deterministic embedder: each text → ``[len(text)] * dim``. Records the exact inputs (so a
+    test can assert the ``search_document:`` prefix) and can be flipped unavailable."""
+
+    def __init__(self, id: str = "fake-embed", dim: int = 8, *, available: bool = True) -> None:
         self.id = id
         self._dim = dim
+        self._available = available
+        self.inputs: list[list[str]] = []
 
     async def health(self) -> bool:
-        return True
+        return self._available
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.inputs.append(list(texts))
+        if not self._available:
+            raise ProviderUnavailable(f"{self.id} is down")
         return [[float(len(t))] * self._dim for t in texts]
+
+
+class FakeIndexStore:
+    """In-memory IndexStore for indexer tests — no live DB (08 testing policy). Keeps the last
+    upserted :class:`NoteUpsert` per path so a test can inspect chunks / mean-pooled embedding."""
+
+    def __init__(self) -> None:
+        self.notes: dict[str, NoteUpsert] = {}
+
+    async def get_content_hash(self, vault_path: str) -> str | None:
+        note = self.notes.get(vault_path)
+        return note.content_hash if note is not None else None
+
+    async def upsert_note(self, note: NoteUpsert) -> None:
+        self.notes[note.vault_path] = note
+
+    async def list_indexed_paths(self) -> set[str]:
+        return set(self.notes)
+
+    async def delete_notes(self, vault_paths: list[str]) -> int:
+        count = 0
+        for path in vault_paths:
+            if self.notes.pop(path, None) is not None:
+                count += 1
+        return count
+
+
+class FakeIndexer:
+    """Records the paths the capture pipeline asks it to index; returns a clean IndexOutcome."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def index_paths(self, vault_paths: list[str]) -> IndexOutcome:
+        self.calls.append(list(vault_paths))
+        return IndexOutcome(indexed=len(vault_paths))
 
 
 @dataclass

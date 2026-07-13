@@ -16,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from .capture.notes import NoteWriter
 from .config import Settings, get_settings
 from .db import Database
+from .indexing.indexer import Indexer
+from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
 from .providers.registry import build_registry
 from .routers import admin, auth, capture, health
@@ -52,6 +54,13 @@ async def lifespan(app: FastAPI):
     await vault_backup.ensure_ready()
     app.state.vault_backup = vault_backup
 
+    # Indexer (M2, ADR-022/023): the real index step — vault notes → notes/chunks. Owns
+    # embed-on-index; the capture pipeline calls it to index freshly-written notes.
+    indexer = Indexer(
+        settings=settings, store=PgIndexStore(db), registry=app.state.registry
+    )
+    app.state.indexer = indexer
+
     # Capture pipeline (M1, ADR-019): in-process, notes-to-vault, backed by the real vault backup.
     pipeline = CapturePipeline(
         settings=settings,
@@ -60,6 +69,7 @@ async def lifespan(app: FastAPI):
         note_writer=NoteWriter(settings.vault_path),
         vault_backup=vault_backup,
         run_store=PgAgentRunStore(db),
+        indexer=indexer,
     )
     app.state.capture_pipeline = pipeline
 

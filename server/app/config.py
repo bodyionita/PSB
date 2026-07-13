@@ -136,6 +136,12 @@ class Settings(BaseSettings):
     chunk_size: int = 1200
     chunk_overlap: int = 200
 
+    # --- Indexer (M2, ADR-022). A note's chunks are batch-embedded in one call; a transient
+    # embedder failure (e.g. Ollama 429/restart) is retried with exponential backoff before the
+    # note is skipped (skip-and-continue → the run is `partial`, a later reindex retries it). ---
+    embed_max_attempts: int = 3
+    embed_retry_backoff_seconds: float = 1.0
+
     # --- Connectors ---
     slack_user_token: str = ""
 

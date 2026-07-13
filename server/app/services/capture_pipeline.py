@@ -37,6 +37,7 @@ from ..capture.organizer import (
     validate_organizer_output,
 )
 from ..config import Settings
+from ..indexing.indexer import NoteIndexer
 from ..providers.base import ChatMessage, ProviderUnavailable, TranscriptResult
 from ..providers.registry import ProviderRegistry
 from .agent_runs import (
@@ -88,6 +89,7 @@ class _Interaction:
         self.stt: dict[str, Any] | None = None
         self.organize: dict[str, Any] | None = None
         self.nudge: dict[str, Any] | None = None
+        self.index: dict[str, Any] | None = None
         self.timings_ms: dict[str, int] = {}
         # Top-level agent_runs columns: organize model wins; any step's fallback flips the flag.
         self.model_used: str | None = None
@@ -104,6 +106,7 @@ class _Interaction:
             "stt": self.stt,
             "organize": self.organize,
             "nudge": self.nudge,
+            "index": self.index,
             "timings_ms": self.timings_ms,
         }
 
@@ -138,6 +141,7 @@ class CapturePipeline:
         note_writer: NoteWriter,
         vault_backup: VaultBackup,
         run_store: AgentRunStore,
+        indexer: NoteIndexer,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -145,6 +149,7 @@ class CapturePipeline:
         self._notes = note_writer
         self._backup = vault_backup
         self._runs = run_store
+        self._indexer = indexer
         self._tz = ZoneInfo(settings.scheduler_tz)
         # Strong refs to in-flight background tasks so they are not GC'd mid-run.
         self._tasks: set[asyncio.Task] = set()
@@ -322,8 +327,10 @@ class CapturePipeline:
             # `written` reflects notes actually on disk (matters for a future retry-resume).
             await self._store.mark_status(capture_id, WRITTEN)
 
-            # Index step is a no-op stub in M1 (notes/chunks stay empty until M2); it only
-            # advances the status. Keeps the supersede path pure filesystem+git.
+            # Index the freshly-written notes into the search index (M2, 04 §3). Best-effort:
+            # the notes are already durably in the vault (truth), so an embed/index failure must
+            # not fail the capture — it just leaves the note stale until the next reindex.
+            inter.index = await self._index_notes(paths)
             await self._store.mark_status(capture_id, INDEXED)
             await self._backup.request_commit(f"capture {capture_id}")
 
@@ -428,6 +435,7 @@ class CapturePipeline:
             await self._store.set_note_paths(capture_id, paths)
             await self._store.mark_status(capture_id, WRITTEN)
 
+            inter.index = await self._index_notes(paths)
             await self._store.mark_status(capture_id, INDEXED)
             await self._backup.request_commit(commit_reason)
             await self._finish_run(
@@ -437,6 +445,21 @@ class CapturePipeline:
             logger.exception("capture %s %s failed", capture_id, label)
             await self._finish_run(run_id, RUN_FAILED, inter, error=f"{type(exc).__name__}: {exc}")
             await self._safe_mark_failed(capture_id, f"{type(exc).__name__}: {exc}")
+
+    async def _index_notes(self, paths: list[str]) -> dict[str, Any]:
+        """Index the just-written notes; return a summary for the interaction log (ADR-021).
+
+        The vault is truth (rule 1) and the notes are already on disk, so indexing is best-effort:
+        the indexer swallows per-note failures (skip-and-continue → ``partial``), and any
+        unexpected error here is logged, not propagated — it must never flip an already-written
+        capture to ``failed``. A stale note is reconciled by the next reindex.
+        """
+        try:
+            outcome = await self._indexer.index_paths(paths)
+            return outcome.as_dict()
+        except Exception as exc:  # noqa: BLE001 — indexing must not fail a written capture
+            logger.exception("indexing failed for capture notes %s (ignored)", paths)
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
     async def _organize(self, text: str) -> OrganizeResult:
         """Run the organize chain and validate; unusable output → single Inbox note."""

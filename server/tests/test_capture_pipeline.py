@@ -24,6 +24,7 @@ from .fakes import (
     FakeAgentRunStore,
     FakeCaptureStore,
     FakeChatProvider,
+    FakeIndexer,
     FakeSTTProvider,
     FakeVaultBackup,
 )
@@ -50,6 +51,7 @@ def _make_pipeline(
     chat: FakeChatProvider | None = None,
     stt: FakeSTTProvider | None = None,
     run_store: object | None = None,
+    indexer: FakeIndexer | None = None,
 ):
     settings = Settings(
         vault_path=str(tmp_path / "vault"),
@@ -69,6 +71,7 @@ def _make_pipeline(
     store = FakeCaptureStore()
     backup = FakeVaultBackup()
     runs = run_store if run_store is not None else FakeAgentRunStore()
+    indexer = indexer if indexer is not None else FakeIndexer()
     pipeline = CapturePipeline(
         settings=settings,
         store=store,
@@ -76,6 +79,7 @@ def _make_pipeline(
         note_writer=NoteWriter(str(tmp_path / "vault")),
         vault_backup=backup,
         run_store=runs,
+        indexer=indexer,
     )
     return pipeline, store, backup, runs, tmp_path / "vault"
 
@@ -93,6 +97,27 @@ async def test_text_capture_happy_path(tmp_path: Path):
     assert rec.follow_up_question == "What felt most alive about that?"
     # Vault backup requested once for the write batch.
     assert backup.reasons == [f"capture {cid}"]
+
+
+async def test_written_notes_are_indexed_and_outcome_logged(tmp_path: Path):
+    # The M2 index step (replacing the M1 stub): the freshly-written notes are handed to the
+    # indexer, and the outcome is recorded in the capture's agent_runs details (ADR-021).
+    indexer = FakeIndexer()
+    runs = FakeAgentRunStore()
+    pipeline, store, _, _, _ = _make_pipeline(tmp_path, indexer=indexer, run_store=runs)
+    cid = await pipeline.create_text_capture("I had a calm, productive day.", created_at=CREATED)
+    await pipeline.drain()
+
+    assert indexer.calls == [store.records[cid].note_paths]  # exactly the written notes
+    run = next(iter(runs.runs.values()))
+    assert run.details["index"] == {
+        "indexed": 1,
+        "skipped": 0,
+        "failed": 0,
+        "deleted": 0,
+        "partial": False,
+        "failures": [],
+    }
 
 
 async def test_nudge_is_generated_from_raw_capture_not_notes(tmp_path: Path):
