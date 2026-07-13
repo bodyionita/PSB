@@ -3,10 +3,12 @@
 The DB alias index *is* the GIN over ``nodes.aliases`` (migration 005); this store exposes the one
 read the resolver needs: given a mention's surface form + the entity-like types, the **existing
 candidate nodes** whose aliases (or title) match. Matching is exact on the *normalized* form
-(lower-cased, whitespace-collapsed) — the organizer maintains alias variants, so
-``Alex``/``Alexandru``/``my brother`` all resolve to one hub once recorded (ADR-030). Fuzzy
-(trigram) matching is a documented follow-up: migration 005 does not enable ``pg_trgm``, and
-ADR-032's entropy guard means short aliases must never fuzzy-link anyway — exact-or-review.
+(lower-cased, whitespace-collapsed): any surface form already recorded on an entity's ``aliases``
+resolves to that hub, but an *un-recorded* variant (``Alexandru`` when only ``Alex`` is stored)
+does not yet collapse. **Two pieces are a documented M3 follow-up** (see 08-logs/m3.md): fuzzy
+(trigram) matching — migration 005 does not enable ``pg_trgm``, and ADR-032's entropy guard means
+short aliases must never fuzzy-link anyway — and *alias accretion* (recording a newly-met surface
+form onto the matched entity so it resolves next time).
 
 The resolver depends on the :class:`AliasStore` *protocol*, so it unit-tests against an in-memory
 fake (no live DB in CI). :class:`PgAliasStore` is the plain-SQL asyncpg implementation.

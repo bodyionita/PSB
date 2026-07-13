@@ -9,11 +9,12 @@ Given the entity **mentions** the organizer extracted from a capture, resolve ea
     goes to the **review queue** (``entity-ambiguity``) with the edge left **pending** — never
     guessed (ADR-030 §3). A down resolver chain also routes to review, never a guess.
 
-Two adopted refinements (ADR-032 §2): an **intra-capture dedup** pass (the same new entity
-mentioned twice in one capture mints one node) and an **entropy guard** (an empty/degenerate
-mention is dropped, not minted). Fuzzy matching itself is a documented follow-up (needs
-``pg_trgm``); until then matching is exact-on-normalized, which the organizer's alias maintenance
-makes sufficient for the common case.
+One adopted refinement (ADR-032 §2): an **intra-capture dedup** pass (the same new entity mentioned
+twice in one capture mints one node), plus an **entropy guard** (an empty/degenerate mention is
+dropped, not minted). Matching is exact-on-normalized for M3; fuzzy matching and cross-capture
+*alias accretion* (recording a newly-met surface form onto the matched entity) are documented
+follow-ups (see 08-logs/m3.md) — so distinct surface forms of the same entity across captures do
+not yet collapse to one hub.
 
 The resolver depends on protocols (``AliasStore``, ``ReviewQueue``) + the provider registry, so it
 unit-tests against fakes (no live DB/LLM in CI — 08 testing policy).

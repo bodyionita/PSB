@@ -34,7 +34,7 @@ from typing import Protocol
 from ..config import Settings
 from ..providers.base import ProviderUnavailable
 from ..providers.registry import ProviderRegistry
-from .chunking import chunk_note
+from .chunking import chunk_node
 from .frontmatter import NodeMetadata, parse_node_metadata
 from .store import CanonicalEdge, IndexStore, NodeChunk, NodeUpsert
 
@@ -172,7 +172,7 @@ class Indexer:
                 await self._store.update_node_path(meta.id, store_path)
             return _Result.SKIPPED, meta
 
-        chunks = chunk_note(
+        chunks = chunk_node(
             raw_text,
             chunk_size=self._settings.chunk_size,
             chunk_overlap=self._settings.chunk_overlap,

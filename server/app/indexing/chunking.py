@@ -48,7 +48,7 @@ def split_frontmatter(text: str) -> tuple[str | None, str]:
     return inner, text[match.end() :]
 
 
-def chunk_note(text: str, *, chunk_size: int, chunk_overlap: int) -> list[str]:
+def chunk_node(text: str, *, chunk_size: int, chunk_overlap: int) -> list[str]:
     """Full node text → retrieval chunks: strip frontmatter, then chunk (02 §4).
 
     This is what the indexer feeds to the embedder. Only frontmatter is removed — a node's

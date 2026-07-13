@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.indexing.chunking import chunk_note, chunk_text, split_frontmatter
+from app.indexing.chunking import chunk_node, chunk_text, split_frontmatter
 
 # --- frontmatter stripping --------------------------------------------------------------
 
@@ -34,20 +34,20 @@ def test_split_frontmatter_handles_empty_block():
     assert body == "body"
 
 
-# --- chunk_note: the indexer entry point ------------------------------------------------
+# --- chunk_node: the indexer entry point ------------------------------------------------
 
 
-def test_chunk_note_strips_frontmatter_only():
+def test_chunk_node_strips_frontmatter_only():
     text = "---\nid: abc\ntype: memory\ntags: [x]\n---\n# Title\n\nthe body"
-    chunks = chunk_note(text, chunk_size=1200, chunk_overlap=200)
+    chunks = chunk_node(text, chunk_size=1200, chunk_overlap=200)
     assert chunks == ["# Title\n\nthe body"]
     assert all("id: abc" not in c for c in chunks)  # frontmatter never survives into the embed
 
 
-def test_chunk_note_keeps_a_prose_related_section():
+def test_chunk_node_keeps_a_prose_related_section():
     # There is no co-capture stripping anymore — a "## Related" prose section is just content.
     text = "---\nid: x\n---\n# Note\n\ncontent\n\n## Related\n\nsee last week's chat"
-    chunks = chunk_note(text, chunk_size=1200, chunk_overlap=200)
+    chunks = chunk_node(text, chunk_size=1200, chunk_overlap=200)
     assert any("Related" in c for c in chunks)
 
 
@@ -98,7 +98,7 @@ def test_hard_split_covers_all_content_with_overlap():
 def test_empty_or_whitespace_yields_no_chunks():
     assert chunk_text("", chunk_size=1200, chunk_overlap=200) == []
     assert chunk_text("   \n\n\t\n", chunk_size=1200, chunk_overlap=200) == []
-    assert chunk_note("---\nid: x\n---\n", chunk_size=1200, chunk_overlap=200) == []
+    assert chunk_node("---\nid: x\n---\n", chunk_size=1200, chunk_overlap=200) == []
 
 
 def test_crlf_is_normalized():
