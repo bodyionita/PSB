@@ -205,6 +205,55 @@ class FakeGraphStore:
         return list(self._paths)
 
 
+class FakeTagStore:
+    """In-memory TagStore for tag-vocabulary + consolidation tests — no live DB.
+
+    ``counts`` seeds the vocabulary (tag → note frequency); ``notes_by_tag`` maps a tag to the
+    vault paths carrying it (for the consolidation apply lookup)."""
+
+    def __init__(
+        self,
+        *,
+        counts: list[tuple[str, int]] | None = None,
+        notes_by_tag: dict[str, list[str]] | None = None,
+    ) -> None:
+        self._counts = counts or []
+        self._notes_by_tag = notes_by_tag or {}
+        self.vocab_calls: list[int] = []
+
+    async def tag_counts(self, *, limit: int):
+        from app.tags.store import TagCount
+
+        self.vocab_calls.append(limit)
+        return [TagCount(tag=t, count=n) for t, n in self._counts[:limit]]
+
+    async def vocabulary_tags(self, *, limit: int) -> list[str]:
+        return [tc.tag for tc in await self.tag_counts(limit=limit)]
+
+    async def notes_with_any_tag(self, tags: list[str]):
+        from app.tags.store import TaggedNote
+
+        paths: list[str] = []
+        for tag in tags:
+            for path in self._notes_by_tag.get(tag, []):
+                if path not in paths:
+                    paths.append(path)
+        return [TaggedNote(vault_path=p) for p in sorted(paths)]
+
+
+class FakeCommitBackup:
+    """Records forced commit+push calls (the VaultCommitter surface the tags apply needs)."""
+
+    def __init__(self) -> None:
+        self.reasons: list[str] = []
+
+    async def backup_now(self, reason: str = "manual backup"):
+        from app.services.vault_backup import BackupResult
+
+        self.reasons.append(reason)
+        return BackupResult(committed=True, pushed=True)
+
+
 class FakeGitRepo:
     """In-memory GitClient for VaultBackupService orchestration tests (no real git).
 

@@ -35,6 +35,8 @@ from .services.rate_limit import RateLimiter
 from .services.reindex import ReindexService
 from .services.scheduler import BackupScheduler
 from .services.vault_backup import VaultBackupService
+from .tags.service import TagConsolidationService
+from .tags.store import PgTagStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -89,7 +91,22 @@ async def lifespan(app: FastAPI):
         settings=settings, store=PgSearchStore(db), registry=app.state.registry
     )
 
+    # Tags (M2, ADR-024): the live tag vocabulary (organizer reuse) + the manual two-step
+    # consolidation tool (propose → apply). One store; the consolidation service reuses the
+    # indexer + vault backup for the apply's rewrite-and-reindex.
+    tag_store = PgTagStore(db)
+    app.state.tag_store = tag_store
+    app.state.tag_consolidation_service = TagConsolidationService(
+        settings=settings,
+        store=tag_store,
+        registry=app.state.registry,
+        indexer=indexer,
+        vault_backup=vault_backup,
+        run_store=PgAgentRunStore(db),
+    )
+
     # Capture pipeline (M1, ADR-019): in-process, notes-to-vault, backed by the real vault backup.
+    # The tag store feeds the organizer prompt the live vocabulary (ADR-024 §1).
     pipeline = CapturePipeline(
         settings=settings,
         store=PgCaptureStore(db),
@@ -98,6 +115,7 @@ async def lifespan(app: FastAPI):
         vault_backup=vault_backup,
         run_store=PgAgentRunStore(db),
         indexer=indexer,
+        tag_vocabulary=tag_store,
     )
     app.state.capture_pipeline = pipeline
 
@@ -128,6 +146,7 @@ async def lifespan(app: FastAPI):
         if scheduler is not None:
             scheduler.shutdown()
         await reindex_service.drain()
+        await app.state.tag_consolidation_service.drain()
         await pipeline.drain()
         await vault_backup.flush()
         await db.disconnect()

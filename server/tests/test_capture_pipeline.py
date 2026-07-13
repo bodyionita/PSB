@@ -32,6 +32,25 @@ from .fakes import (
 CREATED = datetime(2026, 7, 12, 12, 0, 0, tzinfo=UTC)
 
 
+class FakeTagVocabulary:
+    """Returns a preset tag vocabulary, recording the limit it was asked for (ADR-024 §1)."""
+
+    def __init__(self, tags: list[str]) -> None:
+        self._tags = tags
+        self.calls: list[int] = []
+
+    async def vocabulary_tags(self, *, limit: int) -> list[str]:
+        self.calls.append(limit)
+        return self._tags[:limit]
+
+
+class BrokenTagVocabulary:
+    """A vocabulary source that always errors — the pipeline must degrade, not fail (rule 2/7)."""
+
+    async def vocabulary_tags(self, *, limit: int) -> list[str]:
+        raise RuntimeError("index unavailable")
+
+
 def _organizer_json(plane: str = "Ideas", title: str = "A thought") -> str:
     note = {"title": title, "plane": plane, "planes": [plane], "tags": ["calm"], "body": "b"}
     return json.dumps({"notes": [note]})
@@ -52,6 +71,7 @@ def _make_pipeline(
     stt: FakeSTTProvider | None = None,
     run_store: object | None = None,
     indexer: FakeIndexer | None = None,
+    tag_vocabulary: object | None = None,
 ):
     settings = Settings(
         vault_path=str(tmp_path / "vault"),
@@ -80,6 +100,7 @@ def _make_pipeline(
         vault_backup=backup,
         run_store=runs,
         indexer=indexer,
+        tag_vocabulary=tag_vocabulary,
     )
     return pipeline, store, backup, runs, tmp_path / "vault"
 
@@ -118,6 +139,52 @@ async def test_written_notes_are_indexed_and_outcome_logged(tmp_path: Path):
         "partial": False,
         "failures": [],
     }
+
+
+async def test_organizer_prompt_injects_tag_vocabulary(tmp_path: Path):
+    # ADR-024 §1: the live vault tag vocabulary is injected into the organizer prompt so it
+    # prefers an existing tag over coining a variant.
+    seen_system: list[str] = []
+
+    def responder(messages):
+        system = messages[0].content
+        if "organize a person's raw capture" in system:
+            seen_system.append(system)
+            return _organizer_json()
+        return "a nudge?"
+
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    vocab = FakeTagVocabulary(["work", "calm", "health"])
+    pipeline, *_ = _make_pipeline(tmp_path, chat=chat, tag_vocabulary=vocab)
+    await pipeline.create_text_capture("A calm day.", created_at=CREATED)
+    await pipeline.drain()
+
+    assert seen_system, "organizer was called"
+    assert "work, calm, health" in seen_system[0]
+    assert vocab.calls == [pipeline._settings.organizer_tag_vocabulary_max]
+
+
+async def test_organizer_prompt_omits_vocabulary_when_source_errors(tmp_path: Path):
+    # Best-effort (rule 2/7): a vocabulary read error must not fail or block the capture — the
+    # organizer just tags organically (no injected list).
+    seen_system: list[str] = []
+
+    def responder(messages):
+        system = messages[0].content
+        if "organize a person's raw capture" in system:
+            seen_system.append(system)
+            return _organizer_json()
+        return "a nudge?"
+
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, store, _, _, _ = _make_pipeline(
+        tmp_path, chat=chat, tag_vocabulary=BrokenTagVocabulary()
+    )
+    cid = await pipeline.create_text_capture("A calm day.", created_at=CREATED)
+    await pipeline.drain()
+
+    assert store.records[cid].status == INDEXED  # capture unaffected
+    assert "Existing vault tags" not in seen_system[0]
 
 
 async def test_nudge_is_generated_from_raw_capture_not_notes(tmp_path: Path):

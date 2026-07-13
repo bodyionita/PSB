@@ -34,12 +34,14 @@ from ..capture.organizer import (
     OrganizeResult,
     inbox_fallback_note,
     parse_organizer_json,
+    render_tag_vocabulary,
     validate_organizer_output,
 )
 from ..config import Settings
 from ..indexing.indexer import NoteIndexer
 from ..providers.base import ChatMessage, ProviderUnavailable, TranscriptResult
 from ..providers.registry import ProviderRegistry
+from ..tags.store import TagVocabulary
 from .agent_runs import (
     FAILED as RUN_FAILED,
 )
@@ -142,6 +144,7 @@ class CapturePipeline:
         vault_backup: VaultBackup,
         run_store: AgentRunStore,
         indexer: NoteIndexer,
+        tag_vocabulary: TagVocabulary | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -150,6 +153,9 @@ class CapturePipeline:
         self._backup = vault_backup
         self._runs = run_store
         self._indexer = indexer
+        # Live tag vocabulary injected into the organizer prompt (ADR-024 §1). Optional so the
+        # pipeline degrades to organic-only tagging when no index is wired (tests / cold boot).
+        self._tag_vocabulary = tag_vocabulary
         self._tz = ZoneInfo(settings.scheduler_tz)
         # Strong refs to in-flight background tasks so they are not GC'd mid-run.
         self._tasks: set[asyncio.Task] = set()
@@ -464,9 +470,12 @@ class CapturePipeline:
     async def _organize(self, text: str) -> OrganizeResult:
         """Run the organize chain and validate; unusable output → single Inbox note."""
         # Token replacement (not str.format): the prompt embeds literal JSON braces.
-        system = ORGANIZER_SYSTEM_PROMPT.replace(
-            "{planes}", ", ".join(self._settings.planes)
-        ).replace("{inbox}", self._settings.inbox_plane)
+        vocabulary = render_tag_vocabulary(await self._fetch_tag_vocabulary())
+        system = (
+            ORGANIZER_SYSTEM_PROMPT.replace("{planes}", ", ".join(self._settings.planes))
+            .replace("{inbox}", self._settings.inbox_plane)
+            .replace("{tag_vocabulary}", vocabulary)
+        )
         messages = [
             ChatMessage(role="system", content=system),
             ChatMessage(role="user", content=text),
@@ -493,6 +502,21 @@ class CapturePipeline:
             model_used=result.model_used,
             provider_fallback_used=result.fallback_used,
         )
+
+    async def _fetch_tag_vocabulary(self) -> list[str]:
+        """The current vault tag vocabulary for the organizer prompt (ADR-024 §1). Best-effort:
+        the vocabulary is a nicety, never the capture — a missing source or a DB read error yields
+        an empty list (organic-only tagging) and never fails the capture (rule 2/7). It runs inside
+        the background organize step (after the raw text is durably persisted), so it can never
+        affect the capture's API response."""
+        limit = self._settings.organizer_tag_vocabulary_max
+        if self._tag_vocabulary is None or limit <= 0:
+            return []
+        try:
+            return await self._tag_vocabulary.vocabulary_tags(limit=limit)
+        except Exception:  # noqa: BLE001 — vocabulary is best-effort; never fail the capture
+            logger.exception("could not load tag vocabulary for the organizer (ignored)")
+            return []
 
     def _inbox_result(self, text: str) -> OrganizeResult:
         note = inbox_fallback_note(text, inbox_plane=self._settings.inbox_plane)

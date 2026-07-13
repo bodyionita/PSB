@@ -135,6 +135,36 @@ class ReindexAcceptedResponse(BaseModel):
     run_id: str
 
 
+# --- Tag consolidation (03-api §Agents & admin, M2 / ADR-024 §2) ---
+class TagMergeItem(BaseModel):
+    """One merge group: fold ``variants`` into ``canonical`` (ADR-024). Wire shape for both the
+    propose response and the apply request body."""
+
+    canonical: str
+    variants: list[str] = Field(default_factory=list)
+
+
+class TagConsolidateRequest(BaseModel):
+    """POST /admin/tags/consolidate body. ``apply=false`` (default) proposes; ``apply=true``
+    applies the reviewed ``plan``."""
+
+    apply: bool = False
+    plan: list[TagMergeItem] | None = None
+
+
+class TagConsolidateProposeResponse(BaseModel):
+    """Propose result — a correlation id + the merges to review (no writes yet)."""
+
+    plan_id: str
+    merges: list[TagMergeItem] = Field(default_factory=list)
+
+
+class TagConsolidateAcceptedResponse(BaseModel):
+    """202 body for the apply step — the ``agent_runs`` id of the background rewrite+reindex run."""
+
+    run_id: str
+
+
 # --- Health ---
 class HealthResponse(BaseModel):
     status: str  # "ok" | "degraded"

@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # Bounds on a single organize result, enforced by validate_organizer_output.
     organizer_max_notes: int = 8
     organizer_max_tags: int = 12
+    # Tag-vocabulary reuse (ADR-024 §1): the N most-used distinct vault tags injected into the
+    # organizer prompt so it prefers an existing tag over coining a variant. Frequency-capped to
+    # bound prompt size; 0 disables the injection.
+    organizer_tag_vocabulary_max: int = 100
 
     # --- Vault backup / durability (ADR-014) ---
     # The server only ever fast-forward pushes to this remote/branch; never force/rebase/reset.
@@ -148,6 +152,11 @@ class Settings(BaseSettings):
     # Accept (empty graph → lower the floor; junk links → raise it). ---
     related_top_k: int = 5
     related_min_score: float = 0.5
+
+    # --- Tag consolidation (M2, ADR-024 §2). The manual two-step POST /admin/tags/consolidate:
+    # propose feeds up to this many distinct tags (most-used first) to the distill chain to group
+    # variants; apply rewrites the affected notes' frontmatter tags + reindexes them. ---
+    tags_consolidate_max_vocabulary: int = 300
 
     # --- Search (M2, 03-api §Search, ADR-022). Note-grouped pgvector cosine over chunks. ---
     # Default result count when the request omits top_k; the request is clamped to this ceiling.

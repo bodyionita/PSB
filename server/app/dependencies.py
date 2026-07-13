@@ -17,6 +17,7 @@ from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
 from .services.reindex import ReindexService
 from .services.vault_backup import VaultBackupService
+from .tags.service import TagConsolidationService
 
 
 def get_settings(request: Request) -> Settings:
@@ -53,6 +54,10 @@ def get_relatedness_graph(request: Request) -> RelatednessGraph:
 
 def get_reindex_service(request: Request) -> ReindexService:
     return request.app.state.reindex_service
+
+
+def get_tag_consolidation_service(request: Request) -> TagConsolidationService:
+    return request.app.state.tag_consolidation_service
 
 
 async def require_session(

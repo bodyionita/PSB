@@ -6,9 +6,17 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.dependencies import get_reindex_service, get_vault_backup, require_session
+from app.dependencies import (
+    get_reindex_service,
+    get_tag_consolidation_service,
+    get_vault_backup,
+    require_session,
+)
+from app.providers.base import ProviderUnavailable
 from app.routers import admin
 from app.services.vault_backup import BackupResult
+from app.tags.consolidation import TagMerge
+from app.tags.service import ConsolidationProposal
 
 PREFIX = "/api/v1"
 
@@ -75,6 +83,77 @@ def test_reindex_returns_409_when_already_running():
     resp = client.post(f"{PREFIX}/admin/reindex")
     assert resp.status_code == 409
     assert fake.calls == 1
+
+
+class FakeTagConsolidation:
+    """propose returns a preset proposal (or raises); apply returns a run_id, recording the plan."""
+
+    def __init__(
+        self, *, proposal: ConsolidationProposal | None = None, propose_raises: bool = False
+    ) -> None:
+        self._proposal = proposal
+        self._propose_raises = propose_raises
+        self.applied: list[TagMerge] | None = None
+
+    async def propose(self) -> ConsolidationProposal:
+        if self._propose_raises:
+            raise ProviderUnavailable("distill chain down")
+        return self._proposal
+
+    async def apply(self, plan: list[TagMerge]) -> str:
+        self.applied = plan
+        return "run-tags-1"
+
+
+def _tags_client(fake: FakeTagConsolidation) -> TestClient:
+    app = FastAPI()
+    app.include_router(admin.router, prefix=PREFIX)
+    app.dependency_overrides[get_tag_consolidation_service] = lambda: fake
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def test_tags_consolidate_propose_returns_plan():
+    proposal = ConsolidationProposal(
+        plan_id="plan-9",
+        merges=[TagMerge(canonical="second-brain", variants=("secondbrain",))],
+    )
+    client = _tags_client(FakeTagConsolidation(proposal=proposal))
+    resp = client.post(f"{PREFIX}/admin/tags/consolidate", json={"apply": False})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "plan_id": "plan-9",
+        "merges": [{"canonical": "second-brain", "variants": ["secondbrain"]}],
+    }
+
+
+def test_tags_consolidate_propose_503_when_chain_down():
+    client = _tags_client(FakeTagConsolidation(propose_raises=True))
+    resp = client.post(f"{PREFIX}/admin/tags/consolidate", json={})
+    assert resp.status_code == 503
+
+
+def test_tags_consolidate_apply_returns_202_run_id():
+    fake = FakeTagConsolidation()
+    client = _tags_client(fake)
+    resp = client.post(
+        f"{PREFIX}/admin/tags/consolidate",
+        json={
+            "apply": True,
+            "plan": [{"canonical": "second-brain", "variants": ["secondbrain"]}],
+        },
+    )
+    assert resp.status_code == 202
+    assert resp.json() == {"run_id": "run-tags-1"}
+    assert fake.applied == [TagMerge(canonical="second-brain", variants=("secondbrain",))]
+
+
+def test_tags_consolidate_apply_without_plan_is_400():
+    fake = FakeTagConsolidation()
+    client = _tags_client(fake)
+    resp = client.post(f"{PREFIX}/admin/tags/consolidate", json={"apply": True})
+    assert resp.status_code == 400
+    assert fake.applied is None
 
 
 def test_backup_requires_session():

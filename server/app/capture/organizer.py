@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 # --- Versioned prompt constants (ADR-019 §4). Bump the suffix on any wording change. ---
 
-ORGANIZER_PROMPT_VERSION = "organizer-v2"  # v2: vault is English-only; tags slugified
+ORGANIZER_PROMPT_VERSION = "organizer-v3"  # v3: existing vault tag vocabulary injected (ADR-024)
 NUDGE_PROMPT_VERSION = "nudge-v2"  # v2: sourced from the raw capture; explicit language match
 
 # Organic tagging (ADR-019 / M1 build decisions): emotional tone + the what/why around the
@@ -41,11 +41,14 @@ Rules:
 - "tags" are organic and free-form: capture the emotional tone and the what/why around any
   feelings, plus salient topics. No rigid taxonomy. Each tag MUST be a valid Obsidian tag:
   English, lower-case, a single word or hyphenated (e.g. "personal-growth"), NO spaces, no "#".
+  Prefer reusing a tag from the existing vault vocabulary below when one genuinely fits; only
+  coin a new tag when nothing there matches. This keeps the vocabulary from fragmenting into
+  near-duplicate variants.
 - "body" is the cleaned, lightly-structured note content in Markdown (do not invent facts;
   preserve the person's meaning).
 - Write EVERY title, body, and tag in English. If the capture is in another language,
   translate its meaning into natural English — do not leave phrases in the original language.
-
+{tag_vocabulary}
 Configured planes: {planes}
 """
 
@@ -57,6 +60,22 @@ out. At most 20 words. Never an interrogation, never multiple questions. Detect 
 the capture and write the question in that SAME language (e.g. an English capture gets an
 English question). Return only the question text.
 """
+
+
+def render_tag_vocabulary(tags: list[str]) -> str:
+    """Render the existing-tag list injected into the organizer prompt (ADR-024 §1).
+
+    ``tags`` is the current vault vocabulary (distinct ``notes.tags``, most-used first, already
+    capped by the caller). Returns a short prompt block, or ``""`` for a cold vault with no tags
+    yet — so the ``{tag_vocabulary}`` token simply collapses to a blank line and the organizer
+    tags organically, as before. Pure: the caller fetches the vocabulary.
+    """
+    if not tags:
+        return ""
+    return (
+        "Existing vault tags (most-used first) — prefer reusing one of these when it fits:\n"
+        + ", ".join(tags)
+    )
 
 
 @dataclass(frozen=True)
