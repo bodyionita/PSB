@@ -15,6 +15,7 @@ from .providers.registry import ProviderRegistry
 from .search.service import SearchService
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
+from .services.reindex import ReindexService
 from .services.vault_backup import VaultBackupService
 
 
@@ -48,6 +49,10 @@ def get_search_service(request: Request) -> SearchService:
 
 def get_relatedness_graph(request: Request) -> RelatednessGraph:
     return request.app.state.relatedness_graph
+
+
+def get_reindex_service(request: Request) -> ReindexService:
+    return request.app.state.reindex_service
 
 
 async def require_session(

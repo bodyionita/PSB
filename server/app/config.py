@@ -178,6 +178,9 @@ class Settings(BaseSettings):
     # --- Durability schedule (ADR-010 window, ADR-014 §1/§6). Standard 5-field crontab, all
     # evaluated in scheduler_tz. Staggered inside 03:00–05:00 to avoid RAM stacking on the VPS;
     # M4 slots (Slack 03:00 / rescan 03:40 / summary 04:10 / review 04:40) are left free. ---
+    # Combined nightly reindex (M2, ADR-023 §4): git pull → rescan → recompute graph → commit+push.
+    # In the ADR-010 window, ahead of the summary jobs so search/graph reflect the day's captures.
+    reindex_cron: str = "40 3 * * *"  # nightly full rescan + relatedness recompute (04 §5)
     backup_data_sync_cron: str = "10 3 * * *"  # nightly /srv/data raw inputs → R2
     backup_db_backup_cron: str = "25 3 * * *"  # nightly pg_dump → R2
     integrity_drill_cron: str = "30 4 * * sun"  # weekly verify+clone drill (ADR-014 §6)

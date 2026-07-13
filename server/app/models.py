@@ -127,6 +127,14 @@ class BackupResponse(BaseModel):
     pushed: bool
 
 
+class ReindexAcceptedResponse(BaseModel):
+    """202 body for POST /admin/reindex — the ``agent_runs`` id of the background reindex run.
+
+    Poll ``agent_runs`` / the activity feed with this id for counts + status (03-api §Admin)."""
+
+    run_id: str
+
+
 # --- Health ---
 class HealthResponse(BaseModel):
     status: str  # "ok" | "degraded"

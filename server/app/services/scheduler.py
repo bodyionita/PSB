@@ -1,9 +1,10 @@
 """In-process job scheduler (ADR-010, durability Slice B2).
 
-Wraps APScheduler's :class:`AsyncIOScheduler` and registers the M1 durability jobs on their
-crontab windows (all evaluated in ``scheduler_tz``). Off unless ``enable_scheduler`` is set —
-exactly one prod instance runs it (04:55 sweep + nightly bundle/pg_dump/data-sync + weekly
-integrity drill). M4 extends the same scheduler with the 03:00–05:00 agent window.
+Wraps APScheduler's :class:`AsyncIOScheduler` and registers the M1 durability jobs — plus, from
+M2, the combined nightly ``reindex`` job (ADR-023 §4) — on their crontab windows (all evaluated
+in ``scheduler_tz``). Off unless ``enable_scheduler`` is set — exactly one prod instance runs it
+(03:40 reindex + 04:55 sweep + nightly bundle/pg_dump/data-sync + weekly integrity drill). M4
+extends the same scheduler with the rest of the 03:00–05:00 agent window.
 
 The job → schedule mapping is exposed as pure data (:meth:`BackupScheduler.job_specs`) so it
 unit-tests without a running event loop; ``start``/``shutdown`` are the only parts that touch
@@ -24,6 +25,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from ..config import Settings
 from .backup_jobs import BackupJobs
+from .reindex import ReindexService
 
 logger = logging.getLogger(__name__)
 
@@ -43,23 +45,30 @@ class BackupScheduler:
         *,
         settings: Settings,
         jobs: BackupJobs,
+        reindex: ReindexService | None = None,
         scheduler: AsyncIOScheduler | None = None,
     ) -> None:
         self._settings = settings
         self._jobs = jobs
+        self._reindex = reindex
         self._tz = ZoneInfo(settings.scheduler_tz)
         self._scheduler = scheduler or AsyncIOScheduler(timezone=self._tz)
 
     def job_specs(self) -> list[JobSpec]:
-        """The durability jobs and their schedules — pure, so it tests without a loop."""
+        """The scheduled jobs and their schedules — pure, so it tests without a loop."""
         s = self._settings
-        return [
+        specs = [
             JobSpec("data-sync", self._jobs.run_data_sync, s.backup_data_sync_cron),
             JobSpec("db-backup", self._jobs.run_db_backup, s.backup_db_backup_cron),
             JobSpec("integrity-drill", self._jobs.run_integrity_drill, s.integrity_drill_cron),
             JobSpec("vault-sweep", self._jobs.run_vault_sweep, s.backup_vault_sweep_cron),
             JobSpec("vault-backup", self._jobs.run_vault_bundle, s.backup_vault_bundle_cron),
         ]
+        # M2 (ADR-023 §4): the combined nightly reindex. Single-flight guards it against the
+        # manual POST /admin/reindex; its own git work serialises on the vault lock like the rest.
+        if self._reindex is not None:
+            specs.append(JobSpec("reindex", self._reindex.run_scheduled, s.reindex_cron))
+        return specs
 
     def start(self) -> None:
         """Register every job and start firing (must run inside the app's event loop)."""

@@ -166,6 +166,22 @@ class VaultBackupService:
         reasons.append(reason)
         return await self._commit_and_push(reasons)
 
+    async def sync_from_remote(self) -> None:
+        """Pull remote edits into the working tree before a full rescan (the nightly reindex,
+        04-pipelines §5 / ADR-023 §4). Commits any pending local writes first so the merge has a
+        clean tree, then merge-pulls — all under the one lock, so it never races a concurrent
+        commit. Best-effort (§5): an unreachable remote or a conflicting merge is cleaned up and
+        the rescan simply runs on the current on-disk state; the local vault is never lost."""
+        async with self._lock:
+            # Never pull on top of an in-progress merge (would fold conflict markers into notes).
+            if await self._git.is_merging():
+                logger.error("in-progress merge before reindex pull; aborting it")
+                await self._git.abort_merge()
+            await self._git.add_all()
+            if await self._git.has_staged_changes():
+                await self._git.commit("reindex: commit pending vault writes before pull")
+            await self._integrate_remote()
+
     async def flush(self) -> BackupResult:
         """Shutdown: stop the timer, commit any pending, and flush unpushed commits."""
         self._closing = True

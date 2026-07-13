@@ -15,6 +15,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config import Settings
 from app.services.backup_jobs import BackupJobs
+from app.services.reindex import ReindexService
 from app.services.scheduler import BackupScheduler
 from app.services.vault_backup import VaultBackupService
 
@@ -34,6 +35,13 @@ def _jobs(tmp_path: Path) -> tuple[Settings, BackupJobs]:
     return settings, jobs
 
 
+def _reindex(settings: Settings) -> ReindexService:
+    # Only the run_scheduled coroutine is referenced by the scheduler; the deps can be None here.
+    return ReindexService(
+        settings=settings, indexer=None, graph=None, vault_backup=None, run_store=None
+    )
+
+
 def test_job_specs_cover_the_five_durability_jobs(tmp_path: Path):
     settings, jobs = _jobs(tmp_path)
     specs = BackupScheduler(settings=settings, jobs=jobs).job_specs()
@@ -49,6 +57,24 @@ def test_job_specs_cover_the_five_durability_jobs(tmp_path: Path):
     # every crontab default parses (a bad string would raise here).
     for s in specs:
         assert CronTrigger.from_crontab(s.crontab)
+
+
+def test_reindex_job_is_added_when_a_reindex_service_is_given(tmp_path: Path):
+    settings, jobs = _jobs(tmp_path)
+    reindex = _reindex(settings)
+    specs = BackupScheduler(settings=settings, jobs=jobs, reindex=reindex).job_specs()
+
+    by_id = {s.id: s for s in specs}
+    assert set(by_id) == JOB_IDS | {"reindex"}
+    assert by_id["reindex"].func == reindex.run_scheduled
+    assert by_id["reindex"].crontab == settings.reindex_cron
+    assert CronTrigger.from_crontab(by_id["reindex"].crontab)
+
+
+def test_reindex_job_is_absent_without_a_reindex_service(tmp_path: Path):
+    settings, jobs = _jobs(tmp_path)
+    specs = BackupScheduler(settings=settings, jobs=jobs).job_specs()
+    assert {s.id for s in specs} == JOB_IDS  # backup-only when no reindex is wired
 
 
 async def test_start_registers_all_jobs_then_shuts_down(tmp_path: Path):

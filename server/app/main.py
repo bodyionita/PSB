@@ -32,6 +32,7 @@ from .services.capture_pipeline import CapturePipeline
 from .services.capture_store import PgCaptureStore
 from .services.git_repo import GitRepo
 from .services.rate_limit import RateLimiter
+from .services.reindex import ReindexService
 from .services.scheduler import BackupScheduler
 from .services.vault_backup import VaultBackupService
 
@@ -66,10 +67,22 @@ async def lifespan(app: FastAPI):
     app.state.indexer = indexer
 
     # Relatedness graph (M2, ADR-023): recomputes note_links + renders the sb:related vault
-    # blocks. Nightly-only + on /admin/reindex (wired by the reindex task); never on capture.
-    app.state.relatedness_graph = RelatednessGraph(
+    # blocks. Nightly-only + on /admin/reindex (via the reindex service); never on capture.
+    graph = RelatednessGraph(
         settings=settings, store=PgGraphStore(db), vault_backup=vault_backup
     )
+    app.state.relatedness_graph = graph
+
+    # Reindex (M2, ADR-023 §4): the combined pass — git pull → reindex_all → recompute graph →
+    # one commit+push. Single-flight, shared by the nightly job + POST /admin/reindex.
+    reindex_service = ReindexService(
+        settings=settings,
+        indexer=indexer,
+        graph=graph,
+        vault_backup=vault_backup,
+        run_store=PgAgentRunStore(db),
+    )
+    app.state.reindex_service = reindex_service
 
     # Search (M2, ADR-022/023): the read side — note-grouped cosine over chunks + note preview.
     app.state.search_service = SearchService(
@@ -98,7 +111,9 @@ async def lifespan(app: FastAPI):
     scheduler: BackupScheduler | None = None
     if settings.enable_scheduler:
         scheduler = BackupScheduler(
-            settings=settings, jobs=build_backup_jobs(settings, db, vault_backup)
+            settings=settings,
+            jobs=build_backup_jobs(settings, db, vault_backup),
+            reindex=reindex_service,
         )
         scheduler.start()
     app.state.scheduler = scheduler
@@ -106,10 +121,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Stop scheduling new jobs first (a job may enqueue a vault commit), then drain
-        # in-flight captures, flush the last pending commit, and drop the DB pool.
+        # Stop scheduling new jobs first (a job may enqueue a vault commit), then drain any
+        # in-flight reindex + captures, flush the last pending commit, and drop the DB pool.
         if scheduler is not None:
             scheduler.shutdown()
+        await reindex_service.drain()
         await pipeline.drain()
         await vault_backup.flush()
         await db.disconnect()

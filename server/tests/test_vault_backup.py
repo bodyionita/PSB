@@ -184,3 +184,39 @@ async def test_flush_with_nothing_pending_is_safe(tmp_path: Path):
 
     assert result.committed is False
     assert git.commits == []
+
+
+async def test_sync_from_remote_commits_pending_then_pulls_under_the_lock(tmp_path: Path):
+    # The nightly reindex pull-first (04 §5, ADR-023 §4): any pending local write is committed so
+    # the merge has a clean tree, then a merge-pull integrates remote edits. No push here — the
+    # rescan + the final backup_now do that.
+    git = FakeGitRepo()  # add_all leaves something staged by default
+    service, git = _service(tmp_path, git)
+
+    await service.sync_from_remote()
+
+    assert git.commits == ["reindex: commit pending vault writes before pull"]
+    assert git.pulls == 1  # remote integrated
+    assert git.pushes == 0  # sync never pushes
+
+
+async def test_sync_from_remote_with_no_local_changes_still_pulls(tmp_path: Path):
+    git = FakeGitRepo()
+    git.staged_after_add = False  # nothing to commit
+    service, git = _service(tmp_path, git)
+
+    await service.sync_from_remote()
+
+    assert git.commits == []  # no empty commit
+    assert git.pulls == 1
+
+
+async def test_sync_from_remote_no_remote_is_a_noop_pull(tmp_path: Path):
+    git = FakeGitRepo(has_remote=False)
+    git.staged_after_add = False
+    service, git = _service(tmp_path, git)
+
+    await service.sync_from_remote()
+
+    assert git.pulls == 0  # nothing to pull from
+    assert git.pushes == 0
