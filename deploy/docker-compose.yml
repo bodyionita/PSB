@@ -26,8 +26,8 @@ services:
       - caddy_config:/config
 
   # Self-hosted embeddings sidecar (M2, ADR-022): nomic-embed-text over an OpenAI-compatible
-  # /v1/embeddings on the internal network. Not exposed off-box (no published port). Provisioning
-  # pulls the model once: `docker compose exec ollama ollama pull nomic-embed-text`.
+  # /v1/embeddings on the internal network. Not exposed off-box (no published port). The model
+  # is pulled automatically by the ollama-init one-shot below — no manual `ollama pull` step.
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
@@ -35,6 +35,31 @@ services:
       - ollama_models:/root/.ollama   # model blobs persist across redeploys (no re-pull)
     expose:
       - "11434"
+    healthcheck:
+      # `ollama list` succeeds only once the daemon is serving — gates ollama-init below.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12          # ~2 min budget for a cold container start
+      start_period: 20s
+
+  # One-shot model provisioner (M2, ADR-022): pulls the embedding model into the shared
+  # ollama_models volume, then exits. Runs on every `up`, so it is **self-healing** — a fresh
+  # VPS or a recreated volume re-provisions the model with zero manual intervention. Idempotent:
+  # `ollama pull` is a fast no-op once the blobs are present. Pull is issued to the ollama server
+  # over the network (OLLAMA_HOST), which downloads into its own volume, so no volume mount here.
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    entrypoint: ["/bin/sh", "-c"]
+    # Model name comes from the same EMBEDDING_MODEL used by the app (deploy/defaults.env via
+    # `compose --env-file`); the default keeps a bare `docker compose up` working too.
+    command: ["ollama pull ${EMBEDDING_MODEL:-nomic-embed-text}"]
+    restart: "no"
 
   api:
     build:

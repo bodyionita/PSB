@@ -163,5 +163,7 @@ echo "    It renders deploy/.env + origin TLS files, then 'docker compose up -d 
 echo
 echo "==> After the stack is up, once (run as $DEPLOY_USER — it's in the docker group):"
 echo "    Claude Max OAuth:  docker compose -f $APP_DIR/deploy/docker-compose.yml exec api claude login"
-echo "    Pull embeddings:   docker compose -f $APP_DIR/deploy/docker-compose.yml exec ollama ollama pull nomic-embed-text"
 echo "    Health check:      curl -fsS https://${BRAINDAN_DOMAIN:-braindan.cc}/api/v1/health"
+echo "    (The nomic embedding model is pulled automatically by the ollama-init one-shot on every"
+echo "     'up' — no manual 'ollama pull' needed. Force a re-pull if ever needed with:"
+echo "       docker compose -f $APP_DIR/deploy/docker-compose.yml up -d ollama-init)"
