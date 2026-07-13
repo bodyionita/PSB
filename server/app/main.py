@@ -15,6 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import Settings, get_settings
 from .db import Database
+from .entities.entity_store import PgEntityStore
+from .entities.merge import MergeService
 from .entities.resolver import EntityResolver
 from .entities.store import PgAliasStore
 from .graph.node_writer import NodeWriter
@@ -140,6 +142,18 @@ async def lifespan(app: FastAPI):
         run_store=run_store,
     )
 
+    # Entity services (ADR-030 §5/§6, M3 task 6): merge propose/apply (+ tombstones). Shares the
+    # node writer + indexer + store backup so a merge rewrites files then reindexes + force-commits.
+    entity_store = PgEntityStore(db)
+    app.state.merge_service = MergeService(
+        settings=settings,
+        entity_store=entity_store,
+        node_writer=node_writer,
+        indexer=indexer,
+        store_backup=store_backup,
+        run_store=run_store,
+    )
+
     # Capture pipeline (ADR-019/026/030): in-process, nodes-to-store, backed by the real store
     # backup. The tag store feeds the organizer prompt the live vocabulary (ADR-024 §1).
     pipeline = CapturePipeline(
@@ -184,6 +198,7 @@ async def lifespan(app: FastAPI):
             scheduler.shutdown()
         await reindex_service.drain()
         await app.state.tag_consolidation_service.drain()
+        await app.state.merge_service.drain()
         await pipeline.drain()
         await store_backup.flush()
         await db.disconnect()

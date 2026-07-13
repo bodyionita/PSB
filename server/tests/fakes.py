@@ -271,6 +271,74 @@ class FakeCommitBackup:
         return BackupResult(committed=True, pushed=True)
 
 
+class FakeEntityStore:
+    """In-memory EntityStore for merge/backfill/profile tests — no live DB (08 testing policy).
+
+    Seeded with entity ``EntityNode``s (by id), inbound canonical edges (by dst id), 1-hop
+    neighborhoods (by node id), and alias-match candidates (by lower-cased alias)."""
+
+    def __init__(
+        self,
+        *,
+        nodes=None,
+        inbound=None,
+        entities=None,
+        neighborhoods=None,
+        alias_matches=None,
+    ) -> None:
+        self.nodes = dict(nodes or {})  # id -> EntityNode
+        self._inbound = dict(inbound or {})  # dst_id -> list[InboundEdge]
+        self._entities = list(entities or [])  # list[EntityRef]
+        self._neighborhoods = dict(neighborhoods or {})  # node_id -> list[Neighbor]
+        self._alias_matches = dict(alias_matches or {})  # alias.lower() -> list[AliasMatchNode]
+        self.touched_since_arg = None
+
+    async def get_node(self, node_id: str):
+        return self.nodes.get(node_id)
+
+    async def inbound_canonical_edges(self, node_id: str):
+        return list(self._inbound.get(node_id, []))
+
+    async def list_entities(self, *, types):
+        return [e for e in self._entities if e.type in set(types)]
+
+    async def entities_touched_since(self, *, types, since):
+        self.touched_since_arg = since
+        return [e for e in self._entities if e.type in set(types)]
+
+    async def neighborhood(self, node_id: str):
+        return list(self._neighborhoods.get(node_id, []))
+
+    async def memory_nodes_matching_alias(self, alias, *, entity_id, window_start, limit):
+        return list(self._alias_matches.get(alias.lower(), []))[:limit]
+
+
+class FakeProfileStore:
+    """In-memory profile store — records upserts + returns preset current hashes (profile tests)."""
+
+    def __init__(self, *, hashes=None) -> None:
+        self._hashes = dict(hashes or {})  # node_id -> neighborhood_hash
+        self.upserts: list[dict] = []
+
+    async def current_hash(self, node_id: str):
+        return self._hashes.get(node_id)
+
+    async def upsert_profile(
+        self, node_id, *, tier, profile, observations, neighborhood_hash, embedding
+    ) -> None:
+        self.upserts.append(
+            {
+                "node_id": node_id,
+                "tier": tier,
+                "profile": profile,
+                "observations": observations,
+                "neighborhood_hash": neighborhood_hash,
+                "embedding": embedding,
+            }
+        )
+        self._hashes[node_id] = neighborhood_hash
+
+
 class FakeAliasStore:
     """In-memory alias index for resolver tests. ``candidates_by_key`` maps a
     (normalized_name, type) to the candidates a mention resolves against."""

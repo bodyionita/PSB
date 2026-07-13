@@ -214,6 +214,49 @@ class ReindexAcceptedResponse(BaseModel):
     run_id: str
 
 
+# --- Entity merge (03-api §Admin, M3 / ADR-030 §5) ---
+class EntityMergeRequest(BaseModel):
+    """POST /admin/entities/merge body. ``apply=false`` (default) proposes the inbound-edge
+    inventory; ``apply=true`` performs the merge (retarget → alias union → tombstone → reindex)."""
+
+    loser: str = Field(min_length=1)
+    survivor: str = Field(min_length=1)
+    apply: bool = False
+
+
+class MergeSideModel(BaseModel):
+    """A merge endpoint's loser/survivor summary (identity + alias set)."""
+
+    id: str
+    type: str
+    title: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+
+
+class InboundEdgeModel(BaseModel):
+    """One inbound edge in the propose inventory — a source node that points at the loser."""
+
+    src_id: str
+    src_store_path: str
+    rel: str
+
+
+class EntityMergeProposeResponse(BaseModel):
+    """Propose result — a correlation id, both sides, and the inbound-edge inventory (no writes)."""
+
+    plan_id: str
+    loser: MergeSideModel
+    survivor: MergeSideModel
+    inbound_count: int
+    inbound: list[InboundEdgeModel] = Field(default_factory=list)
+
+
+class EntityMergeAcceptedResponse(BaseModel):
+    """202 body for the apply step — the ``agent_runs`` id of the background merge run."""
+
+    run_id: str
+
+
 # --- Tag consolidation (03-api §Agents & admin, M2 / ADR-024 §2) ---
 class TagMergeItem(BaseModel):
     """One merge group: fold ``variants`` into ``canonical`` (ADR-024). Wire shape for both the

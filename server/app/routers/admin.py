@@ -16,14 +16,21 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from ..dependencies import (
     get_capture_pipeline,
+    get_merge_service,
     get_reindex_service,
     get_store_backup,
     get_tag_consolidation_service,
     require_session,
 )
+from ..entities.merge import BadMerge, MergeNodeNotFound, MergeService
 from ..models import (
     BackupResponse,
     CaptureAcceptedResponse,
+    EntityMergeAcceptedResponse,
+    EntityMergeProposeResponse,
+    EntityMergeRequest,
+    InboundEdgeModel,
+    MergeSideModel,
     ReindexAcceptedResponse,
     TagConsolidateAcceptedResponse,
     TagConsolidateProposeResponse,
@@ -108,6 +115,40 @@ async def consolidate_tags(
             TagMergeItem(canonical=merge.canonical, variants=list(merge.variants))
             for merge in proposal.merges
         ],
+    )
+
+
+@router.post("/entities/merge", response_model=None)
+async def merge_entities(
+    request: EntityMergeRequest,
+    response: Response,
+    service: MergeService = Depends(get_merge_service),
+) -> EntityMergeProposeResponse | EntityMergeAcceptedResponse:
+    """Two-step entity merge (ADR-030 §5).
+
+    Propose (``apply=false``/default) → ``200`` inbound-edge inventory, no writes. Apply
+    (``apply=true``) → ``202 {run_id}``, retargeting inbound edges → unioning aliases → writing the
+    tombstone → reindexing + force-commit in the background. ``400`` self-merge / non-entity /
+    tombstone endpoint; ``404`` unknown loser or survivor.
+    """
+    try:
+        if request.apply:
+            run_id = await service.apply(request.loser, request.survivor)
+            response.status_code = status.HTTP_202_ACCEPTED
+            return EntityMergeAcceptedResponse(run_id=run_id)
+        proposal = await service.propose(request.loser, request.survivor)
+    except MergeNodeNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="loser or survivor node not found"
+        ) from None
+    except BadMerge as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return EntityMergeProposeResponse(
+        plan_id=proposal.plan_id,
+        loser=MergeSideModel(**vars(proposal.loser)),
+        survivor=MergeSideModel(**vars(proposal.survivor)),
+        inbound_count=proposal.inbound_count,
+        inbound=[InboundEdgeModel(**vars(e)) for e in proposal.inbound],
     )
 
 

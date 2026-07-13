@@ -91,6 +91,24 @@ class Settings(BaseSettings):
     # observation profiles for entities whose 1-hop neighborhood changed. Runs in the
     # ADR-010 window after the 03:40 reindex so the day's edges are in the DB.
     profile_refresh_cron: str = "10 4 * * *"
+    # Evidence-tiered profile depth (ADR-034): depth scales with graph degree so the nightly
+    # LLM spend is structurally capped (once-mentioned entities never cost a model call).
+    #   degree < snapshot_min          → tier `stub`     (mechanical, no LLM)
+    #   snapshot_min ≤ degree < full   → tier `snapshot` (LLM: categorized lines + current state)
+    #   degree ≥ full_min              → tier `full`     (LLM: + themes + open threads)
+    profile_tier_snapshot_min: int = 3
+    profile_tier_full_min: int = 8
+    # Bound on the observation lines fed to the LLM / stored per profile (prompt + row size).
+    profile_max_observations: int = 40
+    # Nightly entity backfill scan (ADR-030 §6): entities minted/alias-changed since the last
+    # run are re-checked against recent memory nodes for alias matches — an exact alias match
+    # (length ≥ ENTITY_ALIAS_MIN_FUZZY_LEN) auto-adds the edge (feed-flagged), a shorter one
+    # files an entity-ambiguity review item. After profile-refresh, before the 04:55 sweep.
+    backfill_cron: str = "20 4 * * *"
+    # Only re-scan memory nodes indexed within this window (ADR-030 §6 "recent … nodes").
+    backfill_window_days: int = 30
+    # Bound on one backfill run's auto-adds + review items (guards a runaway alias match).
+    backfill_max_links: int = 200
 
     # --- Planes (ADR-005 surviving half — attributes, not folders) ---
     planes: CsvList = Field(

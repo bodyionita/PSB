@@ -7,11 +7,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.dependencies import (
+    get_merge_service,
     get_reindex_service,
     get_store_backup,
     get_tag_consolidation_service,
     require_session,
 )
+from app.entities.merge import BadMerge, MergeNodeNotFound, MergeProposal, MergeSide
 from app.providers.base import ProviderUnavailable
 from app.routers import admin
 from app.services.store_backup import BackupResult
@@ -154,6 +156,71 @@ def test_tags_consolidate_apply_without_plan_is_400():
     resp = client.post(f"{PREFIX}/admin/tags/consolidate", json={"apply": True})
     assert resp.status_code == 400
     assert fake.applied is None
+
+
+class FakeMerge:
+    """propose returns a preset proposal (or raises); apply returns a run_id."""
+
+    def __init__(self, *, proposal: MergeProposal | None = None, error: Exception | None = None):
+        self._proposal = proposal
+        self._error = error
+        self.applied: tuple[str, str] | None = None
+
+    async def propose(self, loser: str, survivor: str) -> MergeProposal:
+        if self._error is not None:
+            raise self._error
+        return self._proposal
+
+    async def apply(self, loser: str, survivor: str) -> str:
+        if self._error is not None:
+            raise self._error
+        self.applied = (loser, survivor)
+        return "run-merge-1"
+
+
+def _merge_client(fake: FakeMerge) -> TestClient:
+    app = FastAPI()
+    app.include_router(admin.router, prefix=PREFIX)
+    app.dependency_overrides[get_merge_service] = lambda: fake
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def test_entities_merge_propose_returns_inventory():
+    proposal = MergeProposal(
+        plan_id="plan-1",
+        loser=MergeSide(id="l", type="person", title="Alex", aliases=["alex"]),
+        survivor=MergeSide(id="s", type="person", title="Alexandru", aliases=["alexandru"]),
+    )
+    client = _merge_client(FakeMerge(proposal=proposal))
+    resp = client.post(f"{PREFIX}/admin/entities/merge", json={"loser": "l", "survivor": "s"})
+    assert resp.status_code == 200
+    assert resp.json()["plan_id"] == "plan-1"
+    assert resp.json()["inbound_count"] == 0
+
+
+def test_entities_merge_apply_returns_202_run_id():
+    fake = FakeMerge()
+    client = _merge_client(fake)
+    resp = client.post(
+        f"{PREFIX}/admin/entities/merge",
+        json={"loser": "l", "survivor": "s", "apply": True},
+    )
+    assert resp.status_code == 202
+    assert resp.json() == {"run_id": "run-merge-1"}
+    assert fake.applied == ("l", "s")
+
+
+def test_entities_merge_404_unknown_node():
+    client = _merge_client(FakeMerge(error=MergeNodeNotFound("l")))
+    resp = client.post(f"{PREFIX}/admin/entities/merge", json={"loser": "l", "survivor": "s"})
+    assert resp.status_code == 404
+
+
+def test_entities_merge_400_bad_merge():
+    client = _merge_client(FakeMerge(error=BadMerge("cannot merge a node into itself")))
+    resp = client.post(f"{PREFIX}/admin/entities/merge", json={"loser": "x", "survivor": "x"})
+    assert resp.status_code == 400
 
 
 def test_backup_requires_session():

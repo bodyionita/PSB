@@ -89,6 +89,6 @@ def test_vocabulary_guards_reject_bad_config():
         Settings(node_types="memory,person", entity_like_types="person,ghost")
 
 
-def test_compute_head_is_migration_005():
-    # M3 ships revision 005 (the graph pivot, ADR-030/031); head advances to it.
-    assert compute_head() == "005"
+def test_compute_head_is_migration_006():
+    # M3 task 6 adds revision 006 (node_profiles, ADR-030 §4/ADR-034); head advances to it.
+    assert compute_head() == "006"

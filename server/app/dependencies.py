@@ -10,6 +10,7 @@ from fastapi import Depends, HTTPException, Request, status
 
 from .config import Settings
 from .db import Database
+from .entities.merge import MergeService
 from .graph.service import DerivedEdgeGraph
 from .providers.registry import ProviderRegistry
 from .search.service import SearchService
@@ -68,6 +69,10 @@ def get_agent_run_store(request: Request) -> AgentRunStore:
 
 def get_review_service(request: Request) -> ReviewService:
     return request.app.state.review_service
+
+
+def get_merge_service(request: Request) -> MergeService:
+    return request.app.state.merge_service
 
 
 async def require_session(

@@ -213,6 +213,134 @@ def _edge_present(frontmatter_lines: list[str], edge: NodeEdge) -> bool:
     )
 
 
+def retarget_edges(raw_text: str, *, old_to: str, new_to: str) -> tuple[str, int]:
+    """Rewrite every canonical edge ``to: old_to`` → ``to: new_to`` (a merge redirect, ADR-030 §5).
+
+    Pure (no I/O) so it is unit-tested directly. Used when merging ``old_to`` into ``new_to``: each
+    node with an inbound edge to the loser has that edge retargeted onto the survivor. If the
+    retarget produces an edge identical (same ``rel`` + ``to``) to one already on the node, the
+    duplicate item is dropped so the ``(src, dst, rel, origin)`` pk can't be violated on reindex.
+    Returns ``(new_text, retargeted_count)``; a file with no matching edge is returned verbatim
+    (no newline churn). Only the ``edges:`` block is touched — every other byte is preserved.
+    """
+    inner, body = split_frontmatter(raw_text)
+    if inner is None:
+        return raw_text, 0
+    old_token = f"to: {_yaml_scalar(old_to)}"
+    new_token = f"to: {_yaml_scalar(new_to)}"
+    lines = inner.rstrip("\n").split("\n")
+    out: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    in_edges = False
+    retargeted = 0
+    for line in lines:
+        stripped = line.strip()
+        if not in_edges:
+            out.append(line)
+            if stripped == "edges:":
+                in_edges = True
+            continue
+        if line[:1] not in (" ", "\t"):
+            in_edges = False
+            out.append(line)
+            continue
+        if not stripped.startswith("-"):
+            out.append(line)
+            continue
+        if old_token in line:
+            line = line.replace(old_token, new_token)
+            retargeted += 1
+        key = _edge_identity(line)
+        if key is not None and key in seen:
+            continue  # duplicate after retarget — drop it
+        if key is not None:
+            seen.add(key)
+        out.append(line)
+    if retargeted == 0:
+        return raw_text, 0
+    return f"---\n{chr(10).join(out)}\n---\n{body}", retargeted
+
+
+def _edge_identity(edge_line: str) -> tuple[str, str] | None:
+    """``(rel, to)`` of an ``- {rel: …, to: …}`` edge line, for dedup; ``None`` if unparseable."""
+    item = edge_line.strip().lstrip("-").strip()
+    if not (item.startswith("{") and item.endswith("}")):
+        return None
+    fields: dict[str, str] = {}
+    for token in item[1:-1].split(","):
+        key, sep, value = token.partition(":")
+        if sep:
+            fields[key.strip()] = value.strip()
+    rel, to = fields.get("rel"), fields.get("to")
+    return (rel, to) if rel and to else None
+
+
+def upsert_frontmatter_list(raw_text: str, key: str, values: tuple[str, ...] | list[str]) -> str:
+    """Set a top-level ``key: [inline, list]`` frontmatter line (replace if present, else insert).
+
+    Pure. Used to union a merge survivor's ``aliases`` (ADR-030 §5). The line is inserted before
+    the ``edges:`` block (or the closing ``---``) so a hand-authored ordering of the other keys is
+    preserved. Raises :class:`ValueError` if the file has no frontmatter."""
+    inner, body = split_frontmatter(raw_text)
+    if inner is None:
+        raise ValueError(f"cannot set {key}: node file has no frontmatter")
+    rendered = f"{key}: {_yaml_list(values)}"
+    lines = inner.rstrip("\n").split("\n")
+    for i, line in enumerate(lines):
+        if line[:1] not in (" ", "\t") and line.partition(":")[0].strip() == key:
+            lines[i] = rendered
+            return f"---\n{chr(10).join(lines)}\n---\n{body}"
+    insert_at = next((i for i, ln in enumerate(lines) if ln.strip() == "edges:"), len(lines))
+    lines.insert(insert_at, rendered)
+    return f"---\n{chr(10).join(lines)}\n---\n{body}"
+
+
+def render_tombstone(*, node_id: str, node_type: str, survivor_id: str) -> str:
+    """A merged node's replacement file: keeps only ``id``/``type``/``merged_into`` (02 §2, ADR-030
+    §5). The id keeps resolving (old links + source_refs redirect to the survivor); the indexer
+    reads ``merged_into`` and hides the node from search/map."""
+    return "\n".join(
+        [
+            "---",
+            f"id: {node_id}",
+            f"type: {_yaml_scalar(node_type)}",
+            f"merged_into: {_yaml_scalar(survivor_id)}",
+            "---",
+            "",
+            "(merged)",
+            "",
+        ]
+    )
+
+
+def merged_alias_union(
+    survivor_aliases: tuple[str, ...] | list[str],
+    survivor_title: str | None,
+    loser_aliases: tuple[str, ...] | list[str],
+    loser_title: str | None,
+) -> list[str]:
+    """The survivor's aliases after a merge: its own aliases + the loser's name + aliases, deduped
+    (ADR-030 §5 — the loser's surface forms keep resolving, now onto the survivor). The survivor's
+    own title is included so the set is a complete alias list even if it lacked one."""
+    return _unique(
+        [
+            *survivor_aliases,
+            *( [survivor_title] if survivor_title else [] ),
+            *( [loser_title] if loser_title else [] ),
+            *loser_aliases,
+        ]
+    )
+
+
+def _unique(values: list[str]) -> list[str]:
+    seen: list[str] = []
+    for v in values:
+        v = v.strip()
+        if v and v not in seen:
+            seen.append(v)
+    return seen
+
+
 @dataclass(frozen=True)
 class WrittenNode:
     """The result of writing one node — its id and store-relative (``/``-separated) path."""
@@ -276,6 +404,36 @@ class NodeWriter:
         path = self._root / Path(*store_path.split("/"))
         raw_text = path.read_text(encoding="utf-8")
         self._atomic_write(path, append_edges(raw_text, edges))
+
+    def retarget_edges(self, store_path: str, *, old_to: str, new_to: str) -> int:
+        """Redirect a node file's edges from ``old_to`` to ``new_to`` (merge, ADR-030 §5). Atomic;
+        returns the number retargeted (0 ⇒ no write). A missing file raises ``FileNotFoundError`` —
+        the caller (merge service) skips a vanished source, never crashing (rule 7)."""
+        path = self._root / Path(*store_path.split("/"))
+        raw_text = path.read_text(encoding="utf-8")
+        rewritten, count = retarget_edges(raw_text, old_to=old_to, new_to=new_to)
+        if count:
+            self._atomic_write(path, rewritten)
+        return count
+
+    def set_aliases(self, store_path: str, aliases: tuple[str, ...] | list[str]) -> None:
+        """Set a node file's ``aliases:`` frontmatter line (merge alias union, ADR-030 §5). Atomic;
+        a missing file raises ``FileNotFoundError`` (the caller degrades, rule 7)."""
+        path = self._root / Path(*store_path.split("/"))
+        raw_text = path.read_text(encoding="utf-8")
+        self._atomic_write(path, upsert_frontmatter_list(raw_text, "aliases", aliases))
+
+    def write_tombstone(
+        self, store_path: str, *, node_id: str, node_type: str, survivor_id: str
+    ) -> None:
+        """Replace a merged node's file with its tombstone (ADR-030 §5). Atomic; keeps the same path
+        so old locators resolve. A missing file is ignored (already gone — nothing to tombstone)."""
+        path = self._root / Path(*store_path.split("/"))
+        if not path.exists():
+            return
+        self._atomic_write(path, render_tombstone(
+            node_id=node_id, node_type=node_type, survivor_id=survivor_id
+        ))
 
     def remove_nodes(self, store_paths: list[str]) -> None:
         """Delete files by store-relative path (Pass-2 supersede / reorganize). Missing files are
