@@ -220,3 +220,17 @@ async def test_sync_from_remote_no_remote_is_a_noop_pull(tmp_path: Path):
 
     assert git.pulls == 0  # nothing to pull from
     assert git.pushes == 0
+
+
+async def test_sync_from_remote_aborts_an_in_progress_merge_before_pulling(tmp_path: Path):
+    # A leftover half-merge (conflict markers in the tree) must be aborted before the pull, so the
+    # rescan never sees markers as note content (mirrors _commit_and_push's merge guard).
+    git = FakeGitRepo()
+    git._merging = True
+    git.staged_after_add = False
+    service, git = _service(tmp_path, git)
+
+    await service.sync_from_remote()
+
+    assert git.aborts == 1  # the stale merge was aborted
+    assert git.pulls == 1  # ... then the pull proceeded

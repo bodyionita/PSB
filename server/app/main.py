@@ -122,7 +122,9 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         # Stop scheduling new jobs first (a job may enqueue a vault commit), then drain any
-        # in-flight reindex + captures, flush the last pending commit, and drop the DB pool.
+        # in-flight manual reindex + captures, flush the last pending commit, and drop the DB pool.
+        # (A nightly reindex runs in the scheduler executor like the other jobs — best-effort on a
+        # wait=False shutdown; it is idempotent and rule-7 wrapped, so a mid-flight one is safe.)
         if scheduler is not None:
             scheduler.shutdown()
         await reindex_service.drain()

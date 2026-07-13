@@ -188,6 +188,24 @@ async def test_partial_index_is_flagged_in_details_but_the_run_succeeds():
     assert "partial" in run.summary
 
 
+async def test_start_manual_releases_the_slot_if_opening_the_run_raises():
+    # If we can't even open the agent_runs row, the single-flight slot must not stay claimed —
+    # otherwise every future reindex would 409 forever.
+    order: list = []
+
+    class _BrokenRunStore(FakeAgentRunStore):
+        async def start(self, agent: str) -> str:
+            raise RuntimeError("db down")
+
+    service, _, _ = _service(order=order, runs=_BrokenRunStore())
+
+    try:
+        await service.start_manual()
+    except RuntimeError:
+        pass
+    assert not service.running  # slot released despite the failure
+
+
 async def test_a_failure_ends_the_run_failed_and_releases_the_slot():
     order: list = []
     indexer = FakeReindexer(order=order, error=RuntimeError("boom"))
