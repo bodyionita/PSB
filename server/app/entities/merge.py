@@ -32,7 +32,7 @@ from ..config import Settings
 from ..graph.node_writer import NodeWriter, merged_alias_union
 from ..indexing.indexer import NodeIndexer
 from ..services.agent_runs import FAILED, SUCCEEDED, AgentRunStore
-from ..services.store_backup import BackupResult
+from ..services.store_backup import StoreCommitter
 from .entity_store import EntityNode, EntityStore, InboundEdge
 
 logger = logging.getLogger(__name__)
@@ -84,12 +84,6 @@ class MergeProposal:
     @property
     def inbound_count(self) -> int:
         return len(self.inbound)
-
-
-class StoreCommitter:
-    """The forced commit+push apply needs (a narrow view of the store backup)."""
-
-    async def backup_now(self, reason: str = ...) -> BackupResult: ...  # pragma: no cover
 
 
 class MergeService:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -28,6 +29,13 @@ from .backup_jobs import BackupJobs
 from .reindex import ReindexService
 
 logger = logging.getLogger(__name__)
+
+
+class EntityJob(Protocol):
+    """A nightly entity job (profile-refresh / backfill) — one idempotent, never-raising entry
+    point the scheduler and CLI both drive (ADR-030 §4/§6)."""
+
+    async def run_scheduled(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -46,11 +54,15 @@ class BackupScheduler:
         settings: Settings,
         jobs: BackupJobs,
         reindex: ReindexService | None = None,
+        profile_refresh: EntityJob | None = None,
+        backfill: EntityJob | None = None,
         scheduler: AsyncIOScheduler | None = None,
     ) -> None:
         self._settings = settings
         self._jobs = jobs
         self._reindex = reindex
+        self._profile_refresh = profile_refresh
+        self._backfill = backfill
         self._tz = ZoneInfo(settings.scheduler_tz)
         self._scheduler = scheduler or AsyncIOScheduler(timezone=self._tz)
 
@@ -68,6 +80,17 @@ class BackupScheduler:
         # manual POST /admin/reindex; its own git work serialises on the store lock like the rest.
         if self._reindex is not None:
             specs.append(JobSpec("reindex", self._reindex.run_scheduled, s.reindex_cron))
+        # M3 (ADR-030 §4/§6): the nightly entity jobs. Profile-refresh runs after the reindex (its
+        # neighborhood reads want the day's edges in the DB); backfill after that. Both serialise
+        # their store git work on the one lock, so overlapping fire times stay safe.
+        if self._profile_refresh is not None:
+            specs.append(
+                JobSpec(
+                    "profile-refresh", self._profile_refresh.run_scheduled, s.profile_refresh_cron
+                )
+            )
+        if self._backfill is not None:
+            specs.append(JobSpec("entity-backfill", self._backfill.run_scheduled, s.backfill_cron))
         return specs
 
     def start(self) -> None:

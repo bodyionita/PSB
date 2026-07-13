@@ -53,7 +53,10 @@ class NodeEdgeView:
 
 @dataclass(frozen=True)
 class NodeRow:
-    """A node's stored metadata + its edges (body is read from the store file separately)."""
+    """A node's stored metadata + derived profile + its edges (body read from the store separately).
+
+    ``profile`` is the derived entity profile (``node_profiles``, ADR-030 §4) — ``None`` for content
+    nodes and for entities the profile-refresh job hasn't reached yet."""
 
     node_id: str
     store_path: str
@@ -67,6 +70,7 @@ class NodeRow:
     occurred_start: date | None
     occurred_end: date | None
     merged_into: str | None
+    profile: str | None = None
     edges: list[NodeEdgeView] = field(default_factory=list)
 
 
@@ -162,9 +166,11 @@ class PgSearchStore:
         async with self._db.acquire() as conn:
             node = await conn.fetchrow(
                 """
-                SELECT id, store_path, type, title, plane, planes, tags, aliases, disambig,
-                       occurred_start, occurred_end, merged_into
-                FROM nodes WHERE id = $1
+                SELECT n.id, n.store_path, n.type, n.title, n.plane, n.planes, n.tags, n.aliases,
+                       n.disambig, n.occurred_start, n.occurred_end, n.merged_into, np.profile
+                FROM nodes n
+                LEFT JOIN node_profiles np ON np.node_id = n.id
+                WHERE n.id = $1
                 """,
                 node_id,
             )
@@ -198,6 +204,7 @@ class PgSearchStore:
             occurred_start=node["occurred_start"],
             occurred_end=node["occurred_end"],
             merged_into=str(node["merged_into"]) if node["merged_into"] else None,
+            profile=node["profile"],
             edges=[
                 NodeEdgeView(
                     rel=e["rel"],

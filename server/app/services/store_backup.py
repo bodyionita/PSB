@@ -82,6 +82,13 @@ class BackupResult:
     pushed: bool
 
 
+class StoreCommitter(Protocol):
+    """A forced commit+push of the current store state — the narrow view the reindex / tag-apply /
+    merge / backfill jobs need of the backup layer (they rewrite files then checkpoint)."""
+
+    async def backup_now(self, reason: str = ...) -> BackupResult: ...
+
+
 @dataclass(frozen=True)
 class Fingerprint:
     """Store durability fingerprint (ADR-014 §6): HEAD sha + monotonic commit count + file count."""

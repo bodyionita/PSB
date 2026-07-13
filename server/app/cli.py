@@ -18,6 +18,8 @@ import sys
 
 from .config import get_settings
 from .db import Database
+from .entities.backfill import build_backfill_service
+from .entities.profile_refresh import build_profile_refresh_service
 from .services.backup_jobs import build_backup_jobs
 from .services.git_repo import GitRepo
 from .services.reindex import build_reindex_service
@@ -33,10 +35,13 @@ BACKUP_JOBS: dict[str, str] = {
     "data-sync": "run_data_sync",
     "store-sweep": "run_store_sweep",
 }
-# The combined reindex (ADR-023 §4) is driven by its own service, not BackupJobs.
+# The combined reindex (ADR-023 §4) + the M3 entity jobs (ADR-030 §4/§6) each drive their own
+# service, not BackupJobs.
 REINDEX = "reindex"
-# Every valid CLI job name (backup jobs + reindex).
-JOBS: tuple[str, ...] = (*BACKUP_JOBS.keys(), REINDEX)
+PROFILE_REFRESH = "profile-refresh"
+BACKFILL = "entity-backfill"
+# Every valid CLI job name (backup jobs + reindex + entity jobs).
+JOBS: tuple[str, ...] = (*BACKUP_JOBS.keys(), REINDEX, PROFILE_REFRESH, BACKFILL)
 
 
 async def run_job(name: str) -> None:
@@ -49,6 +54,10 @@ async def run_job(name: str) -> None:
         await store_backup.ensure_ready()
         if name == REINDEX:
             await build_reindex_service(settings, db, store_backup).run_scheduled()
+        elif name == PROFILE_REFRESH:
+            await build_profile_refresh_service(settings, db).run_scheduled()
+        elif name == BACKFILL:
+            await build_backfill_service(settings, db, store_backup).run_scheduled()
         else:
             jobs = build_backup_jobs(settings, db, store_backup)
             await getattr(jobs, BACKUP_JOBS[name])()

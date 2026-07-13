@@ -7,8 +7,8 @@ trims each hit's best chunk to a snippet. ``get_node`` reads the node **body fro
 (canonical + derived, both directions).
 
 The derived entity **profile** ([ADR-030](adr/030-entity-substrate-and-lifecycle.md)) is served
-here too, but its generator is the nightly profile-refresh job (M3 task 6): until that lands the
-field is ``None`` for every node.
+here too, read from ``node_profiles`` in the same query; it is ``None`` for content nodes and for
+entities the nightly profile-refresh job (M3 task 6) hasn't reached yet.
 
 No LLM call beyond the single query embedding; a down embedder surfaces as ``ProviderUnavailable``
 for the router to map to ``503`` (this is a request path, not a background job).
@@ -103,7 +103,7 @@ class SearchService:
             occurred=row.occurred_start,
             occurred_end=row.occurred_end,
             body=body,
-            profile=None,  # derived profile job lands in M3 task 6 (ADR-030 §4)
+            profile=row.profile,  # derived entity profile (node_profiles, ADR-030 §4 / task 6)
             edges=row.edges,
             merged_into=row.merged_into,
         )

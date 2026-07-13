@@ -15,8 +15,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import Settings, get_settings
 from .db import Database
+from .entities.backfill import BackfillService
 from .entities.entity_store import PgEntityStore
 from .entities.merge import MergeService
+from .entities.profile_refresh import ProfileRefreshService
+from .entities.profile_store import PgProfileStore
 from .entities.resolver import EntityResolver
 from .entities.store import PgAliasStore
 from .graph.node_writer import NodeWriter
@@ -142,8 +145,9 @@ async def lifespan(app: FastAPI):
         run_store=run_store,
     )
 
-    # Entity services (ADR-030 §5/§6, M3 task 6): merge propose/apply (+ tombstones). Shares the
-    # node writer + indexer + store backup so a merge rewrites files then reindexes + force-commits.
+    # Entity services (ADR-030 §5/§6 + §4, M3 task 6). All share the one entity-read store; the
+    # merge/backfill jobs share the node writer + indexer + store backup so they rewrite files then
+    # reindex + force-commit (store is truth, rule 1).
     entity_store = PgEntityStore(db)
     app.state.merge_service = MergeService(
         settings=settings,
@@ -153,6 +157,25 @@ async def lifespan(app: FastAPI):
         store_backup=store_backup,
         run_store=run_store,
     )
+    # Nightly profile-refresh (derived entity profiles → node_profiles, served by GET /nodes/{id})
+    # and entity backfill (recent memories re-checked against touched entities' aliases).
+    profile_refresh_service = ProfileRefreshService(
+        settings=settings,
+        entity_store=entity_store,
+        profile_store=PgProfileStore(db),
+        registry=app.state.registry,
+        run_store=run_store,
+    )
+    app.state.profile_refresh_service = profile_refresh_service
+    backfill_service = BackfillService(
+        settings=settings,
+        entity_store=entity_store,
+        node_writer=node_writer,
+        indexer=indexer,
+        store_backup=store_backup,
+        run_store=run_store,
+    )
+    app.state.backfill_service = backfill_service
 
     # Capture pipeline (ADR-019/026/030): in-process, nodes-to-store, backed by the real store
     # backup. The tag store feeds the organizer prompt the live vocabulary (ADR-024 §1).
@@ -183,6 +206,8 @@ async def lifespan(app: FastAPI):
             settings=settings,
             jobs=build_backup_jobs(settings, db, store_backup),
             reindex=reindex_service,
+            profile_refresh=profile_refresh_service,
+            backfill=backfill_service,
         )
         scheduler.start()
     app.state.scheduler = scheduler
