@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from app.graph.store import NoteNeighbors
 from app.indexing.indexer import IndexOutcome
 from app.indexing.store import NoteUpsert
 from app.providers.base import (
@@ -172,6 +173,36 @@ class FakeVaultBackup:
 
     async def request_commit(self, reason: str) -> None:
         self.reasons.append(reason)
+
+
+class FakeGraphStore:
+    """In-memory GraphStore for relatedness-graph tests — no live DB (08 testing policy).
+
+    ``neighbors`` is the preset output of ``compute_neighbors`` (records the args it was called
+    with); ``paths`` is the note universe for the render pass; ``written_links`` captures the
+    edges the service asked to materialize."""
+
+    def __init__(
+        self,
+        *,
+        neighbors: list[NoteNeighbors] | None = None,
+        paths: list[str] | None = None,
+    ) -> None:
+        self._neighbors = neighbors or []
+        self._paths = paths if paths is not None else [n.vault_path for n in self._neighbors]
+        self.compute_args: dict | None = None
+        self.written_links: list[NoteNeighbors] | None = None
+
+    async def compute_neighbors(self, *, top_k: int, min_score: float) -> list[NoteNeighbors]:
+        self.compute_args = {"top_k": top_k, "min_score": min_score}
+        return list(self._neighbors)
+
+    async def replace_note_links(self, neighbors: list[NoteNeighbors]) -> int:
+        self.written_links = list(neighbors)
+        return sum(len(n.related) for n in neighbors)
+
+    async def list_note_paths(self) -> list[str]:
+        return list(self._paths)
 
 
 class FakeGitRepo:

@@ -142,6 +142,13 @@ class Settings(BaseSettings):
     embed_max_attempts: int = 3
     embed_retry_backoff_seconds: float = 1.0
 
+    # --- Relatedness graph (M2, ADR-023). Directional per-note top-K over notes.embedding
+    # cosine above a floor → note_links + a rendered sb:related block in each note body.
+    # Recomputed nightly only (+ POST /admin/reindex); both knobs are tuned live during the M2
+    # Accept (empty graph → lower the floor; junk links → raise it). ---
+    related_top_k: int = 5
+    related_min_score: float = 0.5
+
     # --- Search (M2, 03-api §Search, ADR-022). Note-grouped pgvector cosine over chunks. ---
     # Default result count when the request omits top_k; the request is clamped to this ceiling.
     search_top_k_default: int = 10

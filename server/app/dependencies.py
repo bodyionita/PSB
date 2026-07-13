@@ -10,6 +10,7 @@ from fastapi import Depends, HTTPException, Request, status
 
 from .config import Settings
 from .db import Database
+from .graph.service import RelatednessGraph
 from .providers.registry import ProviderRegistry
 from .search.service import SearchService
 from .services.auth_service import AuthService, SessionInfo
@@ -43,6 +44,10 @@ def get_vault_backup(request: Request) -> VaultBackupService:
 
 def get_search_service(request: Request) -> SearchService:
     return request.app.state.search_service
+
+
+def get_relatedness_graph(request: Request) -> RelatednessGraph:
+    return request.app.state.relatedness_graph
 
 
 async def require_session(

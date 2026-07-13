@@ -16,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from .capture.notes import NoteWriter
 from .config import Settings, get_settings
 from .db import Database
+from .graph.service import RelatednessGraph
+from .graph.store import PgGraphStore
 from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
@@ -62,6 +64,12 @@ async def lifespan(app: FastAPI):
         settings=settings, store=PgIndexStore(db), registry=app.state.registry
     )
     app.state.indexer = indexer
+
+    # Relatedness graph (M2, ADR-023): recomputes note_links + renders the sb:related vault
+    # blocks. Nightly-only + on /admin/reindex (wired by the reindex task); never on capture.
+    app.state.relatedness_graph = RelatednessGraph(
+        settings=settings, store=PgGraphStore(db), vault_backup=vault_backup
+    )
 
     # Search (M2, ADR-022/023): the read side — note-grouped cosine over chunks + note preview.
     app.state.search_service = SearchService(
