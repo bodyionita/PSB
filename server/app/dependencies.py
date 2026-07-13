@@ -10,14 +10,14 @@ from fastapi import Depends, HTTPException, Request, status
 
 from .config import Settings
 from .db import Database
-from .graph.service import RelatednessGraph
+from .graph.service import DerivedEdgeGraph
 from .providers.registry import ProviderRegistry
 from .search.service import SearchService
 from .services.agent_runs import AgentRunStore
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
 from .services.reindex import ReindexService
-from .services.vault_backup import VaultBackupService
+from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
 
 
@@ -41,16 +41,16 @@ def get_capture_pipeline(request: Request) -> CapturePipeline:
     return request.app.state.capture_pipeline
 
 
-def get_vault_backup(request: Request) -> VaultBackupService:
-    return request.app.state.vault_backup
+def get_store_backup(request: Request) -> StoreBackupService:
+    return request.app.state.store_backup
 
 
 def get_search_service(request: Request) -> SearchService:
     return request.app.state.search_service
 
 
-def get_relatedness_graph(request: Request) -> RelatednessGraph:
-    return request.app.state.relatedness_graph
+def get_derived_edge_graph(request: Request) -> DerivedEdgeGraph:
+    return request.app.state.derived_edge_graph
 
 
 def get_reindex_service(request: Request) -> ReindexService:

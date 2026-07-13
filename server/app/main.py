@@ -13,10 +13,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .capture.notes import NoteWriter
 from .config import Settings, get_settings
 from .db import Database
-from .graph.service import RelatednessGraph
+from .entities.resolver import EntityResolver
+from .entities.store import PgAliasStore
+from .graph.node_writer import NodeWriter
+from .graph.service import DerivedEdgeGraph
 from .graph.store import PgGraphStore
 from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
@@ -33,8 +35,9 @@ from .services.capture_store import PgCaptureStore
 from .services.git_repo import GitRepo
 from .services.rate_limit import RateLimiter
 from .services.reindex import ReindexService
+from .services.review_queue import PgReviewQueue
 from .services.scheduler import BackupScheduler
-from .services.vault_backup import VaultBackupService
+from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
 from .tags.store import PgTagStore
 
@@ -59,45 +62,42 @@ async def lifespan(app: FastAPI):
         max_events=settings.login_rate_limit_per_min, window_seconds=60.0
     )
 
-    # Vault backup / durability (ADR-014): the one owner of git ops on the vault. ensure_ready
-    # inits the repo if needed, pins gc/reflog, and bootstraps an empty vault's skeleton.
-    vault_backup = VaultBackupService(settings=settings, git=GitRepo(settings.vault_path))
-    await vault_backup.ensure_ready()
-    app.state.vault_backup = vault_backup
+    # Store backup / durability (ADR-014): the one owner of git ops on the graph store.
+    # ensure_ready inits the repo if needed, wires the GRAPH_STORE_REPO remote, pins gc/reflog,
+    # and bootstraps an empty store's node-type skeleton (ADR-031 §6).
+    store_backup = StoreBackupService(settings=settings, git=GitRepo(settings.graph_store_path))
+    await store_backup.ensure_ready()
+    app.state.store_backup = store_backup
 
-    # Indexer (M2, ADR-022/023): the real index step — vault notes → notes/chunks. Owns
-    # embed-on-index; the capture pipeline calls it to index freshly-written notes.
-    indexer = Indexer(
-        settings=settings, store=PgIndexStore(db), registry=app.state.registry
-    )
+    # Indexer (ADR-022/026): the real index step — node files → nodes/chunks + canonical edges.
+    # Owns embed-on-index; the capture pipeline calls it to index freshly-written nodes.
+    indexer = Indexer(settings=settings, store=PgIndexStore(db), registry=app.state.registry)
     app.state.indexer = indexer
 
-    # Relatedness graph (M2, ADR-023): recomputes note_links + renders the sb:related vault
-    # blocks. Nightly-only + on /admin/reindex (via the reindex service); never on capture.
-    graph = RelatednessGraph(
-        settings=settings, store=PgGraphStore(db), vault_backup=vault_backup
-    )
-    app.state.relatedness_graph = graph
+    # Derived-edge graph (ADR-023 surviving half): recomputes the DB-only `similar` edges.
+    # Nightly + on /admin/reindex (via the reindex service); never on the capture path.
+    graph = DerivedEdgeGraph(settings=settings, store=PgGraphStore(db))
+    app.state.derived_edge_graph = graph
 
-    # Reindex (M2, ADR-023 §4): the combined pass — git pull → reindex_all → recompute graph →
+    # Reindex (ADR-023 §4): the combined pass — git pull → reindex_all → recompute derived edges →
     # one commit+push. Single-flight, shared by the nightly job + POST /admin/reindex.
     reindex_service = ReindexService(
         settings=settings,
         indexer=indexer,
         graph=graph,
-        vault_backup=vault_backup,
+        store_backup=store_backup,
         run_store=run_store,
     )
     app.state.reindex_service = reindex_service
 
-    # Search (M2, ADR-022/023): the read side — note-grouped cosine over chunks + note preview.
+    # Search (ADR-022/026): the read side — node-grouped cosine over chunks + node detail w/ edges.
     app.state.search_service = SearchService(
         settings=settings, store=PgSearchStore(db), registry=app.state.registry
     )
 
-    # Tags (M2, ADR-024): the live tag vocabulary (organizer reuse) + the manual two-step
-    # consolidation tool (propose → apply). One store; the consolidation service reuses the
-    # indexer + vault backup for the apply's rewrite-and-reindex.
+    # Tags (ADR-024): the live tag vocabulary (organizer reuse) + the manual two-step consolidation
+    # tool (propose → apply). One store; the consolidation service reuses the indexer + store
+    # backup for the apply's rewrite-and-reindex.
     tag_store = PgTagStore(db)
     app.state.tag_store = tag_store
     app.state.tag_consolidation_service = TagConsolidationService(
@@ -105,20 +105,33 @@ async def lifespan(app: FastAPI):
         store=tag_store,
         registry=app.state.registry,
         indexer=indexer,
-        vault_backup=vault_backup,
+        store_backup=store_backup,
         run_store=run_store,
     )
 
-    # Capture pipeline (M1, ADR-019): in-process, notes-to-vault, backed by the real vault backup.
-    # The tag store feeds the organizer prompt the live vocabulary (ADR-024 §1).
+    # Entity resolution (ADR-030): mentions → node ids over the alias index, filing review items
+    # when it can't confidently resolve; the review queue also holds vocab proposals (ADR-027).
+    review_queue = PgReviewQueue(db)
+    app.state.review_queue = review_queue
+    entity_resolver = EntityResolver(
+        settings=settings,
+        alias_store=PgAliasStore(db),
+        review_queue=review_queue,
+        registry=app.state.registry,
+    )
+
+    # Capture pipeline (ADR-019/026/030): in-process, nodes-to-store, backed by the real store
+    # backup. The tag store feeds the organizer prompt the live vocabulary (ADR-024 §1).
     pipeline = CapturePipeline(
         settings=settings,
         store=PgCaptureStore(db),
         registry=app.state.registry,
-        note_writer=NoteWriter(settings.vault_path),
-        vault_backup=vault_backup,
+        node_writer=NodeWriter(settings.graph_store_path),
+        store_backup=store_backup,
         run_store=run_store,
         indexer=indexer,
+        entity_resolver=entity_resolver,
+        review_queue=review_queue,
         tag_vocabulary=tag_store,
     )
     app.state.capture_pipeline = pipeline
@@ -134,7 +147,7 @@ async def lifespan(app: FastAPI):
     if settings.enable_scheduler:
         scheduler = BackupScheduler(
             settings=settings,
-            jobs=build_backup_jobs(settings, db, vault_backup),
+            jobs=build_backup_jobs(settings, db, store_backup),
             reindex=reindex_service,
         )
         scheduler.start()
@@ -152,7 +165,7 @@ async def lifespan(app: FastAPI):
         await reindex_service.drain()
         await app.state.tag_consolidation_service.drain()
         await pipeline.drain()
-        await vault_backup.flush()
+        await store_backup.flush()
         await db.disconnect()
 
 

@@ -74,7 +74,7 @@ def _record(capture_id: str, **over) -> CaptureRecord:
         kind=KIND_TEXT,
         status=RECEIVED,
         raw_text="hi",
-        note_paths=["Ideas/2026-07-12 A.md"],
+        node_paths=["memory/2026-07-12--a--018f0001.md"],
         created_at=now,
         updated_at=now,
     )
@@ -149,7 +149,7 @@ def test_list_captures_defaults_and_shape(client_and_pipeline):
     assert len(body) == 1
     item = body[0]
     assert item["capture_id"] == "a"
-    assert item["note_paths"] == ["Ideas/2026-07-12 A.md"]
+    assert item["node_paths"] == ["memory/2026-07-12--a--018f0001.md"]
     assert item["follow_up_question"] == "how did that feel?"
 
 

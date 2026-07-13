@@ -54,12 +54,10 @@ class Settings(BaseSettings):
     db_pool_min_size: int = 1
     db_pool_max_size: int = 10
 
-    # --- Graph store (M3 pivot, ADR-026/030/031/032) ---
-    # Coexists with the vault_* settings below only until M3 task 2 performs the code
-    # rename (CLAUDE.md pivot note); new work reads these, never vault_*.
+    # --- Graph store (M3 pivot, ADR-026/030/031/032). The typed-node store replaces the vault. ---
     graph_store_path: str = "../graph-store"  # prod: /srv/graph-store (07-infra)
     # SSH URL of the private PSB-graph repo (ADR-031 §6). Empty ⇒ bootstrap skips the
-    # remote (dev: commits stay local, same semantics as a remoteless vault today).
+    # remote (dev: commits stay local, same semantics as a remoteless store today).
     graph_store_repo: str = ""
     # Seeded node-type vocabulary (9) + edge rels (6) — ADR-031 §3. Growth is governed
     # (LLM proposes, user approves — ADR-027); approved additions land in app_settings,
@@ -77,9 +75,7 @@ class Settings(BaseSettings):
             "topic",
         ]
     )
-    edge_rels: CsvList = Field(
-        default=["involves", "about", "part_of", "led_to", "follows", "at"]
-    )
+    edge_rels: CsvList = Field(default=["involves", "about", "part_of", "led_to", "follows", "at"])
     # Types carrying the entity substrate (aliases/disambig/profiles — ADR-030); must be
     # a subset of node_types (memory/conversation/insight are content, not entities).
     entity_like_types: CsvList = Field(
@@ -96,16 +92,16 @@ class Settings(BaseSettings):
     # ADR-010 window after the 03:40 reindex so the day's edges are in the DB.
     profile_refresh_cron: str = "10 4 * * *"
 
-    # --- Vault (ADR-001) ---
-    vault_path: str = "../ObisidanVault"
+    # --- Planes (ADR-005 surviving half — attributes, not folders) ---
     planes: CsvList = Field(
         default=["Professional", "Personal", "Family", "Friends", "Health", "Ideas"]
     )
-    # System plane/folder for the organizer's "don't know" + failure fallback (ADR-005/019).
-    # Always present; not part of PLANES.
-    inbox_plane: str = "Inbox"
-    # Path prefixes the indexer skips.
-    vault_ignore: CsvList = Field(default=[".obsidian", ".trash", ".git", "templates"])
+    # System folder for the organizer's "can't classify" + failure fallback (02 §1, ADR-026):
+    # unclassifiable nodes land in `<GRAPH_STORE_PATH>/inbox/` (type=memory), never guessed.
+    # A folder now, not a plane — planes are frontmatter attributes.
+    inbox_folder: str = "inbox"
+    # Store path prefixes the indexer skips (ADR-026: Obsidian gone, so no `.obsidian`).
+    store_ignore: CsvList = Field(default=[".trash", ".git", "templates"])
 
     # --- Capture pipeline (M1, ADR-019) ---
     # Raw capture inputs that are not text (audio) are persisted here before any model call
@@ -114,19 +110,30 @@ class Settings(BaseSettings):
     # Whisper hard limit; larger uploads are rejected before persistence.
     audio_max_bytes: int = 25 * 1024 * 1024
     # Bounds on a single organize result, enforced by validate_organizer_output.
-    organizer_max_notes: int = 8
+    organizer_max_nodes: int = 8
     organizer_max_tags: int = 12
-    # Tag-vocabulary reuse (ADR-024 §1): the N most-used distinct vault tags injected into the
+    # Max canonical edges the organizer may write on one node (bounds a runaway model + keeps
+    # the frontmatter legible). Edges beyond this are dropped at validation.
+    organizer_max_edges: int = 12
+    # Tag-vocabulary reuse (ADR-024 §1): the N most-used distinct store tags injected into the
     # organizer prompt so it prefers an existing tag over coining a variant. Frequency-capped to
     # bound prompt size; 0 disables the injection.
     organizer_tag_vocabulary_max: int = 100
 
-    # --- Vault backup / durability (ADR-014) ---
+    # --- Entity resolution (ADR-030/032) ---
+    # Alias-index candidates injected into the organizer/resolver prompt are bounded (injection
+    # hygiene, ADR-031 (a)): only the mention's matching candidates, capped at this many.
+    entity_candidate_max: int = 8
+    # Entropy guard (ADR-032 §2): an alias shorter than this never *fuzzy* auto-links — it needs
+    # an exact/normalized hit or it goes to review. Guards "Al"/"IT"/"mom" style collisions.
+    entity_alias_min_fuzzy_len: int = 4
+
+    # --- Graph-store backup / durability (ADR-014; ex-`vault_*`, renamed at M3 — ADR-031) ---
     # The server only ever fast-forward pushes to this remote/branch; never force/rebase/reset.
-    vault_git_remote: str = "origin"
-    vault_git_branch: str = "main"
+    store_git_remote: str = "origin"
+    store_git_branch: str = "main"
     # Writes are coalesced into one commit per debounce window (~60s batch commits, §3).
-    vault_backup_debounce_seconds: float = 60.0
+    store_backup_debounce_seconds: float = 60.0
     # Commit identity (set in the repo config so `git commit` works inside the container).
     git_user_name: str = "Braindan"
     git_user_email: str = "braindan@braindan.local"
@@ -182,25 +189,25 @@ class Settings(BaseSettings):
     chunk_size: int = 1200
     chunk_overlap: int = 200
 
-    # --- Indexer (M2, ADR-022). A note's chunks are batch-embedded in one call; a transient
+    # --- Indexer (M2, ADR-022). A node's chunks are batch-embedded in one call; a transient
     # embedder failure (e.g. Ollama 429/restart) is retried with exponential backoff before the
-    # note is skipped (skip-and-continue → the run is `partial`, a later reindex retries it). ---
+    # node is skipped (skip-and-continue → the run is `partial`, a later reindex retries it). ---
     embed_max_attempts: int = 3
     embed_retry_backoff_seconds: float = 1.0
 
-    # --- Relatedness graph (M2, ADR-023). Directional per-note top-K over notes.embedding
-    # cosine above a floor → note_links + a rendered sb:related block in each note body.
-    # Recomputed nightly only (+ POST /admin/reindex); both knobs are tuned live during the M2
-    # Accept (empty graph → lower the floor; junk links → raise it). ---
-    related_top_k: int = 5
-    related_min_score: float = 0.5
+    # --- Derived `similar` edges (ADR-023 surviving half, retargeted at M3). Directional
+    # per-node top-K over nodes.embedding cosine above a floor → `edges(origin=derived)`.
+    # DB-ONLY now — no file rendering, no commit step (ADR-026). Recomputed nightly only
+    # (+ POST /admin/reindex); both knobs tuned live (empty graph → lower the floor). ---
+    similar_top_k: int = 5
+    similar_min_score: float = 0.5
 
     # --- Tag consolidation (M2, ADR-024 §2). The manual two-step POST /admin/tags/consolidate:
     # propose feeds up to this many distinct tags (most-used first) to the distill chain to group
-    # variants; apply rewrites the affected notes' frontmatter tags + reindexes them. ---
+    # variants; apply rewrites the affected nodes' frontmatter tags + reindexes them. ---
     tags_consolidate_max_vocabulary: int = 300
 
-    # --- Search (M2, 03-api §Search, ADR-022). Note-grouped pgvector cosine over chunks. ---
+    # --- Search (M2, 03-api §Search, ADR-022). Node-grouped pgvector cosine over chunks. ---
     # Default result count when the request omits top_k; the request is clamped to this ceiling.
     search_top_k_default: int = 10
     search_max_top_k: int = 50
@@ -216,8 +223,8 @@ class Settings(BaseSettings):
     # In-process APScheduler. Off by default; exactly one prod instance sets it true so the
     # durability jobs (below) fire once. M4 extends the same scheduler with the agent window.
     enable_scheduler: bool = False
-    # The app's single local timezone: drives scheduling AND vault-facing formatting
-    # (frontmatter `created`, note filename dates) — the only two uses of TZ (CLAUDE.md
+    # The app's single local timezone: drives scheduling AND store-facing formatting
+    # (frontmatter `created`, node filename dates) — the only two uses of TZ (CLAUDE.md
     # conventions). DB timestamps stay UTC.
     scheduler_tz: str = "Europe/Bucharest"
     agent_window_start_hour: int = 3
@@ -232,12 +239,12 @@ class Settings(BaseSettings):
     # the retired daily-summary slot); still free: 03:00 (connectors) / 04:40 (reflection). ---
     # Combined nightly reindex (M2, ADR-023 §4): git pull → rescan → recompute graph → commit+push.
     # In the ADR-010 window, ahead of the summary jobs so search/graph reflect the day's captures.
-    reindex_cron: str = "40 3 * * *"  # nightly full rescan + relatedness recompute (04 §5)
+    reindex_cron: str = "40 3 * * *"  # nightly full rescan + derived-edge recompute (04 §4)
     backup_data_sync_cron: str = "10 3 * * *"  # nightly /srv/data raw inputs → R2
     backup_db_backup_cron: str = "25 3 * * *"  # nightly pg_dump → R2
     integrity_drill_cron: str = "30 4 * * sun"  # weekly verify+clone drill (ADR-014 §6)
-    backup_vault_sweep_cron: str = "55 4 * * *"  # ADR-010 04:55 commit+push sweep
-    backup_vault_bundle_cron: str = "57 4 * * *"  # WORM `git bundle` right after the sweep
+    backup_store_sweep_cron: str = "55 4 * * *"  # ADR-010 04:55 commit+push sweep
+    backup_store_bundle_cron: str = "57 4 * * *"  # WORM `git bundle` right after the sweep
     # /health `backups` leg degrades when the last successful integrity-drill is older than this
     # (weekly cadence + one night of grace) or the latest drill failed (ADR-014 §6).
     integrity_drill_max_age_days: int = 8
@@ -247,7 +254,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "planes",
-        "vault_ignore",
+        "store_ignore",
         "node_types",
         "edge_rels",
         "entity_like_types",
@@ -270,9 +277,7 @@ class Settings(BaseSettings):
             raise ValueError("NODE_TYPES must include 'memory' (the organizer fallback type)")
         unknown = set(self.entity_like_types) - set(self.node_types)
         if unknown:
-            raise ValueError(
-                f"ENTITY_LIKE_TYPES not present in NODE_TYPES: {sorted(unknown)}"
-            )
+            raise ValueError(f"ENTITY_LIKE_TYPES not present in NODE_TYPES: {sorted(unknown)}")
         return self
 
 

@@ -25,7 +25,7 @@ async def health(
     return HealthResponse(
         status="ok" if report.ok else "degraded",
         db=report.db,
-        vault=report.vault,
+        store=report.store,
         git_remote=report.git_remote,
         backups=report.backups,
     )

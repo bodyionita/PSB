@@ -10,13 +10,13 @@ from app.db import Database
 from app.services.backup_jobs import BackupJobs
 from app.services.git_repo import GitRepo
 from app.services.reindex import ReindexService, build_reindex_service
-from app.services.vault_backup import VaultBackupService
+from app.services.store_backup import StoreBackupService
 
 
 def test_main_rejects_bad_args():
     assert main([]) == 2
     assert main(["nonsense"]) == 2
-    assert main(["vault-backup", "extra"]) == 2
+    assert main(["store-backup", "extra"]) == 2
 
 
 def test_reindex_is_a_valid_cli_job():
@@ -25,9 +25,9 @@ def test_reindex_is_a_valid_cli_job():
 
 def test_backup_jobs_map_to_real_methods(tmp_path: Path):
     # build_backup_jobs constructs without touching the DB pool (no connect()).
-    settings = Settings(vault_path=str(tmp_path / "vault"))
-    vault_backup = VaultBackupService(settings=settings, git=GitRepo(settings.vault_path))
-    jobs = build_backup_jobs(settings, Database(settings), vault_backup)
+    settings = Settings(graph_store_path=str(tmp_path / "store"))
+    store_backup = StoreBackupService(settings=settings, git=GitRepo(settings.graph_store_path))
+    jobs = build_backup_jobs(settings, Database(settings), store_backup)
     assert isinstance(jobs, BackupJobs)
     for method_name in BACKUP_JOBS.values():
         assert callable(getattr(jobs, method_name))
@@ -35,7 +35,7 @@ def test_backup_jobs_map_to_real_methods(tmp_path: Path):
 
 def test_build_reindex_service_constructs_without_a_db_connection(tmp_path: Path):
     # Mirrors build_backup_jobs: composes indexer/graph/registry lazily, no pool connect().
-    settings = Settings(vault_path=str(tmp_path / "vault"))
-    vault_backup = VaultBackupService(settings=settings, git=GitRepo(settings.vault_path))
-    service = build_reindex_service(settings, Database(settings), vault_backup)
+    settings = Settings(graph_store_path=str(tmp_path / "store"))
+    store_backup = StoreBackupService(settings=settings, git=GitRepo(settings.graph_store_path))
+    service = build_reindex_service(settings, Database(settings), store_backup)
     assert isinstance(service, ReindexService)

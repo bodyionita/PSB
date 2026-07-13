@@ -37,7 +37,7 @@ class CaptureRecord:
     status: str
     raw_text: str | None = None
     audio_path: str | None = None
-    note_paths: list[str] = field(default_factory=list)
+    node_paths: list[str] = field(default_factory=list)
     follow_up_question: str | None = None
     follow_up_answer: str | None = None
     error: str | None = None
@@ -69,7 +69,7 @@ class CaptureStore(Protocol):
 
     async def set_raw_text(self, capture_id: str, raw_text: str) -> None: ...
 
-    async def set_note_paths(self, capture_id: str, note_paths: list[str]) -> None: ...
+    async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None: ...
 
     async def set_follow_up_question(self, capture_id: str, question: str) -> None: ...
 
@@ -85,7 +85,7 @@ class CaptureStore(Protocol):
 
 
 _COLUMNS = (
-    "id, kind, status, raw_text, audio_path, note_paths, "
+    "id, kind, status, raw_text, audio_path, node_paths, "
     "follow_up_question, follow_up_answer, error, created_at, updated_at"
 )
 
@@ -97,7 +97,7 @@ def _record(row) -> CaptureRecord:
         status=row["status"],
         raw_text=row["raw_text"],
         audio_path=row["audio_path"],
-        note_paths=list(row["note_paths"] or []),
+        node_paths=list(row["node_paths"] or []),
         follow_up_question=row["follow_up_question"],
         follow_up_answer=row["follow_up_answer"],
         error=row["error"],
@@ -140,9 +140,7 @@ class PgCaptureStore:
 
     async def get(self, capture_id: str) -> CaptureRecord | None:
         async with self._db.acquire() as conn:
-            row = await conn.fetchrow(
-                f"SELECT {_COLUMNS} FROM captures WHERE id = $1", capture_id
-            )
+            row = await conn.fetchrow(f"SELECT {_COLUMNS} FROM captures WHERE id = $1", capture_id)
         return _record(row) if row is not None else None
 
     async def list_recent(self, limit: int) -> list[CaptureRecord]:
@@ -169,8 +167,8 @@ class PgCaptureStore:
     async def set_raw_text(self, capture_id: str, raw_text: str) -> None:
         await self._set(capture_id, "raw_text = $2", raw_text)
 
-    async def set_note_paths(self, capture_id: str, note_paths: list[str]) -> None:
-        await self._set(capture_id, "note_paths = $2", note_paths)
+    async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None:
+        await self._set(capture_id, "node_paths = $2", node_paths)
 
     async def set_follow_up_question(self, capture_id: str, question: str) -> None:
         await self._set(capture_id, "follow_up_question = $2", question)

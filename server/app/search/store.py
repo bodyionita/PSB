@@ -1,16 +1,18 @@
-"""Read side of the derived index (03-api §Search & notes, 02 §3).
+"""Read side of the derived index (03-api §Search & graph, 02 §3).
 
 The search service depends on the :class:`SearchStore` *protocol*, not on asyncpg, so it unit-tests
 against an in-memory fake (no live DB in CI — 08 testing policy). :class:`PgSearchStore` is the
 plain-SQL asyncpg implementation (CLAUDE.md rule 5, ADR-011).
 
 Query embeddings pass as plain ``list[float]`` — the ``vector`` codec on the pool (see ``db.py``)
-encodes them for the ``<=>`` cosine operator, which runs against the HNSW index (migration 004).
+encodes them for the ``<=>`` cosine operator, which runs against the HNSW index (migration 005).
+Tombstoned nodes (``merged_into`` set) are hidden from search and from neighbour lists (ADR-030 §5).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Protocol
 
 from ..db import Database
@@ -18,10 +20,11 @@ from ..db import Database
 
 @dataclass(frozen=True)
 class SearchHit:
-    """One note in a search result — its best-scoring chunk supplies the snippet + score."""
+    """One node in a search result — its best-scoring chunk supplies the snippet + score."""
 
-    note_id: str
-    vault_path: str
+    node_id: str
+    store_path: str
+    type: str
     title: str | None
     plane: str | None
     planes: list[str]
@@ -31,26 +34,40 @@ class SearchHit:
 
 
 @dataclass(frozen=True)
-class RelatedNote:
-    """A ``note_links`` neighbour of a note (ADR-023)."""
+class NodeEdgeView:
+    """One edge of a node for the detail view (03-api §Nodes): the *other* endpoint + edge meta.
 
-    note_id: str
-    vault_path: str
+    ``dir`` is ``out`` (this node → other) or ``in`` (other → this node); ``origin`` is
+    ``canonical`` | ``derived``; ``score`` is confidence (canonical) or cosine (derived)."""
+
+    rel: str
+    dir: str
+    node_id: str
+    type: str | None
     title: str | None
-    score: float
+    origin: str
+    score: float | None
+    since: date | None
+    until: date | None
 
 
 @dataclass(frozen=True)
-class NoteRow:
-    """A note's stored metadata + its semantic neighbours (body is read from the vault file)."""
+class NodeRow:
+    """A node's stored metadata + its edges (body is read from the store file separately)."""
 
-    note_id: str
-    vault_path: str
+    node_id: str
+    store_path: str
+    type: str
     title: str | None
     plane: str | None
     planes: list[str]
     tags: list[str]
-    related: list[RelatedNote] = field(default_factory=list)
+    aliases: list[str]
+    disambig: str | None
+    occurred_start: date | None
+    occurred_end: date | None
+    merged_into: str | None
+    edges: list[NodeEdgeView] = field(default_factory=list)
 
 
 class SearchStore(Protocol):
@@ -62,13 +79,15 @@ class SearchStore(Protocol):
         *,
         top_k: int,
         planes: list[str] | None,
+        types: list[str] | None,
         min_score: float,
     ) -> list[SearchHit]:
-        """Note-grouped cosine search: one row per note (best chunk), ranked by score desc."""
+        """Node-grouped cosine search: one row per node (best chunk), ranked by score desc.
+        Tombstoned nodes are excluded; ``planes``/``types`` = None skips that filter."""
         ...
 
-    async def get_note(self, note_id: str) -> NoteRow | None:
-        """A note's metadata + ``note_links`` neighbours, or ``None`` if the id is unknown."""
+    async def get_node(self, node_id: str) -> NodeRow | None:
+        """A node's metadata + its canonical/derived edges (both directions), or ``None``."""
         ...
 
 
@@ -84,19 +103,22 @@ class PgSearchStore:
         *,
         top_k: int,
         planes: list[str] | None,
+        types: list[str] | None,
         min_score: float,
     ) -> list[SearchHit]:
-        # Best chunk per note via DISTINCT ON (note, ascending cosine distance), then re-rank the
-        # per-note winners by score and take top_k. `planes && $2` is array-overlap membership
-        # (ADR-005 — never folder). `$2 IS NULL` skips the filter. score = 1 - cosine distance.
+        # Best chunk per node via DISTINCT ON (node, ascending cosine distance), then re-rank the
+        # per-node winners by score and take top_k. `planes && $2` is array-overlap membership
+        # (ADR-005 — never folder); `n.type = ANY($3)` filters node type; `$2/$3 IS NULL` skips the
+        # filter. Tombstones excluded. score = 1 - cosine distance.
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT note_id, vault_path, title, plane, planes, tags, snippet, score
+                SELECT node_id, store_path, type, title, plane, planes, tags, snippet, score
                 FROM (
                     SELECT DISTINCT ON (n.id)
-                        n.id          AS note_id,
-                        n.vault_path  AS vault_path,
+                        n.id          AS node_id,
+                        n.store_path  AS store_path,
+                        n.type        AS type,
                         n.title       AS title,
                         n.plane       AS plane,
                         n.planes      AS planes,
@@ -104,24 +126,28 @@ class PgSearchStore:
                         c.content     AS snippet,
                         1 - (c.embedding <=> $1) AS score
                     FROM chunks c
-                    JOIN notes n ON n.id = c.note_id
+                    JOIN nodes n ON n.id = c.node_id
                     WHERE c.embedding IS NOT NULL
+                      AND n.merged_into IS NULL
                       AND ($2::text[] IS NULL OR n.planes && $2::text[])
+                      AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
                     ORDER BY n.id, c.embedding <=> $1
                 ) best
-                WHERE score >= $3
+                WHERE score >= $4
                 ORDER BY score DESC
-                LIMIT $4
+                LIMIT $5
                 """,
                 embedding,
                 planes,
+                types,
                 min_score,
                 top_k,
             )
         return [
             SearchHit(
-                note_id=str(row["note_id"]),
-                vault_path=row["vault_path"],
+                node_id=str(row["node_id"]),
+                store_path=row["store_path"],
+                type=row["type"],
                 title=row["title"],
                 plane=row["plane"],
                 planes=list(row["planes"] or []),
@@ -132,39 +158,58 @@ class PgSearchStore:
             for row in rows
         ]
 
-    async def get_note(self, note_id: str) -> NoteRow | None:
+    async def get_node(self, node_id: str) -> NodeRow | None:
         async with self._db.acquire() as conn:
-            note = await conn.fetchrow(
-                "SELECT id, vault_path, title, plane, planes, tags FROM notes WHERE id = $1",
-                note_id,
-            )
-            if note is None:
-                return None
-            related = await conn.fetch(
+            node = await conn.fetchrow(
                 """
-                SELECT nl.related_note_id AS note_id, nl.score AS score,
-                       n2.vault_path AS vault_path, n2.title AS title
-                FROM note_links nl
-                JOIN notes n2 ON n2.id = nl.related_note_id
-                WHERE nl.note_id = $1
-                ORDER BY nl.score DESC
+                SELECT id, store_path, type, title, plane, planes, tags, aliases, disambig,
+                       occurred_start, occurred_end, merged_into
+                FROM nodes WHERE id = $1
                 """,
-                note_id,
+                node_id,
             )
-        return NoteRow(
-            note_id=str(note["id"]),
-            vault_path=note["vault_path"],
-            title=note["title"],
-            plane=note["plane"],
-            planes=list(note["planes"] or []),
-            tags=list(note["tags"] or []),
-            related=[
-                RelatedNote(
-                    note_id=str(r["note_id"]),
-                    vault_path=r["vault_path"],
-                    title=r["title"],
-                    score=float(r["score"]),
+            if node is None:
+                return None
+            edges = await conn.fetch(
+                """
+                SELECT e.rel, 'out' AS dir, e.dst_id AS other_id, n2.type AS other_type,
+                       n2.title AS other_title, e.origin, e.score, e.since, e.until
+                FROM edges e JOIN nodes n2 ON n2.id = e.dst_id
+                WHERE e.src_id = $1 AND n2.merged_into IS NULL
+                UNION ALL
+                SELECT e.rel, 'in' AS dir, e.src_id AS other_id, n2.type AS other_type,
+                       n2.title AS other_title, e.origin, e.score, e.since, e.until
+                FROM edges e JOIN nodes n2 ON n2.id = e.src_id
+                WHERE e.dst_id = $1 AND n2.merged_into IS NULL
+                ORDER BY origin, rel
+                """,
+                node_id,
+            )
+        return NodeRow(
+            node_id=str(node["id"]),
+            store_path=node["store_path"],
+            type=node["type"],
+            title=node["title"],
+            plane=node["plane"],
+            planes=list(node["planes"] or []),
+            tags=list(node["tags"] or []),
+            aliases=list(node["aliases"] or []),
+            disambig=node["disambig"],
+            occurred_start=node["occurred_start"],
+            occurred_end=node["occurred_end"],
+            merged_into=str(node["merged_into"]) if node["merged_into"] else None,
+            edges=[
+                NodeEdgeView(
+                    rel=e["rel"],
+                    dir=e["dir"],
+                    node_id=str(e["other_id"]),
+                    type=e["other_type"],
+                    title=e["other_title"],
+                    origin=e["origin"],
+                    score=float(e["score"]) if e["score"] is not None else None,
+                    since=e["since"],
+                    until=e["until"],
                 )
-                for r in related
+                for e in edges
             ],
         )

@@ -1,20 +1,39 @@
-"""Pure-logic tests for the organizer (no I/O, no mocks) — 08 testing policy."""
+"""Pure-logic tests for the organizer v3 (no I/O, no mocks) — 08 testing policy."""
 
 from __future__ import annotations
 
 from app.capture.organizer import (
-    inbox_fallback_note,
+    inbox_fallback_node,
     parse_organizer_json,
     validate_organizer_output,
 )
 
 PLANES = ["Professional", "Personal", "Ideas"]
-INBOX = "Inbox"
+NODE_TYPES = [
+    "memory",
+    "person",
+    "idea",
+    "conversation",
+    "insight",
+    "place",
+    "event",
+    "project",
+    "topic",
+]
+EDGE_RELS = ["involves", "about", "part_of", "led_to", "follows", "at"]
+ENTITY_TYPES = ["person", "place", "topic", "idea", "event", "project"]
 
 
-def _validate(parsed):
+def _validate(parsed, *, max_nodes=8, max_tags=12, max_edges=12):
     return validate_organizer_output(
-        parsed, planes=PLANES, inbox_plane=INBOX, max_notes=8, max_tags=12
+        parsed,
+        planes=PLANES,
+        node_types=NODE_TYPES,
+        edge_rels=EDGE_RELS,
+        entity_types=ENTITY_TYPES,
+        max_nodes=max_nodes,
+        max_tags=max_tags,
+        max_edges=max_edges,
     )
 
 
@@ -22,17 +41,17 @@ def _validate(parsed):
 
 
 def test_parse_plain_json():
-    assert parse_organizer_json('{"notes": []}') == {"notes": []}
+    assert parse_organizer_json('{"nodes": []}') == {"nodes": []}
 
 
 def test_parse_strips_code_fences():
-    text = '```json\n{"notes": [{"title": "x"}]}\n```'
-    assert parse_organizer_json(text) == {"notes": [{"title": "x"}]}
+    text = '```json\n{"nodes": [{"title": "x"}]}\n```'
+    assert parse_organizer_json(text) == {"nodes": [{"title": "x"}]}
 
 
 def test_parse_extracts_object_from_surrounding_prose():
-    text = 'Sure! Here you go:\n{"notes": []}\nHope that helps.'
-    assert parse_organizer_json(text) == {"notes": []}
+    text = 'Sure! Here you go:\n{"nodes": []}\nHope that helps.'
+    assert parse_organizer_json(text) == {"nodes": []}
 
 
 def test_parse_returns_none_for_garbage():
@@ -40,26 +59,43 @@ def test_parse_returns_none_for_garbage():
     assert parse_organizer_json("") is None
 
 
-# --- validate_organizer_output ----------------------------------------------------------
+# --- validate_organizer_output: typing + vocab proposals --------------------------------
 
 
-def test_valid_note_normalises_plane_casing():
-    # Model returned lower-case "professional"; canonical config spelling is restored.
-    notes = _validate({"notes": [{"title": "Q3 plan", "plane": "professional", "body": "text"}]})
-    assert len(notes) == 1
-    assert notes[0].plane == "Professional"
-    assert notes[0].planes == ("Professional",)  # planes defaults to a superset of plane
+def test_valid_node_keeps_known_type():
+    nodes, proposals = _validate(
+        {"nodes": [{"title": "Q3 plan", "type": "idea", "plane": "professional", "body": "text"}]}
+    )
+    assert len(nodes) == 1
+    assert nodes[0].type == "idea"
+    assert nodes[0].plane == "Professional"  # canonical spelling restored
+    assert nodes[0].planes == ("Professional",)
+    assert proposals == ()
 
 
-def test_unknown_plane_falls_back_to_inbox():
-    notes = _validate({"notes": [{"title": "t", "plane": "Nonsense", "body": "b"}]})
-    assert notes[0].plane == INBOX
+def test_unknown_type_coerces_to_memory_and_files_a_proposal():
+    nodes, proposals = _validate(
+        {"nodes": [{"title": "t", "type": "recipe", "plane": "Ideas", "body": "b"}]}
+    )
+    assert nodes[0].type == "memory"
+    assert {"vocab": "node_type", "value": "recipe"} in proposals
+
+
+def test_missing_type_defaults_to_memory():
+    nodes, _ = _validate({"nodes": [{"title": "t", "plane": "Ideas", "body": "b"}]})
+    assert nodes[0].type == "memory"
+
+
+def test_unknown_plane_becomes_none():
+    nodes, _ = _validate({"nodes": [{"title": "t", "plane": "Nonsense", "body": "b"}]})
+    assert nodes[0].plane is None  # no inbox-plane fallback anymore; plane is optional
+    assert nodes[0].planes == ()
 
 
 def test_planes_filtered_and_superset_of_primary():
-    notes = _validate(
+    nodes, _ = _validate(
         {
-            "notes": [
+            "nodes": [
                 {
                     "title": "t",
                     "plane": "Personal",
@@ -69,87 +105,120 @@ def test_planes_filtered_and_superset_of_primary():
             ]
         }
     )
-    assert notes[0].plane == "Personal"
-    assert notes[0].planes == ("Personal", "Ideas")  # bogus dropped, primary first
+    assert nodes[0].plane == "Personal"
+    assert nodes[0].planes == ("Personal", "Ideas")  # bogus dropped, primary first
+
+
+# --- occurred + entities ----------------------------------------------------------------
+
+
+def test_occurred_kept_only_when_valid_partial_iso():
+    good, _ = _validate(
+        {"nodes": [{"title": "t", "type": "memory", "occurred": "2025-07", "body": "b"}]}
+    )
+    assert good[0].occurred == "2025-07"
+    bad, _ = _validate(
+        {"nodes": [{"title": "t", "type": "memory", "occurred": "last summer", "body": "b"}]}
+    )
+    assert bad[0].occurred is None
+
+
+def test_entities_kept_with_known_type_and_rel():
+    nodes, _ = _validate(
+        {
+            "nodes": [
+                {
+                    "title": "Dinner",
+                    "type": "memory",
+                    "body": "b",
+                    "entities": [
+                        {"name": "Alex", "type": "person", "rel": "involves", "disambig": "brother"}
+                    ],
+                }
+            ]
+        }
+    )
+    m = nodes[0].entities[0]
+    assert (m.name, m.type, m.rel, m.disambig) == ("Alex", "person", "involves", "brother")
+
+
+def test_entity_unknown_type_or_rel_is_dropped_with_a_proposal():
+    nodes, proposals = _validate(
+        {
+            "nodes": [
+                {
+                    "title": "t",
+                    "type": "memory",
+                    "body": "b",
+                    "entities": [
+                        {"name": "X", "type": "gadget", "rel": "involves"},
+                        {"name": "Y", "type": "person", "rel": "owns"},
+                    ],
+                }
+            ]
+        }
+    )
+    assert nodes[0].entities == ()  # both dropped
+    assert {"vocab": "entity_type", "value": "gadget"} in proposals
+    assert {"vocab": "edge_rel", "value": "owns"} in proposals
 
 
 def test_tags_cleaned_lowercased_deduped_and_capped():
+    nodes, _ = _validate(
+        {
+            "nodes": [
+                {
+                    "title": "t",
+                    "plane": "Ideas",
+                    "tags": ["#Focus", "focus", "Energy", 5, "  "],
+                    "body": "b",
+                }
+            ]
+        },
+        max_tags=2,
+    )
+    assert nodes[0].tags == ("focus", "energy")
+
+
+def test_nodes_capped_at_max():
+    parsed = {"nodes": [{"title": f"t{i}", "plane": "Ideas", "body": "b"} for i in range(20)]}
+    nodes, _ = _validate(parsed, max_nodes=3)
+    assert len(nodes) == 3
+
+
+def test_nodes_missing_title_or_body_are_dropped():
     parsed = {
-        "notes": [
-            {
-                "title": "t",
-                "plane": "Ideas",
-                "tags": ["#Focus", "focus", "Energy", 5, "  "],
-                "body": "b",
-            }
+        "nodes": [
+            {"title": "", "body": "b"},
+            {"title": "t", "body": "   "},
+            {"body": "b"},
+            {"title": "good", "body": "keeps"},
         ]
     }
-    notes = validate_organizer_output(
-        parsed, planes=PLANES, inbox_plane=INBOX, max_notes=8, max_tags=2
-    )
-    assert notes[0].tags == ("focus", "energy")
+    nodes, _ = _validate(parsed)
+    assert [n.title for n in nodes] == ["good"]
 
 
-def test_tags_slugified_to_valid_obsidian_tags():
-    # Spaces + punctuation → hyphen; purely-numeric dropped; nested-tag slash kept (02-data-model).
-    parsed = {
-        "notes": [
-            {
-                "title": "t",
-                "plane": "Ideas",
-                "tags": ["personal growth", "  self   care!! ", "2026", "work/focus"],
-                "body": "b",
-            }
-        ]
-    }
-    notes = validate_organizer_output(
-        parsed, planes=PLANES, inbox_plane=INBOX, max_notes=8, max_tags=12
-    )
-    assert notes[0].tags == ("personal-growth", "self-care", "work/focus")
+def test_empty_or_malformed_returns_no_nodes():
+    assert _validate(None) == ((), ())
+    assert _validate({"nodes": "nope"}) == ((), ())
+    assert _validate({}) == ((), ())
 
 
-def test_notes_capped_at_max():
-    parsed = {
-        "notes": [{"title": f"t{i}", "plane": "Ideas", "body": "b"} for i in range(20)]
-    }
-    notes = validate_organizer_output(
-        parsed, planes=PLANES, inbox_plane=INBOX, max_notes=3, max_tags=12
-    )
-    assert len(notes) == 3
-
-
-def test_notes_missing_title_or_body_are_dropped():
-    parsed = {
-        "notes": [
-            {"title": "", "plane": "Ideas", "body": "b"},
-            {"title": "t", "plane": "Ideas", "body": "   "},
-            {"plane": "Ideas", "body": "b"},
-            {"title": "good", "plane": "Ideas", "body": "keeps"},
-        ]
-    }
-    notes = _validate(parsed)
-    assert [n.title for n in notes] == ["good"]
-
-
-def test_empty_or_malformed_returns_no_notes():
-    assert _validate(None) == ()
-    assert _validate({"notes": "nope"}) == ()
-    assert _validate({}) == ()
-
-
-# --- inbox_fallback_note ----------------------------------------------------------------
+# --- inbox_fallback_node ----------------------------------------------------------------
 
 
 def test_inbox_fallback_uses_first_eight_words_and_full_body():
     raw = "one two three four five six seven eight nine ten"
-    note = inbox_fallback_note(raw, inbox_plane=INBOX)
-    assert note.title == "one two three four five six seven eight"
-    assert note.body == raw
-    assert note.plane == INBOX
-    assert note.planes == (INBOX,)
+    node = inbox_fallback_node(raw)
+    assert node.title == "one two three four five six seven eight"
+    assert node.body == raw
+    assert node.type == "memory"
+    assert node.in_inbox is True
+    assert node.plane is None
 
 
 def test_inbox_fallback_handles_empty_input():
-    note = inbox_fallback_note("   ", inbox_plane=INBOX)
-    assert note.title == "Untitled capture"
-    assert note.body == "(empty capture)"
+    node = inbox_fallback_node("   ")
+    assert node.title == "Untitled capture"
+    assert node.body == "(empty capture)"

@@ -9,7 +9,7 @@ extends the same scheduler with the rest of the 03:00–05:00 agent window.
 The job → schedule mapping is exposed as pure data (:meth:`BackupScheduler.job_specs`) so it
 unit-tests without a running event loop; ``start``/``shutdown`` are the only parts that touch
 APScheduler. Each job already wraps itself in an ``agent_runs`` row and never raises (rule 7);
-the vault-touching jobs serialise on ``VaultBackupService``'s single lock, so overlapping fire
+the store-touching jobs serialise on ``StoreBackupService``'s single lock, so overlapping fire
 times are safe.
 """
 
@@ -61,11 +61,11 @@ class BackupScheduler:
             JobSpec("data-sync", self._jobs.run_data_sync, s.backup_data_sync_cron),
             JobSpec("db-backup", self._jobs.run_db_backup, s.backup_db_backup_cron),
             JobSpec("integrity-drill", self._jobs.run_integrity_drill, s.integrity_drill_cron),
-            JobSpec("vault-sweep", self._jobs.run_vault_sweep, s.backup_vault_sweep_cron),
-            JobSpec("vault-backup", self._jobs.run_vault_bundle, s.backup_vault_bundle_cron),
+            JobSpec("store-sweep", self._jobs.run_store_sweep, s.backup_store_sweep_cron),
+            JobSpec("store-backup", self._jobs.run_store_bundle, s.backup_store_bundle_cron),
         ]
         # M2 (ADR-023 §4): the combined nightly reindex. Single-flight guards it against the
-        # manual POST /admin/reindex; its own git work serialises on the vault lock like the rest.
+        # manual POST /admin/reindex; its own git work serialises on the store lock like the rest.
         if self._reindex is not None:
             specs.append(JobSpec("reindex", self._reindex.run_scheduled, s.reindex_cron))
         return specs

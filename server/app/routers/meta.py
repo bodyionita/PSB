@@ -17,4 +17,4 @@ router = APIRouter(tags=["meta"], dependencies=[Depends(require_session)])
 
 @router.get("/planes", response_model=PlanesResponse)
 async def planes(settings: Settings = Depends(get_settings)) -> PlanesResponse:
-    return PlanesResponse(planes=list(settings.planes), inbox=settings.inbox_plane)
+    return PlanesResponse(planes=list(settings.planes), inbox=settings.inbox_folder)

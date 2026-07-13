@@ -21,16 +21,16 @@ def _client(settings: Settings) -> TestClient:
 
 
 def test_planes_returns_configured_planes_and_inbox():
-    settings = Settings(planes=["Work", "Home"], inbox_plane="Inbox")
+    settings = Settings(planes=["Work", "Home"], inbox_folder="inbox")
     resp = _client(settings).get(f"{PREFIX}/planes")
     assert resp.status_code == 200
     body = resp.json()
     assert body["planes"] == ["Work", "Home"]
-    assert body["inbox"] == "Inbox"
+    assert body["inbox"] == "inbox"
 
 
 def test_planes_empty_config_still_returns_inbox():
-    settings = Settings(planes=[], inbox_plane="Inbox")
+    settings = Settings(planes=[], inbox_folder="inbox")
     body = _client(settings).get(f"{PREFIX}/planes").json()
     assert body["planes"] == []
-    assert body["inbox"] == "Inbox"
+    assert body["inbox"] == "inbox"

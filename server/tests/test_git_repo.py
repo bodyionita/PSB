@@ -1,4 +1,4 @@
-"""GitRepo + VaultBackupService against REAL git (bare remote, no network).
+"""GitRepo + StoreBackupService against REAL git (bare remote, no network).
 
 Validates the concrete wrapper and the end-to-end durability path (bootstrap → push, and a real
 non-fast-forward heal-on-reject merge). Skipped when git isn't installed so CI stays green.
@@ -15,7 +15,7 @@ import pytest
 from app.config import Settings
 from app.services.backup_jobs import BackupJobs
 from app.services.git_repo import GitRepo
-from app.services.vault_backup import VaultBackupService
+from app.services.store_backup import StoreBackupService
 
 from .fakes import FakeAgentRunStore, FakeObjectStore
 
@@ -27,15 +27,17 @@ def _git(path: Path, *args: str) -> None:
 
 
 def _clone(remote: Path, dest: Path) -> None:
-    subprocess.run(["git", "clone", str(remote), str(dest)], check=True, capture_output=True,
-                   text=True)
+    subprocess.run(
+        ["git", "clone", str(remote), str(dest)], check=True, capture_output=True, text=True
+    )
 
 
 def _init_work_with_remote(tmp_path: Path) -> tuple[Path, Path]:
     remote = tmp_path / "remote.git"
     remote.mkdir()
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True,
-                   text=True)
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True
+    )
     # Point the bare HEAD at main so a later clone checks the branch out (bare defaults vary).
     _git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
 
@@ -48,9 +50,7 @@ def _init_work_with_remote(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _settings(work: Path) -> Settings:
-    return Settings(
-        vault_path=str(work), planes=["Ideas"], vault_backup_debounce_seconds=100.0
-    )
+    return Settings(graph_store_path=str(work), store_backup_debounce_seconds=100.0)
 
 
 async def test_repo_lifecycle_primitives(tmp_path: Path):
@@ -75,25 +75,26 @@ async def test_repo_lifecycle_primitives(tmp_path: Path):
 
 async def test_bootstrap_and_backup_reach_remote(tmp_path: Path):
     work, remote = _init_work_with_remote(tmp_path)
-    service = VaultBackupService(settings=_settings(work), git=GitRepo(str(work)))
+    service = StoreBackupService(settings=_settings(work), git=GitRepo(str(work)))
     await service.ensure_ready()  # bootstrap → commit + push -u
 
     clone = tmp_path / "clone"
     _clone(remote, clone)
-    assert (clone / "Ideas" / ".gitkeep").exists()
+    assert (clone / "memory" / ".gitkeep").exists()  # a node-type folder in the skeleton
+    assert (clone / "inbox" / ".gitkeep").exists()
     assert (clone / ".gitignore").exists()
 
-    (work / "Ideas" / "note.md").write_text("content", encoding="utf-8")
+    (work / "memory" / "node.md").write_text("content", encoding="utf-8")
     result = await service.backup_now("capture 1")
     assert result.committed is True and result.pushed is True
 
     _git(clone, "pull")
-    assert (clone / "Ideas" / "note.md").exists()
+    assert (clone / "memory" / "node.md").exists()
 
 
 async def test_backup_heals_real_non_fast_forward(tmp_path: Path):
     work, remote = _init_work_with_remote(tmp_path)
-    service = VaultBackupService(settings=_settings(work), git=GitRepo(str(work)))
+    service = StoreBackupService(settings=_settings(work), git=GitRepo(str(work)))
     await service.ensure_ready()
 
     # Another clone pushes a divergent commit, so the server's next push is rejected non-ff.
@@ -101,35 +102,35 @@ async def test_backup_heals_real_non_fast_forward(tmp_path: Path):
     _clone(remote, other)
     _git(other, "config", "user.name", "Other")
     _git(other, "config", "user.email", "other@example.com")
-    (other / "Ideas" / "remote.md").write_text("from other", encoding="utf-8")
+    (other / "memory" / "remote.md").write_text("from other", encoding="utf-8")
     _git(other, "add", "-A")
     _git(other, "commit", "-m", "other change")
     _git(other, "push", "origin", "HEAD:main")
 
     # Server writes locally, then backup → push rejected → heal-merge → re-push succeeds.
-    (work / "Ideas" / "local.md").write_text("from local", encoding="utf-8")
+    (work / "memory" / "local.md").write_text("from local", encoding="utf-8")
     result = await service.backup_now("capture local")
     assert result.committed is True and result.pushed is True
 
     _git(other, "pull")
-    assert (other / "Ideas" / "remote.md").exists()
-    assert (other / "Ideas" / "local.md").exists()  # both sides preserved by the merge
+    assert (other / "memory" / "remote.md").exists()
+    assert (other / "memory" / "local.md").exists()  # both sides preserved by the merge
 
 
-async def test_vault_bundle_and_drill_roundtrip(tmp_path: Path):
-    # End-to-end with REAL git: bundle the live vault → R2 (fake store), then the drill downloads,
+async def test_store_bundle_and_drill_roundtrip(tmp_path: Path):
+    # End-to-end with REAL git: bundle the live store → R2 (fake store), then the drill downloads,
     # verifies, clones, and asserts the fingerprint + monotonic count against the live repo.
     work, _ = _init_work_with_remote(tmp_path)
     settings = Settings(
-        vault_path=str(work), data_path=str(tmp_path / "data"), planes=["Ideas"], scheduler_tz="UTC"
+        graph_store_path=str(work), data_path=str(tmp_path / "data"), scheduler_tz="UTC"
     )
-    vault_backup = VaultBackupService(settings=settings, git=GitRepo(str(work)))
-    await vault_backup.ensure_ready()  # bootstrap commit → a real history to bundle
+    store_backup = StoreBackupService(settings=settings, git=GitRepo(str(work)))
+    await store_backup.ensure_ready()  # bootstrap commit → a real history to bundle
 
     obj, store = FakeObjectStore(), FakeAgentRunStore()
-    jobs = BackupJobs(settings=settings, store=store, object_store=obj, vault_backup=vault_backup)
+    jobs = BackupJobs(settings=settings, store=store, object_store=obj, store_backup=store_backup)
 
-    await jobs.run_vault_bundle()
+    await jobs.run_store_bundle()
     assert store.runs["run-1"].status == "succeeded", store.runs["run-1"].error
     assert any(k.endswith(".bundle") for k in obj.objects)
 

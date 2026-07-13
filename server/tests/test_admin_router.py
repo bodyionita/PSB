@@ -1,4 +1,4 @@
-"""Admin router test: POST /admin/backup delegates to the vault backup and returns its result."""
+"""Admin router test: POST /admin/backup delegates to the store backup and returns its result."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from fastapi.testclient import TestClient
 
 from app.dependencies import (
     get_reindex_service,
+    get_store_backup,
     get_tag_consolidation_service,
-    get_vault_backup,
     require_session,
 )
 from app.providers.base import ProviderUnavailable
 from app.routers import admin
-from app.services.vault_backup import BackupResult
+from app.services.store_backup import BackupResult
 from app.tags.consolidation import TagMerge
 from app.tags.service import ConsolidationProposal
 
@@ -48,7 +48,7 @@ def client_and_backup():
     app = FastAPI()
     app.include_router(admin.router, prefix=PREFIX)
     fake = FakeBackup(BackupResult(committed=True, pushed=True))
-    app.dependency_overrides[get_vault_backup] = lambda: fake
+    app.dependency_overrides[get_store_backup] = lambda: fake
     app.dependency_overrides[require_session] = lambda: None
     return TestClient(app), fake
 

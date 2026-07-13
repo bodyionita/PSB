@@ -1,6 +1,6 @@
-"""Thin git wrapper for the vault repo (ADR-014).
+"""Thin git wrapper for the graph-store repo (ADR-014).
 
-All git in the app goes through here so :class:`VaultBackupService` can compose the durability
+All git in the app goes through here so :class:`StoreBackupService` can compose the durability
 guarantees (always commit, **fast-forward-only** push, **heal-on-reject** merge — never
 force/rebase/reset) on top of a testable seam. Subprocess calls block, so each runs in a worker
 thread (CLAUDE.md rule 8). This wrapper issues single git commands only; the *service* — never
@@ -33,13 +33,14 @@ class GitError(RuntimeError):
 
 
 class GitClient(Protocol):
-    """The git surface :class:`VaultBackupService` depends on (fakeable in tests)."""
+    """The git surface :class:`StoreBackupService` depends on (fakeable in tests)."""
 
     async def is_repo(self) -> bool: ...
     async def has_head(self) -> bool: ...
     async def init(self, branch: str) -> None: ...
     async def set_config(self, key: str, value: str) -> None: ...
     async def has_remote(self, name: str) -> bool: ...
+    async def set_remote(self, name: str, url: str) -> None: ...
     async def add_all(self) -> None: ...
     async def has_staged_changes(self) -> bool: ...
     async def commit(self, message: str) -> None: ...
@@ -98,11 +99,17 @@ class GitRepo:
         def _init() -> None:
             self._path.mkdir(parents=True, exist_ok=True)
             base = ["git", "-C", str(self._path)]
-            subprocess.run([*base, "init"], capture_output=True, text=True, timeout=self._timeout,
-                           check=True)
+            subprocess.run(
+                [*base, "init"], capture_output=True, text=True, timeout=self._timeout, check=True
+            )
             # Name the branch deterministically, independent of the host's init.defaultBranch.
-            subprocess.run([*base, "symbolic-ref", "HEAD", f"refs/heads/{branch}"],
-                           capture_output=True, text=True, timeout=self._timeout, check=True)
+            subprocess.run(
+                [*base, "symbolic-ref", "HEAD", f"refs/heads/{branch}"],
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=True,
+            )
 
         await asyncio.to_thread(_init)
 
@@ -112,6 +119,14 @@ class GitRepo:
     async def has_remote(self, name: str) -> bool:
         r = await self._run("remote", check=False)
         return name in r.stdout.split()
+
+    async def set_remote(self, name: str, url: str) -> None:
+        """Add the remote (idempotent: replace its URL if it already exists). Used by the app-level
+        bootstrap to wire GRAPH_STORE_REPO with no manual VPS step (ADR-031 §6)."""
+        if await self.has_remote(name):
+            await self._run("remote", "set-url", name, url)
+        else:
+            await self._run("remote", "add", name, url)
 
     async def add_all(self) -> None:
         await self._run("add", "-A")
@@ -185,6 +200,9 @@ class GitRepo:
         await asyncio.to_thread(
             lambda: subprocess.run(
                 ["git", "clone", source, dest],
-                capture_output=True, text=True, timeout=120.0, check=True,
+                capture_output=True,
+                text=True,
+                timeout=120.0,
+                check=True,
             )
         )

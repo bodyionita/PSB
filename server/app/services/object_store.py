@@ -35,8 +35,9 @@ class ObjectStore(Protocol):
 class R2ObjectStore:
     """Cloudflare R2 via the S3 API (boto3). Blocking SDK calls run in worker threads (rule 8)."""
 
-    def __init__(self, *, endpoint_url: str, access_key_id: str, secret_access_key: str,
-                 bucket: str) -> None:
+    def __init__(
+        self, *, endpoint_url: str, access_key_id: str, secret_access_key: str, bucket: str
+    ) -> None:
         import boto3  # lazy: only a real R2 store needs the SDK
 
         self._bucket = bucket

@@ -41,13 +41,13 @@ def _service(
     backup: FakeCommitBackup | None = None,
     runs: FakeAgentRunStore | None = None,
 ) -> TagConsolidationService:
-    settings = Settings(vault_path=str(tmp_path / "vault"), planes=["Ideas"])
+    settings = Settings(graph_store_path=str(tmp_path / "vault"))
     return TagConsolidationService(
         settings=settings,
         store=store,
         registry=_registry(chat or FakeChatProvider("fake-chat", reply="{}")),
         indexer=indexer or FakeIndexer(),
-        vault_backup=backup or FakeCommitBackup(),
+        store_backup=backup or FakeCommitBackup(),
         run_store=runs or FakeAgentRunStore(),
     )
 
@@ -116,7 +116,7 @@ async def test_apply_rewrites_affected_notes_and_reindexes(tmp_path: Path):
     _write_note(vault, "Ideas/b.md", ["second-brain-app"])
     _write_note(vault, "Ideas/c.md", ["unrelated"])
     store = FakeTagStore(
-        notes_by_tag={"secondbrain": ["Ideas/a.md"], "second-brain-app": ["Ideas/b.md"]}
+        nodes_by_tag={"secondbrain": ["Ideas/a.md"], "second-brain-app": ["Ideas/b.md"]}
     )
     indexer = FakeIndexer()
     backup = FakeCommitBackup()
@@ -135,11 +135,11 @@ async def test_apply_rewrites_affected_notes_and_reindexes(tmp_path: Path):
     assert backup.reasons == ["tags consolidate"]
     run = runs.runs[run_id]
     assert run.status == "succeeded"
-    assert run.details["notes_rewritten"] == 2
+    assert run.details["nodes_rewritten"] == 2
 
 
 async def test_apply_with_no_affected_notes_makes_no_commit(tmp_path: Path):
-    store = FakeTagStore(notes_by_tag={})  # nothing carries the variant
+    store = FakeTagStore(nodes_by_tag={})  # nothing carries the variant
     indexer = FakeIndexer()
     backup = FakeCommitBackup()
     runs = FakeAgentRunStore()
@@ -157,9 +157,7 @@ async def test_apply_skips_a_missing_note_and_still_succeeds(tmp_path: Path):
     vault = tmp_path / "vault"
     _write_note(vault, "Ideas/a.md", ["secondbrain"])
     # b.md is in the DB index but its file is gone on disk (stale index / external delete).
-    store = FakeTagStore(
-        notes_by_tag={"secondbrain": ["Ideas/a.md", "Ideas/gone.md"]}
-    )
+    store = FakeTagStore(nodes_by_tag={"secondbrain": ["Ideas/a.md", "Ideas/gone.md"]})
     runs = FakeAgentRunStore()
     backup = FakeCommitBackup()
     service = _service(tmp_path, store=store, backup=backup, runs=runs)
@@ -169,4 +167,4 @@ async def test_apply_skips_a_missing_note_and_still_succeeds(tmp_path: Path):
 
     assert "tags: [second-brain]" in (vault / "Ideas/a.md").read_text(encoding="utf-8")
     assert runs.runs[run_id].status == "succeeded"  # missing note skipped, run still ok
-    assert runs.runs[run_id].details["notes_rewritten"] == 1
+    assert runs.runs[run_id].details["nodes_rewritten"] == 1

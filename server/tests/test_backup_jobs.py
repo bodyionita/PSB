@@ -11,7 +11,7 @@ from pathlib import Path
 from app.config import Settings
 from app.services.agent_runs import AgentRun
 from app.services.backup_jobs import BackupJobs
-from app.services.vault_backup import Fingerprint, VaultBackupService
+from app.services.store_backup import Fingerprint, StoreBackupService
 
 from .fakes import FakeAgentRunStore, FakeGitRepo, FakeObjectStore
 
@@ -26,49 +26,48 @@ def _jobs(
     bundle_inspector=None,
 ):
     settings = Settings(
-        vault_path=str(tmp_path / "vault"),
+        graph_store_path=str(tmp_path / "store"),
         data_path=str(tmp_path / "data"),
-        planes=["Ideas"],
         scheduler_tz="UTC",
     )
     git = git or FakeGitRepo()
     store = store or FakeAgentRunStore()
-    vault_backup = VaultBackupService(settings=settings, git=git)
+    store_backup = StoreBackupService(settings=settings, git=git)
     jobs = BackupJobs(
         settings=settings,
         store=store,
         object_store=object_store,
-        vault_backup=vault_backup,
+        store_backup=store_backup,
         db_dumper=db_dumper,
         bundle_inspector=bundle_inspector,
     )
     return jobs, store, git
 
 
-async def test_vault_bundle_uploads_and_records_fingerprint(tmp_path: Path):
+async def test_store_bundle_uploads_and_records_fingerprint(tmp_path: Path):
     obj = FakeObjectStore()
     jobs, store, _ = _jobs(tmp_path, object_store=obj)
-    await jobs.run_vault_bundle()
+    await jobs.run_store_bundle()
 
     run = store.runs["run-1"]
-    assert run.agent == "vault-backup" and run.status == "succeeded"
+    assert run.agent == "store-backup" and run.status == "succeeded"
     assert run.details["commit_count"] == 3 and run.details["head_sha"] == "deadbeef"
-    assert any(k.startswith("vault/bundle-") and k.endswith(".bundle") for k in obj.objects)
+    assert any(k.startswith("store/bundle-") and k.endswith(".bundle") for k in obj.objects)
     assert any(k.endswith(".manifest.json") for k in obj.objects)
 
 
-async def test_vault_bundle_fails_on_commit_count_regression(tmp_path: Path):
+async def test_store_bundle_fails_on_commit_count_regression(tmp_path: Path):
     # A second bundle whose commit count DROPPED below the last good one must fail (the
     # rewrite/truncation alarm), so it never becomes the new monotonic baseline (ADR-014 §6).
     obj = FakeObjectStore()
     git = FakeGitRepo()
     git.commit_count_value = 5
     jobs, store, git = _jobs(tmp_path, object_store=obj, git=git)
-    await jobs.run_vault_bundle()
+    await jobs.run_store_bundle()
     assert store.runs["run-1"].status == "succeeded"  # baseline = 5 commits
 
     git.commit_count_value = 3  # history shrank
-    await jobs.run_vault_bundle()
+    await jobs.run_store_bundle()
     run = store.runs["run-2"]
     assert run.status == "failed" and "regressed" in (run.error or "")
 
@@ -85,7 +84,7 @@ async def test_r2_job_survives_agent_run_open_failure(tmp_path: Path):
 
 async def test_r2_jobs_skip_when_backups_disabled(tmp_path: Path):
     jobs, store, _ = _jobs(tmp_path, object_store=None)
-    await jobs.run_vault_bundle()
+    await jobs.run_store_bundle()
     await jobs.run_db_backup()
     assert store.runs["run-1"].status == "skipped"
     assert store.runs["run-2"].status == "skipped"
@@ -156,14 +155,19 @@ async def test_data_sync_no_data_dir_is_zero(tmp_path: Path):
 
 
 def _preloaded_manifest(store: FakeAgentRunStore, manifest: dict) -> None:
-    store.preloaded["vault-backup"] = AgentRun(
-        id="prev", agent="vault-backup", status="succeeded", details=manifest
+    store.preloaded["store-backup"] = AgentRun(
+        id="prev", agent="store-backup", status="succeeded", details=manifest
     )
 
 
 async def test_integrity_drill_succeeds_when_fingerprints_match(tmp_path: Path):
-    manifest = {"head_sha": "abc", "commit_count": 3, "file_count": 5,
-                "key": "vault/bundle-x.bundle", "bytes": 10}
+    manifest = {
+        "head_sha": "abc",
+        "commit_count": 3,
+        "file_count": 5,
+        "key": "store/bundle-x.bundle",
+        "bytes": 10,
+    }
     obj = FakeObjectStore()
     obj.objects[manifest["key"]] = b"BUNDLE"
     store = FakeAgentRunStore()
@@ -182,8 +186,13 @@ async def test_integrity_drill_succeeds_when_fingerprints_match(tmp_path: Path):
 
 
 async def test_integrity_drill_flags_commit_count_regression(tmp_path: Path):
-    manifest = {"head_sha": "abc", "commit_count": 3, "file_count": 5,
-                "key": "vault/bundle-x.bundle", "bytes": 10}
+    manifest = {
+        "head_sha": "abc",
+        "commit_count": 3,
+        "file_count": 5,
+        "key": "store/bundle-x.bundle",
+        "bytes": 10,
+    }
     obj = FakeObjectStore()
     obj.objects[manifest["key"]] = b"BUNDLE"
     store = FakeAgentRunStore()
@@ -203,8 +212,13 @@ async def test_integrity_drill_flags_commit_count_regression(tmp_path: Path):
 
 
 async def test_integrity_drill_flags_bundle_mismatch(tmp_path: Path):
-    manifest = {"head_sha": "abc", "commit_count": 3, "file_count": 5,
-                "key": "vault/bundle-x.bundle", "bytes": 10}
+    manifest = {
+        "head_sha": "abc",
+        "commit_count": 3,
+        "file_count": 5,
+        "key": "store/bundle-x.bundle",
+        "bytes": 10,
+    }
     obj = FakeObjectStore()
     obj.objects[manifest["key"]] = b"BUNDLE"
     store = FakeAgentRunStore()
@@ -220,15 +234,15 @@ async def test_integrity_drill_flags_bundle_mismatch(tmp_path: Path):
 
 
 async def test_integrity_drill_fails_without_a_bundle(tmp_path: Path):
-    jobs, store, _ = _jobs(tmp_path, object_store=FakeObjectStore())  # no prior vault-backup run
+    jobs, store, _ = _jobs(tmp_path, object_store=FakeObjectStore())  # no prior store-backup run
     await jobs.run_integrity_drill()
     run = store.runs["run-1"]
-    assert run.status == "failed" and "vault bundle" in (run.error or "")
+    assert run.status == "failed" and "store bundle" in (run.error or "")
 
 
-async def test_vault_sweep_commits_and_records_no_agent_run(tmp_path: Path):
+async def test_store_sweep_commits_and_records_no_agent_run(tmp_path: Path):
     git = FakeGitRepo()
     jobs, store, git = _jobs(tmp_path, object_store=None, git=git)
-    await jobs.run_vault_sweep()
+    await jobs.run_store_sweep()
     assert git.commits  # backup_now committed
     assert store.runs == {}  # the sweep is the git commit, not one of the four named jobs

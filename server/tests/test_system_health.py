@@ -29,7 +29,7 @@ def _drill(status: str, *, age_days: float = 0.0) -> AgentRun:
 
 
 def _health(tmp_path: Path, store, *, environment: str = "production") -> SystemHealth:
-    settings = Settings(vault_path=str(tmp_path), environment=environment)
+    settings = Settings(graph_store_path=str(tmp_path), environment=environment)
     return SystemHealth(FakeDB(), settings, agent_runs=store)
 
 
@@ -78,8 +78,8 @@ async def test_backups_false_when_agent_runs_read_errors(tmp_path: Path):
 
 
 async def test_prod_check_degrades_on_backups_leg(tmp_path: Path, monkeypatch):
-    # Isolate the backups leg: force the vault + git_remote legs green so `ok` turns on backups.
-    monkeypatch.setattr(system_health, "_vault_ok", lambda p: True)
+    # Isolate the backups leg: force the store + git_remote legs green so `ok` turns on backups.
+    monkeypatch.setattr(system_health, "_store_ok", lambda p: True)
     monkeypatch.setattr(system_health, "_git_remote_ok", lambda p: True)
     report = await _health(tmp_path, FakeAgentRunStore(), environment="production").check()
     assert report.backups is False and report.ok is False

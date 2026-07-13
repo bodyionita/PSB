@@ -1,12 +1,12 @@
-"""The combined reindex job (M2, 04-pipelines §3/§5, ADR-023 §4).
+"""The combined reindex job (04-pipelines §4, ADR-023 §4 surviving half).
 
-One service, :class:`ReindexService`, drives the whole vault-reconciliation pass end to end:
+One service, :class:`ReindexService`, drives the whole store-reconciliation pass end to end:
 
-    git pull the vault  →  reindex_all (full rescan)  →  recompute the relatedness graph
-      →  one commit + push (under the single vault git lock, ADR-014)
+    git pull the store  →  reindex_all (full rescan)  →  recompute the derived ``similar`` edges
+      →  one commit + push (under the single store git lock, ADR-014)
 
 It has two entry points that share one **single-flight** guard, so a reindex never overlaps
-itself or the nightly rescan (03-api §Admin, 04 §5):
+itself or the nightly rescan (03-api §Admin, 04 §4):
 
   * :meth:`start_manual` — ``POST /admin/reindex``: claims the slot, opens the ``reindex``
     ``agent_runs`` row, and runs the pass in the background so the endpoint answers ``202
@@ -14,10 +14,9 @@ itself or the nightly rescan (03-api §Admin, 04 §5):
   * :meth:`run_scheduled` — the nightly scheduler job (03:40): runs the same pass inline and
     never raises (rule 7); if a manual reindex is mid-flight it logs and skips.
 
-The relatedness graph's own block writes request a (debounced) commit; the final
-``backup_now`` cancels that timer and folds everything into a single commit + push — the "one
-commit+push under the vault lock" the plan calls for. The graph is recomputed **wholesale**
-here and nowhere on the real-time capture path (ADR-023 §4).
+Derived-edge recompute is **DB-only** now (ADR-026 — no file rendering, so no block-write commit);
+the final ``backup_now`` still folds any capture debounce pending into a single commit + push. The
+derived edges are recomputed **wholesale** here and nowhere on the real-time capture path.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ from ..db import Database
 from ..graph.service import GraphOutcome
 from ..indexing.indexer import IndexOutcome
 from .agent_runs import FAILED, SUCCEEDED, AgentRunStore, PgAgentRunStore
-from .vault_backup import BackupResult
+from .store_backup import BackupResult
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +46,13 @@ class Reindexer(Protocol):
 
 
 class GraphRecomputer(Protocol):
-    """The graph-recompute surface (the :class:`~app.graph.service.RelatednessGraph`)."""
+    """The derived-edge recompute surface (:class:`~app.graph.service.DerivedEdgeGraph`)."""
 
     async def recompute(self) -> GraphOutcome: ...
 
 
-class VaultSync(Protocol):
-    """The two vault-git operations the reindex needs, both under the one lock (ADR-014)."""
+class StoreSync(Protocol):
+    """The two store-git operations the reindex needs, both under the one lock (ADR-014)."""
 
     async def sync_from_remote(self) -> None: ...
 
@@ -80,7 +79,7 @@ class ReindexOutcome:
         base = (
             f"reindex ({self.trigger}): {self.index.indexed} indexed, "
             f"{self.index.skipped} skipped, {self.index.deleted} deleted, "
-            f"{self.graph.links} links, {self.graph.blocks_written} block(s); "
+            f"{self.index.edges} canonical + {self.graph.edges} similar edge(s); "
             f"pushed={self.pushed}"
         )
         return f"{base} (partial — embed failures)" if self.partial else base
@@ -104,13 +103,13 @@ class ReindexService:
         settings: Settings,
         indexer: Reindexer,
         graph: GraphRecomputer,
-        vault_backup: VaultSync,
+        store_backup: StoreSync,
         run_store: AgentRunStore,
     ) -> None:
         self._settings = settings
         self._indexer = indexer
         self._graph = graph
-        self._backup = vault_backup
+        self._backup = store_backup
         self._runs = run_store
         # Single-flight flag. The event loop is single-threaded, so the check-and-set in the
         # claim helpers is atomic (no await between test and set) — a genuine mutual exclusion.
@@ -175,16 +174,15 @@ class ReindexService:
         (rule 1), so nothing is lost and the next nightly / a manual retry re-drives it.
         """
         try:
-            # 1. Pull the vault first so the rescan sees edits made on GitHub or another device
-            #    (04 §5, ADR-023 §4). Best-effort: an unreachable remote leaves the local vault.
+            # 1. Pull the store first so the rescan sees edits made on GitHub or another device
+            #    (04 §4, ADR-023 §4). Best-effort: an unreachable remote leaves the local store.
             await self._backup.sync_from_remote()
-            # 2. Full rescan: (re)index every note + reconcile deletions.
+            # 2. Full rescan: (re)index every node, materialize canonical edges, reconcile deletes.
             index = await self._indexer.reindex_all()
-            # 3. Recompute the whole relatedness graph + render the changed sb:related blocks.
-            #    This requests a (debounced) commit for any rewritten note.
+            # 3. Recompute the whole derived `similar`-edge set (DB-only — no file writes, ADR-026).
             graph = await self._graph.recompute()
-            # 4. One commit + push under the single vault lock — folds in the graph's block
-            #    writes and any capture debounce pending into a single reindex commit (ADR-014).
+            # 4. One commit + push under the single store lock — folds any capture debounce pending
+            #    into a single reindex commit (ADR-014).
             backup = await self._backup.backup_now(f"reindex ({trigger})")
 
             outcome = ReindexOutcome(
@@ -224,7 +222,7 @@ class ReindexService:
 
 
 def build_reindex_service(
-    settings: Settings, db: Database, vault_backup: VaultSync
+    settings: Settings, db: Database, store_backup: StoreSync
 ) -> ReindexService:
     """Construct a standalone reindex service (db + git + registry) for the CLI entrypoint.
 
@@ -235,7 +233,7 @@ def build_reindex_service(
     """
     # Imported here (not at module top) so the CLI's minimal context builds these lazily and the
     # request/boot path keeps the reindex service composed from its existing singletons.
-    from ..graph.service import RelatednessGraph
+    from ..graph.service import DerivedEdgeGraph
     from ..graph.store import PgGraphStore
     from ..indexing.indexer import Indexer
     from ..indexing.store import PgIndexStore
@@ -243,13 +241,11 @@ def build_reindex_service(
 
     registry = build_registry(settings)
     indexer = Indexer(settings=settings, store=PgIndexStore(db), registry=registry)
-    graph = RelatednessGraph(
-        settings=settings, store=PgGraphStore(db), vault_backup=vault_backup
-    )
+    graph = DerivedEdgeGraph(settings=settings, store=PgGraphStore(db))
     return ReindexService(
         settings=settings,
         indexer=indexer,
         graph=graph,
-        vault_backup=vault_backup,
+        store_backup=store_backup,
         run_store=PgAgentRunStore(db),
     )

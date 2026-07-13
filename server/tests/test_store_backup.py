@@ -1,4 +1,4 @@
-"""VaultBackupService orchestration tests — FakeGitRepo, no real git, deterministic.
+"""StoreBackupService orchestration tests — FakeGitRepo, no real git, deterministic.
 
 The debounce timer is exercised by awaiting the service's internal timer task (no sleeps); the
 coalescing/fold-in paths use a long debounce + flush()/backup_now() so nothing races.
@@ -10,19 +10,18 @@ import asyncio
 from pathlib import Path
 
 from app.config import Settings
-from app.services.vault_backup import VaultBackupService
+from app.services.store_backup import StoreBackupService
 
 from .fakes import FakeGitRepo
 
 
 def _service(tmp_path: Path, git: FakeGitRepo | None = None, *, debounce: float = 100.0):
     settings = Settings(
-        vault_path=str(tmp_path / "vault"),
-        planes=["Professional", "Ideas"],
-        vault_backup_debounce_seconds=debounce,
+        graph_store_path=str(tmp_path / "store"),
+        store_backup_debounce_seconds=debounce,
     )
     git = git or FakeGitRepo()
-    return VaultBackupService(settings=settings, git=git), git
+    return StoreBackupService(settings=settings, git=git), git
 
 
 async def test_ensure_ready_bootstraps_empty_repo(tmp_path: Path):
@@ -36,25 +35,25 @@ async def test_ensure_ready_bootstraps_empty_repo(tmp_path: Path):
     assert git.config["gc.reflogExpireUnreachable"] == "never"
     assert git.config["user.name"] == "Braindan"
     # Skeleton committed + pushed with upstream.
-    assert git.commits == ["bootstrap: vault skeleton"]
+    assert git.commits == ["bootstrap: graph-store skeleton"]
     assert git.pushes == 1
-    # Folder skeleton on disk: inbox, summaries, each plane, + .gitignore (ADR-014 §3).
-    vault = tmp_path / "vault"
-    assert (vault / "Inbox" / ".gitkeep").exists()
-    assert (vault / "Summaries" / "Daily" / ".gitkeep").exists()
-    assert (vault / "Ideas" / ".gitkeep").exists()
-    gitignore = (vault / ".gitignore").read_text(encoding="utf-8")
-    assert ".obsidian/workspace*" in gitignore
-    assert ".idea/" in gitignore  # JetBrains cruft ignored (added M1)
-    # .gitattributes ships in the bootstrap commit so notes are LF everywhere (no CRLF churn).
-    assert "*.md text eol=lf" in (vault / ".gitattributes").read_text(encoding="utf-8")
-    # No active ignore pattern touches .trash — soft-deleted notes stay tracked (ADR-014 §3).
+    # Folder skeleton on disk: the 9 node-type folders + inbox, + .gitignore (02 §1, ADR-014 §3).
+    store = tmp_path / "store"
+    assert (store / "memory" / ".gitkeep").exists()
+    assert (store / "person" / ".gitkeep").exists()
+    assert (store / "inbox" / ".gitkeep").exists()
+    gitignore = (store / ".gitignore").read_text(encoding="utf-8")
+    assert ".idea/" in gitignore  # JetBrains cruft ignored
+    assert ".obsidian" not in gitignore  # Obsidian is gone (ADR-026)
+    # .gitattributes ships in the bootstrap commit so nodes are LF everywhere (no CRLF churn).
+    assert "*.md text eol=lf" in (store / ".gitattributes").read_text(encoding="utf-8")
+    # No active ignore pattern touches .trash — soft-deleted nodes stay tracked (ADR-014 §3).
     ignore_lines = [ln for ln in gitignore.splitlines() if ln and not ln.startswith("#")]
     assert not any(".trash" in ln for ln in ignore_lines)
 
 
 async def test_ensure_ready_existing_repo_adds_missing_housekeeping(tmp_path: Path):
-    # An existing vault that predates the housekeeping files gets them added (one commit), but is
+    # An existing store that predates the housekeeping files gets them added (one commit), but is
     # NOT re-bootstrapped.
     git = FakeGitRepo(is_repo=True, has_head=True)
     service, git = _service(tmp_path, git)
@@ -63,17 +62,17 @@ async def test_ensure_ready_existing_repo_adds_missing_housekeeping(tmp_path: Pa
     assert git.inited is False
     assert git.commits == ["housekeeping: .gitignore + .gitattributes"]  # no bootstrap commit
     assert git.config["gc.auto"] == "0"  # config still pinned
-    assert (tmp_path / "vault" / ".gitattributes").exists()
+    assert (tmp_path / "store" / ".gitattributes").exists()
 
 
 async def test_ensure_ready_housekeeping_idempotent_when_current(tmp_path: Path):
     # If the housekeeping files already match, ensure_ready makes no commit (true idempotency).
-    from app.services.vault_backup import _GITATTRIBUTES, _GITIGNORE
+    from app.services.store_backup import _GITATTRIBUTES, _GITIGNORE
 
-    vault = tmp_path / "vault"
-    vault.mkdir(parents=True)
-    (vault / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
-    (vault / ".gitattributes").write_text(_GITATTRIBUTES, encoding="utf-8")
+    store = tmp_path / "store"
+    store.mkdir(parents=True)
+    (store / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
+    (store / ".gitattributes").write_text(_GITATTRIBUTES, encoding="utf-8")
     git = FakeGitRepo(is_repo=True, has_head=True)
     service, git = _service(tmp_path, git)
     await service.ensure_ready()
@@ -195,7 +194,7 @@ async def test_sync_from_remote_commits_pending_then_pulls_under_the_lock(tmp_pa
 
     await service.sync_from_remote()
 
-    assert git.commits == ["reindex: commit pending vault writes before pull"]
+    assert git.commits == ["reindex: commit pending store writes before pull"]
     assert git.pulls == 1  # remote integrated
     assert git.pushes == 0  # sync never pushes
 

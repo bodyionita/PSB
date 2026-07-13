@@ -55,9 +55,7 @@ async def capture_voice(
 ) -> CaptureAcceptedResponse:
     audio = await file.read()
     try:
-        capture_id = await pipeline.create_voice_capture(
-            audio, filename=file.filename or "audio"
-        )
+        capture_id = await pipeline.create_voice_capture(audio, filename=file.filename or "audio")
     except UnsupportedAudio as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
     return CaptureAcceptedResponse(capture_id=capture_id)

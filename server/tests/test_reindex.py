@@ -16,7 +16,7 @@ from app.graph.service import GraphOutcome
 from app.indexing.indexer import IndexOutcome
 from app.services.agent_runs import FAILED, SUCCEEDED
 from app.services.reindex import AGENT, ReindexService
-from app.services.vault_backup import BackupResult
+from app.services.store_backup import BackupResult
 
 from .fakes import FakeAgentRunStore
 
@@ -49,9 +49,7 @@ class FakeGraph:
 
     def __init__(self, *, order: list, outcome: GraphOutcome | None = None):
         self._order = order
-        self.outcome = outcome or GraphOutcome(
-            notes=3, links=4, blocks_written=2, commit_requested=True
-        )
+        self.outcome = outcome or GraphOutcome(edges=4)
         self.calls = 0
 
     async def recompute(self) -> GraphOutcome:
@@ -60,7 +58,7 @@ class FakeGraph:
         return self.outcome
 
 
-class FakeVaultSync:
+class FakeStoreSync:
     """Records sync_from_remote + backup_now (order + reason). ``gate`` blocks the pull so a test
     can hold a run mid-flight and probe the single-flight guard."""
 
@@ -92,30 +90,30 @@ def _service(
     order: list,
     indexer: FakeReindexer | None = None,
     graph: FakeGraph | None = None,
-    vault: FakeVaultSync | None = None,
+    store_sync: FakeStoreSync | None = None,
     runs: FakeAgentRunStore | None = None,
-) -> tuple[ReindexService, FakeAgentRunStore, FakeVaultSync]:
+) -> tuple[ReindexService, FakeAgentRunStore, FakeStoreSync]:
     runs = runs or FakeAgentRunStore()
-    vault = vault or FakeVaultSync(order=order)
+    store_sync = store_sync or FakeStoreSync(order=order)
     service = ReindexService(
         settings=Settings(),
         indexer=indexer or FakeReindexer(order=order),
         graph=graph or FakeGraph(order=order),
-        vault_backup=vault,
+        store_backup=store_sync,
         run_store=runs,
     )
-    return service, runs, vault
+    return service, runs, store_sync
 
 
 async def test_run_scheduled_runs_the_pass_in_order_and_records_the_run():
     order: list = []
-    service, runs, vault = _service(order=order)
+    service, runs, store_sync = _service(order=order)
 
     await service.run_scheduled()
 
     # pull → rescan → recompute → one commit+push, exactly once each, in order.
     assert order == ["sync", "reindex", "recompute", "backup"]
-    assert vault.backup_reasons == ["reindex (nightly)"]
+    assert store_sync.backup_reasons == ["reindex (nightly)"]
     assert not service.running  # slot released
 
     run = next(iter(runs.runs.values()))
@@ -124,9 +122,15 @@ async def test_run_scheduled_runs_the_pass_in_order_and_records_the_run():
     assert run.details["trigger"] == "nightly"
     assert run.details["partial"] is False
     assert run.details["index"] == {
-        "indexed": 3, "skipped": 1, "failed": 0, "deleted": 2, "partial": False, "failures": [],
+        "indexed": 3,
+        "skipped": 1,
+        "failed": 0,
+        "deleted": 2,
+        "edges": 0,
+        "partial": False,
+        "failures": [],
     }
-    assert run.details["graph"]["links"] == 4
+    assert run.details["graph"]["edges"] == 4
     assert run.details["commit"] == {"committed": True, "pushed": True}
     assert "3 indexed" in run.summary
 
@@ -149,8 +153,8 @@ async def test_start_manual_returns_run_id_and_completes_in_background():
 async def test_single_flight_rejects_concurrent_manual_and_skips_nightly():
     order: list = []
     gate = asyncio.Event()
-    vault = FakeVaultSync(order=order, gate=gate)  # first run blocks in the pull
-    service, runs, _ = _service(order=order, vault=vault)
+    store_sync = FakeStoreSync(order=order, gate=gate)  # first run blocks in the pull
+    service, runs, _ = _service(order=order, store_sync=store_sync)
 
     run_id = await service.start_manual()  # claims the slot; background task blocks on the gate
     assert run_id is not None
@@ -175,7 +179,7 @@ async def test_partial_index_is_flagged_in_details_but_the_run_succeeds():
     order: list = []
     indexer = FakeReindexer(
         order=order,
-        outcome=IndexOutcome(indexed=2, skipped=0, failed=1, deleted=0, failures=["Ideas/x.md"]),
+        outcome=IndexOutcome(indexed=2, skipped=0, failed=1, deleted=0, failures=["memory/x.md"]),
     )
     service, runs, _ = _service(order=order, indexer=indexer)
 
@@ -210,8 +214,8 @@ async def test_a_failure_ends_the_run_failed_and_releases_the_slot():
     order: list = []
     indexer = FakeReindexer(order=order, error=RuntimeError("boom"))
     graph = FakeGraph(order=order)
-    vault = FakeVaultSync(order=order)
-    service, runs, _ = _service(order=order, indexer=indexer, graph=graph, vault=vault)
+    store_sync = FakeStoreSync(order=order)
+    service, runs, _ = _service(order=order, indexer=indexer, graph=graph, store_sync=store_sync)
 
     await service.run_scheduled()
 

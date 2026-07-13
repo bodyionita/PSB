@@ -1,20 +1,23 @@
-"""Vault backup & history durability (ADR-014).
+"""Graph-store backup & history durability (ADR-014; ex-``vault_backup``, renamed at M3).
 
-The capture/agent pipelines must not know *how* the vault is committed and pushed — only that
-after a write batch they should request a backup. :class:`VaultBackup` is that seam;
-:class:`VaultBackupService` is the real implementation.
+The capture/agent pipelines must not know *how* the store is committed and pushed — only that
+after a write batch they should request a backup. :class:`StoreBackup` is that seam;
+:class:`StoreBackupService` is the real implementation. ADR-014 machinery is unchanged by the
+pivot — only the vocabulary (vault → graph store) and the bootstrap skeleton (plane/summary
+folders → node-type folders + ``inbox/``) moved.
 
 Durability guarantees implemented here (ADR-014 §2–3):
   * **Always commit.** Debounced (~60s) batch commits coalesce a burst of writes into one
     commit; nothing is left uncommitted for long.
-  * **One lock.** File writes stay concurrent + atomic (the ``NoteWriter``); *all* git
+  * **One lock.** File writes stay concurrent + atomic (the ``NodeWriter``); *all* git
     staging/commit/push serialises behind a single :class:`asyncio.Lock` so batches never
     interleave.
   * **Fast-forward-only push, heal-on-reject.** Push is ordinary (ff-only); a non-fast-forward
     rejection is healed by a **merge** (never rebase/force/reset) then re-push — which also
     heals GitHub if a client ever rewound it. An unreachable remote is best-effort: commits
     stay local and the next backup reconciles (never block a write on the network, §5).
-  * **gc/reflog pins + empty-repo bootstrap** are applied idempotently at startup.
+  * **gc/reflog pins + empty-repo bootstrap** are applied idempotently at startup. The bootstrap
+    also wires the ``GRAPH_STORE_REPO`` remote (ADR-031 §6 — zero manual VPS steps).
 
 The R2 WORM bundle, integrity drill, and the scheduler that drives the nightly jobs land in the
 durability *scheduler* task; this module owns the git side.
@@ -42,18 +45,18 @@ _DURABILITY_CONFIG: tuple[tuple[str, str], ...] = (
     ("gc.auto", "0"),
 )
 
-# ADR-014 §3: the vault .gitignore excludes ONLY editor/OS cruft — never notes, never .trash
-# (soft-deleted notes stay committed and backed up).
+# ADR-014 §3 / ADR-031 §6: the store .gitignore excludes ONLY editor/OS cruft — never nodes,
+# never .trash (soft-deleted nodes stay committed and backed up). Obsidian is gone (ADR-026), so
+# no `.obsidian` entry.
 _GITIGNORE = """\
-# ADR-014 §3 — exclude only editor/OS cruft. Never notes, never .trash.
-.obsidian/workspace*
+# ADR-014 §3 / ADR-031 — exclude only editor/OS cruft. Never nodes, never .trash.
 .idea/
 .DS_Store
 Thumbs.db
 """
 
-# Normalise line endings so editing a note on any OS (esp. Windows/Obsidian, which rewrites
-# CRLF→LF) doesn't surface spurious whole-file diffs. Notes are always stored LF in the repo.
+# Normalise line endings so editing a node on any OS doesn't surface spurious whole-file diffs.
+# Nodes are always stored LF in the repo.
 _GITATTRIBUTES = """\
 * text=auto eol=lf
 *.md text eol=lf
@@ -62,14 +65,14 @@ _GITATTRIBUTES = """\
 _MAX_MESSAGE_CHARS = 500
 
 
-class VaultBackup(Protocol):
+class StoreBackup(Protocol):
     """What the capture/agent pipelines need from the backup layer (fire-and-forget)."""
 
     async def request_commit(self, reason: str) -> None:
-        """Ask the backup layer to (eventually) commit + push the current vault state.
+        """Ask the backup layer to (eventually) commit + push the current store state.
 
         Debounced and serialised; callers treat it as fire-and-forget and must not depend on
-        completion for their success (notes are already on disk)."""
+        completion for their success (nodes are already on disk)."""
         ...
 
 
@@ -81,7 +84,7 @@ class BackupResult:
 
 @dataclass(frozen=True)
 class Fingerprint:
-    """Vault durability fingerprint (ADR-014 §6): HEAD sha + monotonic commit count + file count."""
+    """Store durability fingerprint (ADR-014 §6): HEAD sha + monotonic commit count + file count."""
 
     head_sha: str | None
     commit_count: int
@@ -95,15 +98,15 @@ class Fingerprint:
         }
 
 
-class VaultBackupService:
-    """Owns every git operation on the vault, behind one lock (ADR-014)."""
+class StoreBackupService:
+    """Owns every git operation on the graph store, behind one lock (ADR-014)."""
 
     def __init__(self, *, settings: Settings, git: GitClient) -> None:
         self._settings = settings
         self._git = git
-        self._remote = settings.vault_git_remote
-        self._branch = settings.vault_git_branch
-        self._debounce = settings.vault_backup_debounce_seconds
+        self._remote = settings.store_git_remote
+        self._branch = settings.store_git_branch
+        self._debounce = settings.store_backup_debounce_seconds
         self._lock = asyncio.Lock()
         self._pending: list[str] = []
         self._timer: asyncio.Task | None = None
@@ -112,20 +115,23 @@ class VaultBackupService:
     # --- startup -----------------------------------------------------------------------------
 
     async def ensure_ready(self) -> None:
-        """Idempotent boot step: init if needed, pin gc/reflog + identity, bootstrap if empty,
-        and reconcile the housekeeping files (.gitignore/.gitattributes) with the current repo."""
+        """Idempotent boot step: init if needed, wire the GRAPH_STORE_REPO remote, pin gc/reflog +
+        identity, bootstrap the node-type skeleton if empty, and reconcile the housekeeping files
+        (.gitignore/.gitattributes) with the current repo."""
         if not await self._git.is_repo():
             await self._git.init(self._branch)
+        if self._settings.graph_store_repo:
+            await self._git.set_remote(self._remote, self._settings.graph_store_repo)
         await self._apply_config()
         if not await self._git.has_head():
             await self._bootstrap_skeleton()
         await self._ensure_housekeeping()
 
     async def _ensure_housekeeping(self) -> None:
-        """Keep the vault's .gitignore + .gitattributes matching the canonical content on every
-        boot (an existing vault predating a change gets updated), committing + pushing only if
+        """Keep the store's .gitignore + .gitattributes matching the canonical content on every
+        boot (an existing store predating a change gets updated), committing + pushing only if
         they actually changed. Idempotent — a no-op once the repo is current."""
-        changed = await asyncio.to_thread(_write_housekeeping, self._settings.vault_path)
+        changed = await asyncio.to_thread(_write_housekeeping, self._settings.graph_store_path)
         if changed:
             await self._commit_and_push(["housekeeping: .gitignore + .gitattributes"])
 
@@ -137,17 +143,17 @@ class VaultBackupService:
         await self._git.set_config("user.email", self._settings.git_user_email)
 
     async def _bootstrap_skeleton(self) -> None:
-        """Empty repo → create the plane/summary folder skeleton + .gitignore, commit, push -u."""
+        """Empty repo → create the node-type folder skeleton + housekeeping, commit, push -u."""
         await asyncio.to_thread(
             _write_skeleton,
-            self._settings.vault_path,
-            list(self._settings.planes),
-            self._settings.inbox_plane,
+            self._settings.graph_store_path,
+            list(self._settings.node_types),
+            self._settings.inbox_folder,
         )
         async with self._lock:
             await self._git.add_all()
             if await self._git.has_staged_changes():
-                await self._git.commit("bootstrap: vault skeleton")
+                await self._git.commit("bootstrap: graph-store skeleton")
             if await self._git.has_remote(self._remote):
                 await self._git.push(self._remote, self._branch, set_upstream=True)
 
@@ -168,25 +174,25 @@ class VaultBackupService:
 
     async def sync_from_remote(self) -> None:
         """Pull remote edits into the working tree before a full rescan (the nightly reindex,
-        04-pipelines §5 / ADR-023 §4). Commits any pending local writes first so the merge has a
-        clean tree, then merge-pulls — all under the one lock, so it never races a concurrent
-        commit. Best-effort (§5): an unreachable remote or a conflicting merge is cleaned up and
-        the rescan simply runs on the current on-disk state; the local vault is never lost.
+        04-pipelines §4). Commits any pending local writes first so the merge has a clean tree,
+        then merge-pulls — all under the one lock, so it never races a concurrent commit.
+        Best-effort (§5): an unreachable remote or a conflicting merge is cleaned up and the
+        rescan simply runs on the current on-disk state; the local store is never lost.
 
         The debounce timer is cancelled and its pending reasons drained up-front (as ``backup_now``
         does) so the day's queued writes land in *this* commit with their own reasons — the later
-        ``backup_now`` then carries only the reindex's graph-block changes, keeping the 'one
-        commit+push for the reindex output' story clean (no stale reason on a redundant push)."""
+        ``backup_now`` then carries only the reindex's changes, keeping the 'one commit+push for
+        the reindex output' story clean (no stale reason on a redundant push)."""
         await self._cancel_timer()
         reasons = self._drain()
         async with self._lock:
-            # Never pull on top of an in-progress merge (would fold conflict markers into notes).
+            # Never pull on top of an in-progress merge (would fold conflict markers into nodes).
             if await self._git.is_merging():
                 logger.error("in-progress merge before reindex pull; aborting it")
                 await self._git.abort_merge()
             await self._git.add_all()
             if await self._git.has_staged_changes():
-                reasons.append("reindex: commit pending vault writes before pull")
+                reasons.append("reindex: commit pending store writes before pull")
                 await self._git.commit(self._message(reasons))
             await self._integrate_remote()
 
@@ -234,7 +240,7 @@ class VaultBackupService:
                 await asyncio.shield(self._commit_and_push(reasons))
         except Exception:  # noqa: BLE001 — a backup must never crash the loop (rule 7)
             ok = False
-            logger.exception("debounced vault backup failed (will retry)")
+            logger.exception("debounced store backup failed (will retry)")
         # Re-arm if a write arrived while we were committing, or to retry a failed batch.
         if (self._pending or not ok) and not self._closing:
             self._timer = asyncio.create_task(self._debounce_and_commit())
@@ -242,7 +248,7 @@ class VaultBackupService:
     async def _commit_and_push(self, reasons: list[str]) -> BackupResult:
         async with self._lock:
             # Defensive: never commit on top of an in-progress merge (would capture conflict
-            # markers as note content). Shouldn't happen — heal-on-reject aborts its own merges.
+            # markers as node content). Shouldn't happen — heal-on-reject aborts its own merges.
             if await self._git.is_merging():
                 logger.error("in-progress merge before backup; aborting it to avoid markers")
                 await self._git.abort_merge()
@@ -252,7 +258,7 @@ class VaultBackupService:
                 await self._git.commit(self._message(reasons))
                 committed = True
             # Pull-first (ADR-014 amendment): integrate remote edits (made on GitHub or another
-            # device) before pushing, so the push is a plain fast-forward and the local vault
+            # device) before pushing, so the push is a plain fast-forward and the local store
             # stays current. Done AFTER committing local work so the tree is clean for the merge.
             await self._integrate_remote()
             pushed = await self._push_with_heal()
@@ -275,15 +281,15 @@ class VaultBackupService:
         if outcome.ok:
             return True
         if outcome.non_fast_forward:
-            logger.warning("vault push rejected (non-ff) — healing via merge, then retry")
+            logger.warning("store push rejected (non-ff) — healing via merge, then retry")
             if await self._git.pull_merge(self._remote, self._branch):
                 retry = await self._git.push(self._remote, self._branch)
                 return retry.ok
             if not await self._git.abort_merge():
-                logger.error("heal-merge abort failed; vault tree may be left mid-merge")
-            logger.error("vault heal-merge failed; commits kept local for the next backup")
+                logger.error("heal-merge abort failed; store tree may be left mid-merge")
+            logger.error("store heal-merge failed; commits kept local for the next backup")
             return False
-        logger.warning("vault push failed (remote unreachable?); commits kept local, will retry")
+        logger.warning("store push failed (remote unreachable?); commits kept local, will retry")
         return False
 
     async def _cancel_timer(self) -> None:
@@ -305,28 +311,27 @@ class VaultBackupService:
         for reason in reasons:
             if reason and reason not in seen:
                 seen.append(reason)
-        text = "; ".join(seen) if seen else "vault backup"
+        text = "; ".join(seen) if seen else "store backup"
         return text[:_MAX_MESSAGE_CHARS]
 
 
-def _write_skeleton(vault_path: str, planes: list[str], inbox_plane: str) -> None:
-    """Create the vault folder skeleton with .gitkeep placeholders + the ADR-014 .gitignore."""
-    root = Path(vault_path)
+def _write_skeleton(graph_store_path: str, node_types: list[str], inbox_folder: str) -> None:
+    """Create the node-type folder skeleton with .gitkeep placeholders + housekeeping (02 §1)."""
+    root = Path(graph_store_path)
     root.mkdir(parents=True, exist_ok=True)
-    folders = [inbox_plane, "Summaries/Daily", "Summaries/Weekly", *planes]
-    for folder in folders:
+    for folder in [*node_types, inbox_folder]:
         target = root / folder
         target.mkdir(parents=True, exist_ok=True)
         (target / ".gitkeep").touch()
-    # Housekeeping files in the bootstrap commit so a fresh vault needs no follow-up commit.
-    _write_housekeeping(vault_path)
+    # Housekeeping files in the bootstrap commit so a fresh store needs no follow-up commit.
+    _write_housekeeping(graph_store_path)
 
 
-def _write_housekeeping(vault_path: str) -> bool:
+def _write_housekeeping(graph_store_path: str) -> bool:
     """Ensure .gitignore + .gitattributes match the canonical content. Writes only files whose
     content differs; returns True if any changed (so the caller commits). Newline-exact so an
     unchanged repo is a genuine no-op."""
-    root = Path(vault_path)
+    root = Path(graph_store_path)
     root.mkdir(parents=True, exist_ok=True)
     changed = False
     for name, content in ((".gitignore", _GITIGNORE), (".gitattributes", _GITATTRIBUTES)):

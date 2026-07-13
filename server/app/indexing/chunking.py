@@ -1,17 +1,11 @@
-"""Pure chunking + note-text stripping (02-data-model §4, ADR-023).
+"""Pure chunking + node-text stripping (02-data-model §4, ADR-026).
 
 The chunker is deliberately pure (no I/O, no settings, no provider calls) so it is unit-tested
-with no mocks. Before a note is **chunked / embedded**, the YAML **frontmatter**, the
-machine-managed **``sb:related``** block, and the M1 **co-capture ``## Related``** wikilink section
-are all stripped, so a note's embedded identity is its **human content only** — never links to
-other notes (which otherwise couple co-captured/related notes in cosine search). (The strippers are
-exposed separately because the indexer's ``content_hash`` uses only ``strip_related_block`` — the
-hash keeps frontmatter *and* the co-capture section so tag/plane/sibling edits still trigger a
-reindex, and drops only the machine block; see 02-data-model §3 + ADR-023.)
-
-  * the YAML **frontmatter** block, and
-  * the machine-managed **``sb:related``** block ([ADR-023]) — stripping it from the hash is what
-    keeps the graph's own writes from re-triggering a reindex (the feedback-loop fix).
+with no mocks. Before a node is **chunked / embedded**, only the YAML **frontmatter** is stripped,
+so a node's embedded identity is its **human prose**. Edges now live in frontmatter (02 §2), so
+"never embed links" is structural — there is no ``sb:related`` block or co-capture ``## Related``
+wikilink section to strip anymore (both deleted by ADR-026). ``content_hash`` covers the whole
+file (no exclusions), so any edit reindexes.
 
 Splitting policy (02 §4): split on **headings**, then **paragraphs**, targeting ``CHUNK_SIZE``
 characters; a single over-long paragraph is **hard-split** with ``CHUNK_OVERLAP`` characters of
@@ -20,39 +14,12 @@ arbitrary mid-content cut).
 
 The asymmetric ``search_document:`` / ``search_query:`` nomic prefixes ([ADR-022]) are **not**
 applied here — they are an embed-time concern owned by the indexer / search layer, not the
-chunker (which also feeds hashing). Chunks are returned as raw note text.
+chunker. Chunks are returned as raw node text.
 """
 
 from __future__ import annotations
 
 import re
-
-# Delimiters of the machine-owned semantic-relatedness block ([ADR-023]). Canonical here; the
-# graph renderer (later M2 task) writes the same markers. The region between them (inclusive) is
-# regenerated wholesale, so it is excluded from a note's identity.
-RELATED_BLOCK_START = "<!-- sb:related:start -->"
-RELATED_BLOCK_END = "<!-- sb:related:end -->"
-
-_RELATED_BLOCK_RE = re.compile(
-    re.escape(RELATED_BLOCK_START) + ".*?" + re.escape(RELATED_BLOCK_END),
-    re.DOTALL,
-)
-
-# The M1 **co-capture** ``## Related`` section (``capture/notes.py``): a ``## Related`` heading
-# followed by ``- [[wikilink]]`` bullets to sibling notes from the *same* capture. It is
-# human-navigation only — the ``related:`` frontmatter is the machine record — so it is stripped
-# from the **embed** path (but NOT the hash: siblings changing should still reindex). Otherwise a
-# sibling's title/path sits inside this note's vector and couples co-captured notes in search
-# (M2 Accept finding, 2026-07-13). Distinct from the graph's delimited ``## Related notes`` block
-# above. Conservative: matches only a *pure wikilink-bullet list* at the end of the note, so a
-# hand-written prose ``## Related`` section is never stripped. Runs after the sb:related strip, so
-# whatever the graph appended after it is already gone and this list is what trails the note.
-_COCAPTURE_RELATED_RE = re.compile(
-    r"\n*^\#\#[ \t]+Related[ \t]*$\n"               # "## Related" heading (not "## Related notes")
-    r"(?:[ \t]*-[ \t]+\[\[[^\n]*\]\][ \t]*\n?)+"    # ≥1 `- [[...]]` bullet lines
-    r"\s*\Z",                                        # trailing to end of note
-    re.MULTILINE,
-)
 
 # A YAML frontmatter block: `---` on the first line, up to the next `---` on its own line.
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(?P<body>.*?\n)?---[ \t]*(?:\n|\Z)", re.DOTALL)
@@ -70,8 +37,8 @@ def split_frontmatter(text: str) -> tuple[str | None, str]:
     """Split leading YAML frontmatter from the body.
 
     Returns ``(frontmatter_inner, body)`` where ``frontmatter_inner`` is the YAML between the
-    ``---`` fences (``None`` if the note has no frontmatter) and ``body`` is everything after.
-    Newlines are normalized to LF first, so a CRLF vault file (git on Windows) strips too.
+    ``---`` fences (``None`` if the node has no frontmatter) and ``body`` is everything after.
+    Newlines are normalized to LF first, so a CRLF store file (git on Windows) strips too.
     """
     text = _normalize_newlines(text)
     match = _FRONTMATTER_RE.match(text)
@@ -81,36 +48,13 @@ def split_frontmatter(text: str) -> tuple[str | None, str]:
     return inner, text[match.end() :]
 
 
-def strip_related_block(text: str) -> str:
-    """Remove the machine-managed ``sb:related`` block ([ADR-023]), if present.
-
-    Newlines are normalized to LF first so the delimiters match on a CRLF vault file.
-    """
-    return _RELATED_BLOCK_RE.sub("", _normalize_newlines(text))
-
-
-def strip_cocapture_related(text: str) -> str:
-    """Remove the M1 co-capture ``## Related`` wikilink-bullet section from the **embed** path.
-
-    Only a pure ``## Related`` + ``- [[…]]`` bullet list trailing the note is removed (never a
-    prose section); the co-capture link survives in the ``related:`` frontmatter. Newlines are
-    normalized first. Used by :func:`chunk_note` only — NOT by the ``content_hash`` path, so a
-    sibling change still re-hashes and reindexes.
-    """
-    return _COCAPTURE_RELATED_RE.sub("", _normalize_newlines(text))
-
-
 def chunk_note(text: str, *, chunk_size: int, chunk_overlap: int) -> list[str]:
-    """Full note text → retrieval chunks: strip frontmatter + both Related blocks, then chunk.
+    """Full node text → retrieval chunks: strip frontmatter, then chunk (02 §4).
 
-    This is what the indexer feeds to the embedder (02 §4). Both the machine ``sb:related`` block
-    and the M1 co-capture ``## Related`` wikilink section are removed so a note's embedded identity
-    is its human *content* — not links to other notes (which pollute cosine search). ``related:``
-    frontmatter is untouched. ``notes.embedding`` is the mean-pool of these chunks ([ADR-023]).
+    This is what the indexer feeds to the embedder. Only frontmatter is removed — a node's
+    embedded identity is its human prose. ``nodes.embedding`` is the mean-pool of these chunks.
     """
     _, body = split_frontmatter(text)  # normalizes newlines internally
-    body = strip_related_block(body)
-    body = strip_cocapture_related(body)
     return chunk_text(body, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
 

@@ -47,9 +47,7 @@ async def login(
             detail="Too many login attempts. Try again shortly.",
         )
     try:
-        token = await auth.login(
-            payload.password, user_agent=request.headers.get("user-agent")
-        )
+        token = await auth.login(payload.password, user_agent=request.headers.get("user-agent"))
     except InvalidCredentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password"

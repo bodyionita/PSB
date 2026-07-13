@@ -5,7 +5,7 @@ These are the wire contract only; they are not DB models (there is no ORM).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -53,7 +53,7 @@ class CaptureView(BaseModel):
     kind: str
     status: str
     raw_text: str | None = None
-    note_paths: list[str] = Field(default_factory=list)
+    node_paths: list[str] = Field(default_factory=list)
     follow_up_question: str | None = None
     follow_up_answer: str | None = None
     error: str | None = None
@@ -67,7 +67,7 @@ class CaptureView(BaseModel):
             kind=record.kind,
             status=record.status,
             raw_text=record.raw_text,
-            note_paths=list(record.note_paths),
+            node_paths=list(record.node_paths),
             follow_up_question=record.follow_up_question,
             follow_up_answer=record.follow_up_answer,
             error=record.error,
@@ -76,20 +76,23 @@ class CaptureView(BaseModel):
         )
 
 
-# --- Search & notes (03-api.md §Search & notes, M2 / ADR-022/023) ---
+# --- Search & graph (03-api.md §Search & graph, M3 / ADR-022/026/030) ---
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     # Optional result count; the service clamps it to SEARCH_MAX_TOP_K. None ⇒ SEARCH_TOP_K_DEFAULT.
     top_k: int | None = Field(default=None, ge=1)
-    # Filter on `notes.planes` (array overlap, not folder — ADR-005). None/[] = no filter.
+    # Filter on `nodes.planes` (array overlap, not folder — ADR-005). None/[] = no filter.
     planes: list[str] | None = None
+    # Filter on `nodes.type` (M3). None/[] = no filter.
+    types: list[str] | None = None
 
 
 class SearchResultItem(BaseModel):
-    """One note-grouped hit (best chunk = snippet), ranked by score (03-api §Search)."""
+    """One node-grouped hit (best chunk = snippet), ranked by score (03-api §Search)."""
 
-    note_id: str
-    vault_path: str
+    node_id: str
+    store_path: str
+    type: str
     title: str | None = None
     plane: str | None = None
     planes: list[str] = Field(default_factory=list)
@@ -98,35 +101,52 @@ class SearchResultItem(BaseModel):
     score: float
 
 
-class RelatedNoteItem(BaseModel):
-    """A semantic neighbour from `note_links` (ADR-023)."""
+class NodeEdgeItem(BaseModel):
+    """One edge of a node (03-api §Nodes): the *other* endpoint + edge metadata.
 
-    note_id: str
-    vault_path: str
+    ``dir`` = ``out`` (this node → other) | ``in``; ``origin`` = ``canonical`` | ``derived``;
+    ``score`` = confidence (canonical) or cosine (derived)."""
+
+    rel: str
+    dir: str
+    node_id: str
+    type: str | None = None
     title: str | None = None
-    score: float
+    origin: str
+    score: float | None = None
+    since: date | None = None
+    until: date | None = None
 
 
-class NotePreviewResponse(BaseModel):
-    """Read-only note preview for the search UI expand (GET /notes/{id})."""
+class NodeDetailResponse(BaseModel):
+    """Read-only node detail for the search UI expand + map (GET /nodes/{id}, 03-api §Nodes).
 
-    note_id: str
-    vault_path: str
+    ``profile`` is the derived entity profile ([ADR-030], null for content nodes and until the
+    profile-refresh job lands); ``edges`` are canonical + derived, both directions."""
+
+    node_id: str
+    store_path: str
+    type: str
     title: str | None = None
     plane: str | None = None
     planes: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    disambig: str | None = None
+    occurred: date | None = None
+    occurred_end: date | None = None
     body: str
-    related: list[RelatedNoteItem] = Field(default_factory=list)
+    profile: str | None = None
+    edges: list[NodeEdgeItem] = Field(default_factory=list)
 
 
 # --- Meta (03-api.md §Meta) ---
 class PlanesResponse(BaseModel):
     """The configured plane vocabulary for the Search-tab filter chips (GET /planes, ADR-005).
 
-    ``planes`` = the ``PLANES=`` config list (primary homes); ``inbox`` is the always-present
-    system plane, not part of ``PLANES``. The web filters ``POST /search`` on ``notes.planes``
-    membership using these values, so it duplicates no server config (ADR-006)."""
+    ``planes`` = the ``PLANES=`` config list (primary homes); ``inbox`` is the system folder that
+    holds organizer-fallback nodes (02 §1), not a plane. The web filters ``POST /search`` on
+    ``nodes.planes`` membership using these values, so it duplicates no server config (ADR-006)."""
 
     planes: list[str] = Field(default_factory=list)
     inbox: str
@@ -199,6 +219,6 @@ class TagConsolidateAcceptedResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str  # "ok" | "degraded"
     db: bool
-    vault: bool
+    store: bool
     git_remote: bool
     backups: bool  # M1 (ADR-014 §6): latest integrity-drill fresh + not failed

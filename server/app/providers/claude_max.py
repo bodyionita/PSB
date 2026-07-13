@@ -62,9 +62,7 @@ class ClaudeMaxProvider(ChatProvider):
     @staticmethod
     def _probe_version(cli: str) -> bool:
         try:
-            result = subprocess.run(
-                [cli, "--version"], capture_output=True, text=True, timeout=10
-            )
+            result = subprocess.run([cli, "--version"], capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
             return False
         return result.returncode == 0

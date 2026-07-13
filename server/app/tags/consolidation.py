@@ -1,14 +1,14 @@
-"""Pure tag-consolidation logic (ADR-024 §2) — prompts, plan sanitisation, note rewriting.
+"""Pure tag-consolidation logic (ADR-024 §2) — prompts, plan sanitisation, node rewriting.
 
 Everything here is pure (no I/O, no provider calls) so it is unit-tested with no mocks (08
 testing policy). The :class:`~app.tags.service.TagConsolidationService` owns the actual distill
-call, the vault reads/writes, and the reindex; this module only shapes the propose prompt,
-sanitises a merge plan into a safe canonical→variant mapping, and rewrites a note's ``tags:``
+call, the store reads/writes, and the reindex; this module only shapes the propose prompt,
+sanitises a merge plan into a safe canonical→variant mapping, and rewrites a node's ``tags:``
 frontmatter line.
 
-Tag slugging reuses ``_slugify_tag`` (the single authority on a valid Obsidian tag, 02 §2) and
+Tag slugging reuses ``_slugify_tag`` (the single authority on a valid tag slug, 02 §2) and
 frontmatter reading/rendering reuses the same inline-list helpers the rest of the code emits, so
-a rewritten ``tags:`` line is byte-identical in shape to a freshly organized note.
+a rewritten ``tags:`` line is byte-identical in shape to a freshly organized node.
 """
 
 from __future__ import annotations
@@ -17,17 +17,17 @@ import json
 import re
 from dataclasses import dataclass
 
-from ..capture.notes import _yaml_list
 from ..capture.organizer import _slugify_tag
+from ..graph.node_writer import _yaml_list
 from ..indexing.chunking import _normalize_newlines
 from ..indexing.frontmatter import _parse_inline_list, _unquote
 
 # --- Versioned prompt (bump the suffix on any wording change, mirroring the organizer). ---
-CONSOLIDATION_PROMPT_VERSION = "tags-consolidate-v1"
+CONSOLIDATION_PROMPT_VERSION = "tags-consolidate-v2"  # v2: node/graph vocabulary (M3 pivot)
 
 CONSOLIDATION_SYSTEM_PROMPT = """\
-You are cleaning up a tag vocabulary for a personal knowledge vault. Below is the list of tags
-currently in use, each with the number of notes it appears on (most-used first).
+You are cleaning up a tag vocabulary for a personal knowledge graph. Below is the list of tags
+currently in use, each with the number of nodes it appears on (most-used first).
 
 Group together ONLY tags that are genuine duplicates or variants of the SAME concept — spelling
 or spacing variants, singular/plural, or obvious synonyms (e.g. "second-brain" / "secondbrain" /
@@ -166,13 +166,13 @@ def remap_tags(tags: list[str], mapping: dict[str, str]) -> list[str]:
     return out
 
 
-def rewrite_note_tags(raw_text: str, mapping: dict[str, str]) -> tuple[str, bool]:
-    """Rewrite a note's ``tags:`` frontmatter line under ``mapping`` (canonical replaces variant).
+def rewrite_node_tags(raw_text: str, mapping: dict[str, str]) -> tuple[str, bool]:
+    """Rewrite a node's ``tags:`` frontmatter line under ``mapping`` (canonical replaces variant).
 
     Returns ``(new_text, changed)``. Only the single top-level ``tags:`` line inside the leading
-    ``---`` frontmatter is touched — every other byte (body, other keys, the machine ``sb:related``
-    block) is preserved; when nothing changes the *original* text is returned verbatim (no
-    spurious newline churn). A note without frontmatter or without a ``tags:`` line is left as-is.
+    ``---`` frontmatter is touched — every other byte (body, other keys, the ``edges:`` block) is
+    preserved; when nothing changes the *original* text is returned verbatim (no spurious newline
+    churn). A node without frontmatter or without a ``tags:`` line is left as-is.
     """
     text = _normalize_newlines(raw_text)
     lines = text.split("\n")
@@ -203,7 +203,7 @@ def _parse_tags_value(value: str) -> list[str]:
 
     Only the shapes this project emits are understood (matching ``frontmatter.parse_frontmatter``);
     a hand-edited multi-line YAML block list (``tags:\\n  - x``) yields ``[]`` and is left alone —
-    such a note also never enters ``notes.tags`` / the vocabulary, so it is simply invisible to the
+    such a node also never enters ``nodes.tags`` / the vocabulary, so it is simply invisible to the
     tag subsystem, never mis-rewritten.
     """
     if value.startswith("[") and value.endswith("]"):

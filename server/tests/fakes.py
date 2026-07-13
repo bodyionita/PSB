@@ -1,4 +1,4 @@
-"""Fake providers for service tests — no live LLMs in CI (08 testing policy)."""
+"""Fakes for service tests — no live LLMs/DB in CI (08 testing policy)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from app.graph.store import NoteNeighbors
+from app.entities.store import EntityCandidate, normalize_alias
+from app.graph.store import SimilarEdge
 from app.indexing.indexer import IndexOutcome
-from app.indexing.store import NoteUpsert
+from app.indexing.store import CanonicalEdge, IndexState, NodeUpsert
 from app.providers.base import (
     ChatMessage,
     ChatProvider,
@@ -17,10 +18,11 @@ from app.providers.base import (
     ProviderUnavailable,
     STTProvider,
 )
-from app.search.store import NoteRow, SearchHit
+from app.search.store import NodeRow, SearchHit
 from app.services.agent_runs import RUNNING, AgentRun
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
+from app.services.review_queue import ReviewItem
 
 
 class FakeChatProvider(ChatProvider):
@@ -98,38 +100,61 @@ class FakeEmbeddingProvider(EmbeddingProvider):
 
 class FakeIndexStore:
     """In-memory IndexStore for indexer tests — no live DB (08 testing policy). Keeps the last
-    upserted :class:`NoteUpsert` per path so a test can inspect chunks / mean-pooled embedding."""
+    upserted :class:`NodeUpsert` per id, plus the materialized canonical edges per node."""
 
     def __init__(self) -> None:
-        self.notes: dict[str, NoteUpsert] = {}
+        self.nodes: dict[str, NodeUpsert] = {}
+        self.edges: dict[str, list[CanonicalEdge]] = {}
+        self.path_updates: list[tuple[str, str]] = []
 
-    async def get_content_hash(self, vault_path: str) -> str | None:
-        note = self.notes.get(vault_path)
-        return note.content_hash if note is not None else None
+    async def get_index_state(self, node_id: str) -> IndexState | None:
+        node = self.nodes.get(node_id)
+        if node is None:
+            return None
+        return IndexState(content_hash=node.content_hash, store_path=node.store_path)
 
-    async def upsert_note(self, note: NoteUpsert) -> None:
-        self.notes[note.vault_path] = note
+    async def upsert_node(self, node: NodeUpsert) -> None:
+        self.nodes[node.id] = node
+
+    async def update_node_path(self, node_id: str, store_path: str) -> None:
+        self.path_updates.append((node_id, store_path))
+        node = self.nodes.get(node_id)
+        if node is not None:
+            self.nodes[node_id] = replace_store_path(node, store_path)
+
+    async def replace_canonical_edges(self, node_id: str, edges: list[CanonicalEdge]) -> int:
+        # Mirror the real store: only materialize edges whose target node exists.
+        kept = [e for e in edges if e.dst_id in self.nodes]
+        self.edges[node_id] = kept
+        return len(kept)
 
     async def list_indexed_paths(self) -> set[str]:
-        return set(self.notes)
+        return {n.store_path for n in self.nodes.values()}
 
-    async def delete_notes(self, vault_paths: list[str]) -> int:
-        count = 0
-        for path in vault_paths:
-            if self.notes.pop(path, None) is not None:
-                count += 1
-        return count
+    async def delete_nodes(self, store_paths: list[str]) -> int:
+        targets = set(store_paths)
+        gone = [nid for nid, n in self.nodes.items() if n.store_path in targets]
+        for nid in gone:
+            self.nodes.pop(nid, None)
+            self.edges.pop(nid, None)
+        return len(gone)
+
+
+def replace_store_path(node: NodeUpsert, store_path: str) -> NodeUpsert:
+    from dataclasses import replace
+
+    return replace(node, store_path=store_path)
 
 
 class FakeSearchStore:
-    """In-memory SearchStore for search-service tests — no live DB. Returns preset hits/note and
-    records the exact search arguments so a test can assert clamping / plane-filter handling."""
+    """In-memory SearchStore for search-service tests — no live DB. Returns preset hits/node and
+    records the exact search arguments so a test can assert clamping / filter handling."""
 
     def __init__(
-        self, *, hits: list[SearchHit] | None = None, note: NoteRow | None = None
+        self, *, hits: list[SearchHit] | None = None, node: NodeRow | None = None
     ) -> None:
         self._hits = hits or []
-        self._note = note
+        self._node = node
         self.search_args: dict | None = None
 
     async def search_chunks(
@@ -138,19 +163,21 @@ class FakeSearchStore:
         *,
         top_k: int,
         planes: list[str] | None,
+        types: list[str] | None,
         min_score: float,
     ) -> list[SearchHit]:
         self.search_args = {
             "embedding": embedding,
             "top_k": top_k,
             "planes": planes,
+            "types": types,
             "min_score": min_score,
         }
         return list(self._hits)
 
-    async def get_note(self, note_id: str) -> NoteRow | None:
-        if self._note is not None and self._note.note_id == note_id:
-            return self._note
+    async def get_node(self, node_id: str) -> NodeRow | None:
+        if self._node is not None and self._node.node_id == node_id:
+            return self._node
         return None
 
 
@@ -160,14 +187,14 @@ class FakeIndexer:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
-    async def index_paths(self, vault_paths: list[str]) -> IndexOutcome:
-        self.calls.append(list(vault_paths))
-        return IndexOutcome(indexed=len(vault_paths))
+    async def index_paths(self, store_paths: list[str]) -> IndexOutcome:
+        self.calls.append(list(store_paths))
+        return IndexOutcome(indexed=len(store_paths))
 
 
 @dataclass
-class FakeVaultBackup:
-    """Records commit requests instead of touching git (satisfies the VaultBackup protocol)."""
+class FakeStoreBackup:
+    """Records commit requests instead of touching git (satisfies the StoreBackup protocol)."""
 
     reasons: list[str] = field(default_factory=list)
 
@@ -176,49 +203,39 @@ class FakeVaultBackup:
 
 
 class FakeGraphStore:
-    """In-memory GraphStore for relatedness-graph tests — no live DB (08 testing policy).
+    """In-memory GraphStore for derived-edge tests — no live DB (08 testing policy).
 
-    ``neighbors`` is the preset output of ``compute_neighbors`` (records the args it was called
-    with); ``paths`` is the note universe for the render pass; ``written_links`` captures the
-    edges the service asked to materialize."""
+    ``edges`` is the preset output of ``compute_similar`` (records the args); ``written`` captures
+    the edges the service asked to materialize."""
 
-    def __init__(
-        self,
-        *,
-        neighbors: list[NoteNeighbors] | None = None,
-        paths: list[str] | None = None,
-    ) -> None:
-        self._neighbors = neighbors or []
-        self._paths = paths if paths is not None else [n.vault_path for n in self._neighbors]
+    def __init__(self, *, edges: list[SimilarEdge] | None = None) -> None:
+        self._edges = edges or []
         self.compute_args: dict | None = None
-        self.written_links: list[NoteNeighbors] | None = None
+        self.written: list[SimilarEdge] | None = None
 
-    async def compute_neighbors(self, *, top_k: int, min_score: float) -> list[NoteNeighbors]:
+    async def compute_similar(self, *, top_k: int, min_score: float) -> list[SimilarEdge]:
         self.compute_args = {"top_k": top_k, "min_score": min_score}
-        return list(self._neighbors)
+        return list(self._edges)
 
-    async def replace_note_links(self, neighbors: list[NoteNeighbors]) -> int:
-        self.written_links = list(neighbors)
-        return sum(len(n.related) for n in neighbors)
-
-    async def list_note_paths(self) -> list[str]:
-        return list(self._paths)
+    async def replace_derived_edges(self, edges: list[SimilarEdge]) -> int:
+        self.written = list(edges)
+        return len(edges)
 
 
 class FakeTagStore:
     """In-memory TagStore for tag-vocabulary + consolidation tests — no live DB.
 
-    ``counts`` seeds the vocabulary (tag → note frequency); ``notes_by_tag`` maps a tag to the
-    vault paths carrying it (for the consolidation apply lookup)."""
+    ``counts`` seeds the vocabulary (tag → node frequency); ``nodes_by_tag`` maps a tag to the
+    store paths carrying it (for the consolidation apply lookup)."""
 
     def __init__(
         self,
         *,
         counts: list[tuple[str, int]] | None = None,
-        notes_by_tag: dict[str, list[str]] | None = None,
+        nodes_by_tag: dict[str, list[str]] | None = None,
     ) -> None:
         self._counts = counts or []
-        self._notes_by_tag = notes_by_tag or {}
+        self._nodes_by_tag = nodes_by_tag or {}
         self.vocab_calls: list[int] = []
 
     async def tag_counts(self, *, limit: int):
@@ -230,32 +247,63 @@ class FakeTagStore:
     async def vocabulary_tags(self, *, limit: int) -> list[str]:
         return [tc.tag for tc in await self.tag_counts(limit=limit)]
 
-    async def notes_with_any_tag(self, tags: list[str]):
-        from app.tags.store import TaggedNote
+    async def nodes_with_any_tag(self, tags: list[str]):
+        from app.tags.store import TaggedNode
 
         paths: list[str] = []
         for tag in tags:
-            for path in self._notes_by_tag.get(tag, []):
+            for path in self._nodes_by_tag.get(tag, []):
                 if path not in paths:
                     paths.append(path)
-        return [TaggedNote(vault_path=p) for p in sorted(paths)]
+        return [TaggedNode(store_path=p) for p in sorted(paths)]
 
 
 class FakeCommitBackup:
-    """Records forced commit+push calls (the VaultCommitter surface the tags apply needs)."""
+    """Records forced commit+push calls (the StoreCommitter surface the tags apply needs)."""
 
     def __init__(self) -> None:
         self.reasons: list[str] = []
 
     async def backup_now(self, reason: str = "manual backup"):
-        from app.services.vault_backup import BackupResult
+        from app.services.store_backup import BackupResult
 
         self.reasons.append(reason)
         return BackupResult(committed=True, pushed=True)
 
 
+class FakeAliasStore:
+    """In-memory alias index for resolver tests. ``candidates_by_key`` maps a
+    (normalized_name, type) to the candidates a mention resolves against."""
+
+    def __init__(
+        self, *, candidates_by_key: dict[tuple[str, str], list[EntityCandidate]] | None = None
+    ) -> None:
+        self._by_key = candidates_by_key or {}
+        self.queries: list[tuple[str, tuple[str, ...]]] = []
+
+    async def find_candidates(self, name: str, *, types: list[str]) -> list[EntityCandidate]:
+        self.queries.append((name, tuple(types)))
+        out: list[EntityCandidate] = []
+        for t in types:
+            out.extend(self._by_key.get((normalize_alias(name), t), []))
+        return out
+
+
+class FakeReviewQueue:
+    """Records filed review items (the ReviewQueue write surface)."""
+
+    def __init__(self) -> None:
+        self.items: list[ReviewItem] = []
+        self._seq = 0
+
+    async def enqueue(self, item: ReviewItem) -> str:
+        self._seq += 1
+        self.items.append(item)
+        return f"review-{self._seq}"
+
+
 class FakeGitRepo:
-    """In-memory GitClient for VaultBackupService orchestration tests (no real git).
+    """In-memory GitClient for StoreBackupService orchestration tests (no real git).
 
     Push behaviour is scriptable: ``non_ff_times`` rejects that many pushes as non-fast-forward
     (to exercise heal-on-reject), and ``push_ok`` controls the plain-failure path."""
@@ -269,6 +317,7 @@ class FakeGitRepo:
         self._staged = False
         self.staged_after_add = True  # what add_all leaves staged (set False for "no changes")
         self.config: dict[str, str] = {}
+        self.remotes: dict[str, str] = {}
         self.commits: list[str] = []
         self.pushes = 0
         self.pulls = 0
@@ -301,6 +350,10 @@ class FakeGitRepo:
 
     async def has_remote(self, name: str) -> bool:
         return self._has_remote
+
+    async def set_remote(self, name: str, url: str) -> None:
+        self.remotes[name] = url
+        self._has_remote = True
 
     async def add_all(self) -> None:
         self._staged = self.staged_after_add
@@ -411,7 +464,8 @@ class FakeAgentRunStore:
             run = self.preloaded[agent]
             return run if status is None or run.status == status else None
         matching = [
-            r for r in self.runs.values()
+            r
+            for r in self.runs.values()
             if r.agent == agent and (status is None or r.status == status)
         ]
         return matching[-1] if matching else None
@@ -469,8 +523,8 @@ class FakeCaptureStore:
     async def set_raw_text(self, capture_id: str, raw_text: str) -> None:
         self.records[capture_id].raw_text = raw_text
 
-    async def set_note_paths(self, capture_id: str, note_paths: list[str]) -> None:
-        self.records[capture_id].note_paths = list(note_paths)
+    async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None:
+        self.records[capture_id].node_paths = list(node_paths)
 
     async def set_follow_up_question(self, capture_id: str, question: str) -> None:
         self.records[capture_id].follow_up_question = question

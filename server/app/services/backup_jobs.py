@@ -1,12 +1,12 @@
 """Durability backup jobs (ADR-014 §1, §6, §7).
 
-The four nightly/weekly R2 jobs plus the 04:55 vault sweep, each wrapped in an ``agent_runs`` row
+The four nightly/weekly R2 jobs plus the 04:55 store sweep, each wrapped in an ``agent_runs`` row
 (vision P8 "everything visible"; rule 7 "no bare except — jobs end as failed with context, never
-crash the service"). All git ops on the *live* vault go through :class:`VaultBackupService` (the
+crash the service"). All git ops on the *live* store go through :class:`StoreBackupService` (the
 one lock, ADR-014); this module never touches the live repo directly.
 
 Jobs are pure orchestration over injected seams (``AgentRunStore``, ``ObjectStore``,
-``VaultBackupService``, a db-dumper, a bundle-inspector), so they unit-test with fakes; the real
+``StoreBackupService``, a db-dumper, a bundle-inspector), so they unit-test with fakes; the real
 `git bundle` round-trip is integration-tested against actual git.
 """
 
@@ -28,12 +28,12 @@ from ..db import Database
 from .agent_runs import FAILED, SKIPPED, SUCCEEDED, AgentRunStore, PgAgentRunStore
 from .git_repo import GitRepo
 from .object_store import ObjectStore, build_object_store
-from .vault_backup import Fingerprint, VaultBackupService
+from .store_backup import Fingerprint, StoreBackupService
 
 logger = logging.getLogger(__name__)
 
 # agent_runs.agent names (04-pipelines §5, ADR-014).
-VAULT_BACKUP = "vault-backup"
+STORE_BACKUP = "store-backup"
 INTEGRITY_DRILL = "integrity-drill"
 DB_BACKUP = "db-backup"
 DATA_SYNC = "data-sync"
@@ -58,23 +58,23 @@ class BackupJobs:
         settings: Settings,
         store: AgentRunStore,
         object_store: ObjectStore | None,
-        vault_backup: VaultBackupService,
+        store_backup: StoreBackupService,
         db_dumper: DbDumper | None = None,
         bundle_inspector: BundleInspector | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._object_store = object_store
-        self._vault_backup = vault_backup
+        self._store_backup = store_backup
         self._tz = ZoneInfo(settings.scheduler_tz)
         self._db_dumper = db_dumper or self._default_pg_dump
         self._bundle_inspector = bundle_inspector or self._default_bundle_inspector
 
     # --- jobs --------------------------------------------------------------------------------
 
-    async def run_vault_bundle(self) -> None:
+    async def run_store_bundle(self) -> None:
         """Nightly `git bundle --all` → R2 WORM, recording the fingerprint (ADR-014 §1, §6)."""
-        await self._record_r2_job(VAULT_BACKUP, self._vault_bundle)
+        await self._record_r2_job(STORE_BACKUP, self._store_bundle)
 
     async def run_integrity_drill(self) -> None:
         """Weekly: verify + clone the R2 bundle, assert fingerprint + monotonic count (§6)."""
@@ -88,24 +88,24 @@ class BackupJobs:
         """Nightly sync of raw inputs (DATA_PATH) → R2 (§7)."""
         await self._record_r2_job(DATA_SYNC, self._data_sync)
 
-    async def run_vault_sweep(self) -> None:
-        """04:55 sweep: force a vault commit + push so nothing sits uncommitted overnight."""
-        result = await self._vault_backup.backup_now("nightly sweep")
-        logger.info("nightly vault sweep: committed=%s pushed=%s", result.committed, result.pushed)
+    async def run_store_sweep(self) -> None:
+        """04:55 sweep: force a store commit + push so nothing sits uncommitted overnight."""
+        result = await self._store_backup.backup_now("nightly sweep")
+        logger.info("nightly store sweep: committed=%s pushed=%s", result.committed, result.pushed)
 
     # --- job bodies (return summary + details; raise to fail the run) -------------------------
 
-    async def _vault_bundle(self) -> tuple[str, dict]:
+    async def _store_bundle(self) -> tuple[str, dict]:
         assert self._object_store is not None
         # The last GOOD bundle's count is the monotonic baseline (ADR-014 §6).
-        previous = await self._store.latest(VAULT_BACKUP, status=SUCCEEDED)
+        previous = await self._store.latest(STORE_BACKUP, status=SUCCEEDED)
         stamp = self._stamp()
-        work_dir = Path(await _to_thread(tempfile.mkdtemp, prefix="vault-bundle-"))
+        work_dir = Path(await _to_thread(tempfile.mkdtemp, prefix="store-bundle-"))
         try:
-            bundle_path = work_dir / f"vault-{stamp}.bundle"
-            fingerprint = await self._vault_backup.write_bundle(str(bundle_path))
+            bundle_path = work_dir / f"store-{stamp}.bundle"
+            fingerprint = await self._store_backup.write_bundle(str(bundle_path))
             data = await _to_thread(bundle_path.read_bytes)
-            key = f"vault/bundle-{stamp}.bundle"
+            key = f"store/bundle-{stamp}.bundle"
             # Upload to WORM first — even a regressed snapshot is worth keeping for forensics —
             # then fail the run if the count dropped, so this bundle does NOT become the new good
             # baseline and the weekly drill still compares live against the last good count.
@@ -120,7 +120,7 @@ class BackupJobs:
                 baseline = int(previous.details.get("commit_count", 0))
                 if fingerprint.commit_count < baseline:
                     raise DurabilityError(
-                        f"vault commit count regressed {baseline} → {fingerprint.commit_count} "
+                        f"store commit count regressed {baseline} → {fingerprint.commit_count} "
                         "(rewrite/truncation alarm, ADR-014 §6)"
                     )
             summary = f"bundled {fingerprint.commit_count} commits ({len(data)} bytes) → {key}"
@@ -131,15 +131,15 @@ class BackupJobs:
     async def _integrity_drill(self) -> tuple[str, dict]:
         assert self._object_store is not None
         # Drill the last KNOWN-GOOD bundle, so a failed nightly can't blind the weekly check.
-        last = await self._store.latest(VAULT_BACKUP, status=SUCCEEDED)
+        last = await self._store.latest(STORE_BACKUP, status=SUCCEEDED)
         if last is None or not last.details.get("key"):
-            raise DrillError("no successful vault bundle recorded yet to drill")
+            raise DrillError("no successful store bundle recorded yet to drill")
         manifest = last.details
         data = await self._object_store.get_bytes(str(manifest["key"]))
         cloned = await self._bundle_inspector(data)  # verifies + clones the bundle
         # The live server repo is a ff-only mirror of GitHub, so it stands in for the "and GitHub"
         # side of ADR-014 §6. An independent GitHub-side fetch is a tracked follow-up.
-        live = await self._vault_backup.snapshot_fingerprint()
+        live = await self._store_backup.snapshot_fingerprint()
 
         problems: list[str] = []
         if cloned.commit_count != manifest.get("commit_count"):
@@ -251,9 +251,9 @@ async def _to_thread(func, /, *args, **kwargs):
 
 
 def build_backup_jobs(
-    settings: Settings, db: Database, vault_backup: VaultBackupService
+    settings: Settings, db: Database, store_backup: StoreBackupService
 ) -> BackupJobs:
-    """Construct the durability jobs from settings + an (already-connected) db + vault backup.
+    """Construct the durability jobs from settings + an (already-connected) db + store backup.
 
     Shared by the CLI entrypoint (:mod:`app.cli`) and the in-process scheduler wiring
     (:mod:`app.main`) so both drive the same jobs. ``object_store`` is ``None`` when R2 creds
@@ -263,5 +263,5 @@ def build_backup_jobs(
         settings=settings,
         store=PgAgentRunStore(db),
         object_store=build_object_store(settings),
-        vault_backup=vault_backup,
+        store_backup=store_backup,
     )

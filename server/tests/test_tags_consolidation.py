@@ -9,7 +9,7 @@ from app.tags.consolidation import (
     clean_merges,
     parse_merge_plan,
     remap_tags,
-    rewrite_note_tags,
+    rewrite_node_tags,
 )
 
 # --- organizer vocabulary injection (ADR-024 §1) ------------------------------------------------
@@ -44,9 +44,7 @@ def test_parse_merge_plan_rejects_non_conforming():
 
 def test_clean_merges_slugifies_and_drops_unknown_when_allowed_given():
     allowed = {"second-brain": 5, "secondbrain": 2}
-    merges = clean_merges(
-        [("Second Brain", ["secondbrain", "totally-made-up"])], allowed=allowed
-    )
+    merges = clean_merges([("Second Brain", ["secondbrain", "totally-made-up"])], allowed=allowed)
     # "Second Brain" slugs to "second-brain" (known); the hallucinated tag is dropped.
     assert merges == [TagMerge(canonical="second-brain", variants=("secondbrain",))]
 
@@ -59,12 +57,8 @@ def test_clean_merges_needs_two_distinct_members():
 def test_clean_merges_reassigns_canonical_to_highest_frequency_when_given_one_invalid():
     allowed = {"secondbrain": 9, "second-brain-app": 1}
     # canonical "second-brain" isn't in the vocabulary → pick the most-used member.
-    merges = clean_merges(
-        [("second-brain", ["secondbrain", "second-brain-app"])], allowed=allowed
-    )
-    assert merges == [
-        TagMerge(canonical="secondbrain", variants=("second-brain-app",))
-    ]
+    merges = clean_merges([("second-brain", ["secondbrain", "second-brain-app"])], allowed=allowed)
+    assert merges == [TagMerge(canonical="secondbrain", variants=("second-brain-app",))]
 
 
 def test_clean_merges_no_tag_maps_to_two_canonicals():
@@ -84,7 +78,7 @@ def test_build_tag_mapping_and_remap_dedupes_preserving_order():
     assert remap_tags(["sb", "calm", "secondbrain"], mapping) == ["second-brain", "calm"]
 
 
-# --- rewrite_note_tags --------------------------------------------------------------------------
+# --- rewrite_node_tags --------------------------------------------------------------------------
 
 _NOTE = """\
 ---
@@ -92,7 +86,7 @@ id: abc
 plane: Ideas
 planes: [Ideas]
 tags: [secondbrain, calm]
-related: []
+organizer_version: v3
 ---
 
 # A thought
@@ -101,37 +95,37 @@ body text
 """
 
 
-def test_rewrite_note_tags_replaces_variant_in_inline_list():
-    new, changed = rewrite_note_tags(_NOTE, {"secondbrain": "second-brain"})
+def test_rewrite_node_tags_replaces_variant_in_inline_list():
+    new, changed = rewrite_node_tags(_NOTE, {"secondbrain": "second-brain"})
     assert changed is True
     assert "tags: [second-brain, calm]" in new
     # only the tags line changed; body + other keys intact.
     assert "# A thought" in new and "plane: Ideas" in new
 
 
-def test_rewrite_note_tags_no_change_returns_original_verbatim():
+def test_rewrite_node_tags_no_change_returns_original_verbatim():
     original = _NOTE.replace("\n", "\r\n")  # CRLF vault file
-    new, changed = rewrite_note_tags(original, {"nonexistent": "x"})
+    new, changed = rewrite_node_tags(original, {"nonexistent": "x"})
     assert changed is False
     assert new == original  # untouched bytes, no newline normalization when nothing changed
 
 
-def test_rewrite_note_tags_handles_scalar_tags_value():
+def test_rewrite_node_tags_handles_scalar_tags_value():
     note = "---\ntags: secondbrain\n---\n\nbody\n"
-    new, changed = rewrite_note_tags(note, {"secondbrain": "second-brain"})
+    new, changed = rewrite_node_tags(note, {"secondbrain": "second-brain"})
     assert changed is True
     assert "tags: [second-brain]" in new
 
 
-def test_rewrite_note_tags_without_frontmatter_is_noop():
+def test_rewrite_node_tags_without_frontmatter_is_noop():
     note = "# no frontmatter\n\nbody with a #secondbrain mention\n"
-    new, changed = rewrite_note_tags(note, {"secondbrain": "second-brain"})
+    new, changed = rewrite_node_tags(note, {"secondbrain": "second-brain"})
     assert changed is False
     assert new == note
 
 
-def test_rewrite_note_tags_ignores_non_toplevel_tags_key():
+def test_rewrite_node_tags_ignores_non_toplevel_tags_key():
     # An indented "tags:" (e.g. inside a body code block after a stray fence) is not the key.
     note = "---\nplane: Ideas\n---\n\nbody\n  tags: [secondbrain]\n"
-    new, changed = rewrite_note_tags(note, {"secondbrain": "second-brain"})
+    new, changed = rewrite_node_tags(note, {"secondbrain": "second-brain"})
     assert changed is False
