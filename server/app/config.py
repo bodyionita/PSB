@@ -142,6 +142,15 @@ class Settings(BaseSettings):
     embed_max_attempts: int = 3
     embed_retry_backoff_seconds: float = 1.0
 
+    # --- Search (M2, 03-api §Search, ADR-022). Note-grouped pgvector cosine over chunks. ---
+    # Default result count when the request omits top_k; the request is clamped to this ceiling.
+    search_top_k_default: int = 10
+    search_max_top_k: int = 50
+    # No hard score floor by default (0 keeps every hit); raise to prune weak matches.
+    search_min_score: float = 0.0
+    # A result snippet (the best chunk) is truncated to this many chars for the results list.
+    search_snippet_max_chars: int = 400
+
     # --- Connectors ---
     slack_user_token: str = ""
 

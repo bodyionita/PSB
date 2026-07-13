@@ -11,6 +11,7 @@ from fastapi import Depends, HTTPException, Request, status
 from .config import Settings
 from .db import Database
 from .providers.registry import ProviderRegistry
+from .search.service import SearchService
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
 from .services.vault_backup import VaultBackupService
@@ -38,6 +39,10 @@ def get_capture_pipeline(request: Request) -> CapturePipeline:
 
 def get_vault_backup(request: Request) -> VaultBackupService:
     return request.app.state.vault_backup
+
+
+def get_search_service(request: Request) -> SearchService:
+    return request.app.state.search_service
 
 
 async def require_session(

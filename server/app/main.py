@@ -20,7 +20,9 @@ from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
 from .providers.registry import build_registry
-from .routers import admin, auth, capture, health
+from .routers import admin, auth, capture, health, search
+from .search.service import SearchService
+from .search.store import PgSearchStore
 from .services.agent_runs import PgAgentRunStore
 from .services.auth_service import AuthService
 from .services.backup_jobs import build_backup_jobs
@@ -60,6 +62,11 @@ async def lifespan(app: FastAPI):
         settings=settings, store=PgIndexStore(db), registry=app.state.registry
     )
     app.state.indexer = indexer
+
+    # Search (M2, ADR-022/023): the read side — note-grouped cosine over chunks + note preview.
+    app.state.search_service = SearchService(
+        settings=settings, store=PgSearchStore(db), registry=app.state.registry
+    )
 
     # Capture pipeline (M1, ADR-019): in-process, notes-to-vault, backed by the real vault backup.
     pipeline = CapturePipeline(
@@ -125,6 +132,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router, prefix=settings.api_prefix)
     app.include_router(auth.router, prefix=settings.api_prefix)
     app.include_router(capture.router, prefix=settings.api_prefix)
+    app.include_router(search.router, prefix=settings.api_prefix)
     app.include_router(admin.router, prefix=settings.api_prefix)
 
     return app

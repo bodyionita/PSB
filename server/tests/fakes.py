@@ -16,6 +16,7 @@ from app.providers.base import (
     ProviderUnavailable,
     STTProvider,
 )
+from app.search.store import NoteRow, SearchHit
 from app.services.agent_runs import RUNNING, AgentRun
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
@@ -117,6 +118,39 @@ class FakeIndexStore:
             if self.notes.pop(path, None) is not None:
                 count += 1
         return count
+
+
+class FakeSearchStore:
+    """In-memory SearchStore for search-service tests — no live DB. Returns preset hits/note and
+    records the exact search arguments so a test can assert clamping / plane-filter handling."""
+
+    def __init__(
+        self, *, hits: list[SearchHit] | None = None, note: NoteRow | None = None
+    ) -> None:
+        self._hits = hits or []
+        self._note = note
+        self.search_args: dict | None = None
+
+    async def search_chunks(
+        self,
+        embedding: list[float],
+        *,
+        top_k: int,
+        planes: list[str] | None,
+        min_score: float,
+    ) -> list[SearchHit]:
+        self.search_args = {
+            "embedding": embedding,
+            "top_k": top_k,
+            "planes": planes,
+            "min_score": min_score,
+        }
+        return list(self._hits)
+
+    async def get_note(self, note_id: str) -> NoteRow | None:
+        if self._note is not None and self._note.note_id == note_id:
+            return self._note
+        return None
 
 
 class FakeIndexer:

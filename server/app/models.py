@@ -75,6 +75,50 @@ class CaptureView(BaseModel):
         )
 
 
+# --- Search & notes (03-api.md §Search & notes, M2 / ADR-022/023) ---
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    # Optional result count; the service clamps it to SEARCH_MAX_TOP_K. None ⇒ SEARCH_TOP_K_DEFAULT.
+    top_k: int | None = Field(default=None, ge=1)
+    # Filter on `notes.planes` (array overlap, not folder — ADR-005). None/[] = no filter.
+    planes: list[str] | None = None
+
+
+class SearchResultItem(BaseModel):
+    """One note-grouped hit (best chunk = snippet), ranked by score (03-api §Search)."""
+
+    note_id: str
+    vault_path: str
+    title: str | None = None
+    plane: str | None = None
+    planes: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    snippet: str
+    score: float
+
+
+class RelatedNoteItem(BaseModel):
+    """A semantic neighbour from `note_links` (ADR-023)."""
+
+    note_id: str
+    vault_path: str
+    title: str | None = None
+    score: float
+
+
+class NotePreviewResponse(BaseModel):
+    """Read-only note preview for the search UI expand (GET /notes/{id})."""
+
+    note_id: str
+    vault_path: str
+    title: str | None = None
+    plane: str | None = None
+    planes: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    body: str
+    related: list[RelatedNoteItem] = Field(default_factory=list)
+
+
 # --- Admin (03-api.md §Agents & admin) ---
 class BackupResponse(BaseModel):
     """POST /admin/backup result — did this force a new commit, and did the push reach remote."""
