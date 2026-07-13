@@ -13,6 +13,7 @@ from .db import Database
 from .graph.service import RelatednessGraph
 from .providers.registry import ProviderRegistry
 from .search.service import SearchService
+from .services.agent_runs import AgentRunStore
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
 from .services.reindex import ReindexService
@@ -58,6 +59,10 @@ def get_reindex_service(request: Request) -> ReindexService:
 
 def get_tag_consolidation_service(request: Request) -> TagConsolidationService:
     return request.app.state.tag_consolidation_service
+
+
+def get_agent_run_store(request: Request) -> AgentRunStore:
+    return request.app.state.agent_run_store
 
 
 async def require_session(

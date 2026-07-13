@@ -22,7 +22,7 @@ from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
 from .providers.registry import build_registry
-from .routers import admin, auth, capture, health, search
+from .routers import activity, admin, auth, capture, health, meta, search
 from .search.service import SearchService
 from .search.store import PgSearchStore
 from .services.agent_runs import PgAgentRunStore
@@ -50,6 +50,10 @@ async def lifespan(app: FastAPI):
     app.state.db = db
 
     app.state.registry = build_registry(settings)
+    # One agent_runs store, shared by every background job/service that opens a run and by
+    # GET /activity/runs/{id} (the Admin tab's run-status poll). Stateless over the pool.
+    run_store = PgAgentRunStore(db)
+    app.state.agent_run_store = run_store
     app.state.auth_service = AuthService(db, settings)
     app.state.login_rate_limiter = RateLimiter(
         max_events=settings.login_rate_limit_per_min, window_seconds=60.0
@@ -82,7 +86,7 @@ async def lifespan(app: FastAPI):
         indexer=indexer,
         graph=graph,
         vault_backup=vault_backup,
-        run_store=PgAgentRunStore(db),
+        run_store=run_store,
     )
     app.state.reindex_service = reindex_service
 
@@ -102,7 +106,7 @@ async def lifespan(app: FastAPI):
         registry=app.state.registry,
         indexer=indexer,
         vault_backup=vault_backup,
-        run_store=PgAgentRunStore(db),
+        run_store=run_store,
     )
 
     # Capture pipeline (M1, ADR-019): in-process, notes-to-vault, backed by the real vault backup.
@@ -113,7 +117,7 @@ async def lifespan(app: FastAPI):
         registry=app.state.registry,
         note_writer=NoteWriter(settings.vault_path),
         vault_backup=vault_backup,
-        run_store=PgAgentRunStore(db),
+        run_store=run_store,
         indexer=indexer,
         tag_vocabulary=tag_store,
     )
@@ -178,6 +182,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth.router, prefix=settings.api_prefix)
     app.include_router(capture.router, prefix=settings.api_prefix)
     app.include_router(search.router, prefix=settings.api_prefix)
+    app.include_router(meta.router, prefix=settings.api_prefix)
+    app.include_router(activity.router, prefix=settings.api_prefix)
     app.include_router(admin.router, prefix=settings.api_prefix)
 
     return app

@@ -1,16 +1,20 @@
 import { motion } from 'framer-motion';
 import { useState, type ReactNode } from 'react';
 import { CaptureScreen } from './features/capture/CaptureScreen';
+import { SearchScreen } from './features/search/SearchScreen';
 import { ChatScreen } from './features/chat/ChatScreen';
 import { ActivityScreen } from './features/activity/ActivityScreen';
+import { AdminScreen } from './features/admin/AdminScreen';
 import { SettingsScreen } from './features/settings/SettingsScreen';
 
-type TabId = 'capture' | 'chat' | 'activity' | 'settings';
+type TabId = 'capture' | 'search' | 'chat' | 'activity' | 'admin' | 'settings';
 
 const TABS: { id: TabId; label: string; icon: string; render: () => ReactNode }[] = [
   { id: 'capture', label: 'Capture', icon: '◉', render: () => <CaptureScreen /> },
+  { id: 'search', label: 'Search', icon: '⌕', render: () => <SearchScreen /> },
   { id: 'chat', label: 'Chat', icon: '✦', render: () => <ChatScreen /> },
   { id: 'activity', label: 'Activity', icon: '≋', render: () => <ActivityScreen /> },
+  { id: 'admin', label: 'Admin', icon: '⛭', render: () => <AdminScreen /> },
   { id: 'settings', label: 'Settings', icon: '⚙', render: () => <SettingsScreen /> },
 ];
 

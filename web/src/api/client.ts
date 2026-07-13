@@ -2,11 +2,19 @@
 // (credentials: 'include'); non-2xx becomes a typed ApiError carrying the server `detail`.
 import { API_BASE } from '../config';
 import type {
+  AgentRunResponse,
+  BackupResponse,
   CaptureAcceptedResponse,
   CaptureView,
   HealthResponse,
   LoginResponse,
   MeResponse,
+  NotePreviewResponse,
+  PlanesResponse,
+  RunAcceptedResponse,
+  SearchResultItem,
+  TagConsolidateProposeResponse,
+  TagMergeItem,
 } from './types';
 
 export class ApiError extends Error {
@@ -76,5 +84,37 @@ export const api = {
     request<CaptureAcceptedResponse>(`/captures/${encodeURIComponent(id)}/follow-up`, {
       method: 'POST',
       body: JSON.stringify({ answer }),
+    }),
+
+  // --- Meta / Search & notes (03-api.md §Meta, §Search & notes) ---
+  planes: () => request<PlanesResponse>('/planes'),
+  search: (query: string, planes?: string[], topK?: number) =>
+    request<SearchResultItem[]>('/search', {
+      method: 'POST',
+      body: JSON.stringify({
+        query,
+        ...(planes && planes.length ? { planes } : {}),
+        ...(topK != null ? { top_k: topK } : {}),
+      }),
+    }),
+  getNote: (id: string) =>
+    request<NotePreviewResponse>(`/notes/${encodeURIComponent(id)}`),
+
+  // --- Activity (03-api.md §Activity feed — run-status poll for the Admin tab) ---
+  getRun: (id: string) =>
+    request<AgentRunResponse>(`/activity/runs/${encodeURIComponent(id)}`),
+
+  // --- Admin (03-api.md §Agents & admin) ---
+  reindex: () => request<RunAcceptedResponse>('/admin/reindex', { method: 'POST' }),
+  backup: () => request<BackupResponse>('/admin/backup', { method: 'POST' }),
+  proposeTags: () =>
+    request<TagConsolidateProposeResponse>('/admin/tags/consolidate', {
+      method: 'POST',
+      body: JSON.stringify({ apply: false }),
+    }),
+  applyTags: (plan: TagMergeItem[]) =>
+    request<RunAcceptedResponse>('/admin/tags/consolidate', {
+      method: 'POST',
+      body: JSON.stringify({ apply: true, plan }),
     }),
 };

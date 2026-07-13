@@ -6,6 +6,7 @@ These are the wire contract only; they are not DB models (there is no ORM).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -117,6 +118,35 @@ class NotePreviewResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
     body: str
     related: list[RelatedNoteItem] = Field(default_factory=list)
+
+
+# --- Meta (03-api.md §Meta) ---
+class PlanesResponse(BaseModel):
+    """The configured plane vocabulary for the Search-tab filter chips (GET /planes, ADR-005).
+
+    ``planes`` = the ``PLANES=`` config list (primary homes); ``inbox`` is the always-present
+    system plane, not part of ``PLANES``. The web filters ``POST /search`` on ``notes.planes``
+    membership using these values, so it duplicates no server config (ADR-006)."""
+
+    planes: list[str] = Field(default_factory=list)
+    inbox: str
+
+
+# --- Activity (03-api.md §Activity feed) ---
+class AgentRunResponse(BaseModel):
+    """One ``agent_runs`` row (GET /activity/runs/{id}). M2 pull-forward of the M4 feed so the
+    Admin tab can poll a reindex / tags-apply run's live status + ``details`` counts."""
+
+    id: str
+    agent: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    model_used: str | None = None
+    fallback_used: bool = False
+    summary: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
 
 
 # --- Admin (03-api.md §Agents & admin) ---

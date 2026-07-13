@@ -56,6 +56,8 @@ class AgentRunStore(Protocol):
 
     async def latest(self, agent: str, *, status: str | None = None) -> AgentRun | None: ...
 
+    async def get(self, run_id: str) -> AgentRun | None: ...
+
 
 def _details(value: Any) -> dict[str, Any]:
     # asyncpg returns jsonb as text by default; tolerate both text and already-decoded dicts.
@@ -64,6 +66,23 @@ def _details(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         return json.loads(value)
     return dict(value)
+
+
+def _row_to_run(row: Any) -> AgentRun | None:
+    if row is None:
+        return None
+    return AgentRun(
+        id=str(row["id"]),
+        agent=row["agent"],
+        status=row["status"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        model_used=row["model_used"],
+        fallback_used=row["fallback_used"],
+        summary=row["summary"],
+        details=_details(row["details"]),
+        error=row["error"],
+    )
 
 
 class PgAgentRunStore:
@@ -123,17 +142,20 @@ class PgAgentRunStore:
                 agent,
                 status,
             )
-        if row is None:
-            return None
-        return AgentRun(
-            id=str(row["id"]),
-            agent=row["agent"],
-            status=row["status"],
-            started_at=row["started_at"],
-            finished_at=row["finished_at"],
-            model_used=row["model_used"],
-            fallback_used=row["fallback_used"],
-            summary=row["summary"],
-            details=_details(row["details"]),
-            error=row["error"],
-        )
+        return _row_to_run(row)
+
+    async def get(self, run_id: str) -> AgentRun | None:
+        # A malformed/non-uuid id is rejected at the router (uuid path type), so this only sees
+        # well-formed ids; an unknown one → None → 404. Reads the full row incl. details for the
+        # Admin tab's run-status poll (03-api §Activity feed; M2 pull-forward of the M4 feed).
+        async with self._db.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, agent, status, started_at, finished_at, model_used,
+                       fallback_used, summary, details, error
+                  FROM agent_runs
+                 WHERE id = $1
+                """,
+                run_id,
+            )
+        return _row_to_run(row)

@@ -416,6 +416,9 @@ class FakeAgentRunStore:
         ]
         return matching[-1] if matching else None
 
+    async def get(self, run_id: str) -> AgentRun | None:
+        return self.runs.get(run_id)
+
 
 class FakeCaptureStore:
     """In-memory CaptureStore for pipeline tests — no live DB (08 testing policy)."""
