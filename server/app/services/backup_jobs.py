@@ -167,10 +167,22 @@ class BackupJobs:
         assert self._object_store is not None
         root = Path(self._settings.data_path)
         files = await _to_thread(_list_files, root)
+        # Raw inputs are immutable (never-lose, invariant 5) and the R2 bucket is WORM-locked, so
+        # an already-uploaded object must not be re-PUT — S3 returns ObjectLockedByBucketPolicy.
+        # Sync is therefore additive: upload only files not already present under data/.
+        existing = set(await self._object_store.list_keys("data/"))
+        uploaded = 0
         for path in files:
+            key = f"data/{path.name}"
+            if key in existing:
+                continue
             data = await _to_thread(path.read_bytes)
-            await self._object_store.put_bytes(f"data/{path.name}", data)
-        return f"synced {len(files)} raw input file(s) → data/", {"count": len(files)}
+            await self._object_store.put_bytes(key, data)
+            uploaded += 1
+        return (
+            f"synced {uploaded} new raw input file(s) → data/ ({len(files)} total)",
+            {"uploaded": uploaded, "skipped": len(files) - uploaded, "total": len(files)},
+        )
 
     # --- helpers -----------------------------------------------------------------------------
 

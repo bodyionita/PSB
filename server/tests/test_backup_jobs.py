@@ -126,15 +126,33 @@ async def test_data_sync_uploads_each_file(tmp_path: Path):
     await jobs.run_data_sync()
 
     run = store.runs["run-1"]
-    assert run.status == "succeeded" and run.details["count"] == 2
+    assert run.status == "succeeded"
+    assert run.details == {"uploaded": 2, "skipped": 0, "total": 2}
     assert obj.objects["data/a.m4a"] == b"x" and obj.objects["data/b.wav"] == b"yy"
+
+
+async def test_data_sync_skips_already_uploaded_files(tmp_path: Path):
+    # WORM-safe: an object already in R2 (immutable, locked) is never re-PUT (ADR-014).
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "a.m4a").write_bytes(b"x")
+    (data / "b.wav").write_bytes(b"yy")
+    obj = FakeObjectStore()
+    obj.objects["data/a.m4a"] = b"x"  # pretend a.m4a was uploaded on a prior run
+    jobs, store, _ = _jobs(tmp_path, object_store=obj)
+    await jobs.run_data_sync()
+
+    run = store.runs["run-1"]
+    assert run.status == "succeeded"
+    assert run.details == {"uploaded": 1, "skipped": 1, "total": 2}
+    assert set(obj.objects) == {"data/a.m4a", "data/b.wav"}  # only the new file added
 
 
 async def test_data_sync_no_data_dir_is_zero(tmp_path: Path):
     jobs, store, _ = _jobs(tmp_path, object_store=FakeObjectStore())
     await jobs.run_data_sync()
     assert store.runs["run-1"].status == "succeeded"
-    assert store.runs["run-1"].details["count"] == 0
+    assert store.runs["run-1"].details == {"uploaded": 0, "skipped": 0, "total": 0}
 
 
 def _preloaded_manifest(store: FakeAgentRunStore, manifest: dict) -> None:
