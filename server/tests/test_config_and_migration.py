@@ -33,10 +33,19 @@ def test_list_values_pass_through_unchanged():
 
 
 def test_embedding_dim_matches_schema():
-    # The migration hardcodes vector(1536); config must agree (ADR-004).
-    assert Settings().embedding_dim == 1536
+    # M2 migration 004 resizes the vector columns to 768 for self-hosted nomic (ADR-022);
+    # config must agree with the schema.
+    assert Settings().embedding_dim == 768
 
 
-def test_compute_head_is_migration_003():
-    # M1 replan adds revision 003 (capture_interactions view, ADR-021); head advances to it.
-    assert compute_head() == "003"
+def test_embedding_provider_defaults_to_ollama():
+    # ADR-022: the sole embedding provider is the on-box Ollama sidecar (nomic-embed-text).
+    s = Settings()
+    assert s.embedding_provider_id == "ollama"
+    assert s.embedding_model == "nomic-embed-text"
+    assert s.ollama_base_url == "http://localhost:11434/v1"
+
+
+def test_compute_head_is_migration_004():
+    # M2 adds revision 004 (embeddings 768 + note_links, ADR-022/023); head advances to it.
+    assert compute_head() == "004"

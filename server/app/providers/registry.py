@@ -122,11 +122,12 @@ class ProviderRegistry:
 
 def build_registry(settings: Settings) -> ProviderRegistry:
     """Construct the registry from settings — the only place providers are instantiated."""
+    # OpenAI is STT fallback only now — embeddings moved to the self-hosted Ollama provider
+    # (ADR-022), so no embedding_model here.
     openai = OpenAICompatibleProvider(
         id="openai",
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key,
-        embedding_model=settings.embedding_model,
         stt_model=settings.stt_model,
     )
     nebius = OpenAICompatibleProvider(
@@ -147,17 +148,27 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         model=settings.claude_max_model,
         effort=settings.claude_max_effort,
     )
+    # Self-hosted nomic embeddings (ADR-022): OpenAI-compatible /v1/embeddings on the on-box
+    # Ollama sidecar, no API key (localhost). Single embedding provider — one index, one space.
+    ollama = OpenAICompatibleProvider(
+        id="ollama",
+        base_url=settings.ollama_base_url,
+        api_key="",
+        embedding_model=settings.embedding_model,
+        requires_api_key=False,
+    )
 
     providers: dict[str, Provider] = {
         "openai": openai,
         "nebius": nebius,
         "groq": groq,
         "claude-max": claude_max,
+        "ollama": ollama,
     }
     return ProviderRegistry(
         providers,
         chat_chain=settings.chat_chain,
         distill_chain=settings.distill_chain,
-        embedding_provider_id="openai",
+        embedding_provider_id=settings.embedding_provider_id,
         stt_chain=settings.stt_chain,
     )

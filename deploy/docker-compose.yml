@@ -25,11 +25,25 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  # Self-hosted embeddings sidecar (M2, ADR-022): nomic-embed-text over an OpenAI-compatible
+  # /v1/embeddings on the internal network. Not exposed off-box (no published port). Provisioning
+  # pulls the model once: `docker compose exec ollama ollama pull nomic-embed-text`.
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama   # model blobs persist across redeploys (no re-pull)
+    expose:
+      - "11434"
+
   api:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    depends_on:
+      # Start ordering only — the app tolerates ollama-not-ready (index step retries; ADR-022).
+      - ollama
     env_file:
       # raw = no interpolation: the $-laden argon2 hash and other secrets pass to the
       # container literally. Without this, Compose parses "$argon2id$v=19$m=..." as
@@ -52,3 +66,4 @@ volumes:
   caddy_data:
   caddy_config:
   claude_creds:
+  ollama_models:

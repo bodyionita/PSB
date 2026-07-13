@@ -1,7 +1,8 @@
 """One client for every OpenAI-compatible endpoint (ADR-004).
 
-Serves OpenAI itself (embeddings + Whisper STT) and Nebius (chat). A new compatible
-provider is config-only — no new code.
+Serves OpenAI (Whisper STT fallback), Nebius (chat), Groq (STT primary), and the on-box
+Ollama embeddings sidecar (ADR-022, keyless localhost). A new compatible provider is
+config-only — no new code.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         default_chat_model: str = "",
         embedding_model: str = "",
         stt_model: str = "",
+        requires_api_key: bool = True,
     ) -> None:
         self.id = id
         self._base_url = base_url.rstrip("/")
@@ -41,18 +43,30 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         self._default_chat_model = default_chat_model
         self._embedding_model = embedding_model
         self._stt_model = stt_model
+        # Localhost endpoints (the Ollama embeddings sidecar, ADR-022) authenticate implicitly
+        # by network reachability — no key. When False, the key guard + Authorization header are
+        # skipped; availability is reachability, not credentials.
+        self._requires_api_key = requires_api_key
 
     async def health(self) -> bool:
-        # Cheap proxy — a configured key. Real failures surface as ProviderUnavailable and
-        # drive fallback. /health never calls this (it must not touch an LLM).
-        return bool(self._api_key)
+        # Cheap proxy — a configured key (or none required for a localhost provider). Real
+        # failures surface as ProviderUnavailable and drive fallback. /health never calls this
+        # (it must not touch an LLM).
+        return not self._requires_api_key or bool(self._api_key)
 
     def _headers(self) -> dict[str, str]:
+        # Omit auth entirely when no key is configured (keyless localhost), rather than send an
+        # empty Bearer token.
+        if not self._api_key:
+            return {}
         return {"Authorization": f"Bearer {self._api_key}"}
 
-    async def complete(self, messages: list[ChatMessage], *, model: str | None = None) -> str:
-        if not self._api_key:
+    def _require_available(self) -> None:
+        if self._requires_api_key and not self._api_key:
             raise ProviderUnavailable(f"{self.id}: no API key configured")
+
+    async def complete(self, messages: list[ChatMessage], *, model: str | None = None) -> str:
+        self._require_available()
         payload = {
             "model": model or self._default_chat_model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
@@ -71,8 +85,7 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
             raise ProviderUnavailable(f"{self.id} chat failed: {exc}") from exc
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        if not self._api_key:
-            raise ProviderUnavailable(f"{self.id}: no API key configured")
+        self._require_available()
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 resp = await client.post(
@@ -87,8 +100,7 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
             raise ProviderUnavailable(f"{self.id} embeddings failed: {exc}") from exc
 
     async def transcribe(self, audio: bytes, *, filename: str) -> str:
-        if not self._api_key:
-            raise ProviderUnavailable(f"{self.id}: no API key configured")
+        self._require_available()
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 resp = await client.post(

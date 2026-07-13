@@ -107,9 +107,17 @@ class Settings(BaseSettings):
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_stt_model: str = "whisper-large-v3"
 
-    # Fixed, not UI-selectable — changing either means a migration + full reindex.
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dim: int = 1536
+    # --- Embeddings: self-hosted nomic via Ollama (ADR-022) ---
+    # Single provider, no hot fallback: one index = one vector space. `nomic-embed-text-v1.5`
+    # served by an Ollama sidecar over the OpenAI-compatible /v1/embeddings shape — reuses
+    # OpenAICompatibleProvider (base-URL only, no API key on localhost). embedding_provider_id
+    # is the cold-swap seam (switch to nebius + reindex if English-centric search disappoints).
+    # embedding_model / embedding_dim are settings, so a provider change is a migration +
+    # reindex, never a code edit — but changing either still means a full reindex.
+    embedding_provider_id: str = "ollama"
+    ollama_base_url: str = "http://localhost:11434/v1"
+    embedding_model: str = "nomic-embed-text"
+    embedding_dim: int = 768
     # OpenAI's STT model — used when the chain falls back to the "openai" provider.
     stt_model: str = "whisper-1"
 

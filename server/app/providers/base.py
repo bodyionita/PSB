@@ -2,8 +2,8 @@
 
 Three capabilities, each optional per provider:
   * ChatProvider      — text completion / distillation
-  * EmbeddingProvider — text embeddings (fixed model, OpenAI)
-  * STTProvider       — speech-to-text (Whisper, OpenAI)
+  * EmbeddingProvider — text embeddings (self-hosted nomic via Ollama, ADR-022)
+  * STTProvider       — speech-to-text (Groq primary, OpenAI Whisper fallback)
 
 A provider that lacks a capability simply doesn't implement that base class; the registry
 routes each task only to providers that support it.
