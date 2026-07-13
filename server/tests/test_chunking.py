@@ -14,6 +14,7 @@ from app.indexing.chunking import (
     chunk_note,
     chunk_text,
     split_frontmatter,
+    strip_cocapture_related,
     strip_related_block,
 )
 
@@ -57,6 +58,59 @@ def test_strip_related_block_removes_delimited_region():
 def test_strip_related_block_noop_without_block():
     body = "# Note\n\njust content"
     assert strip_related_block(body) == body
+
+
+# --- co-capture "## Related" wikilink section (M2 Accept finding) ------------------------
+
+
+def test_strip_cocapture_related_removes_trailing_wikilink_list():
+    # Exactly the shape capture/notes.py render_note writes for co-capture siblings.
+    body = (
+        "# Picnic in the park with Diana\n\nWe had a lovely picnic.\n\n"
+        "## Related\n- [[Ideas/2026-07-12 Braindan — personal second brain app]]\n"
+    )
+    stripped = strip_cocapture_related(body)
+    assert "Braindan" not in stripped  # the sibling link no longer pollutes the embedding
+    assert "## Related" not in stripped
+    assert "lovely picnic" in stripped  # real content untouched
+
+
+def test_strip_cocapture_related_keeps_prose_related_section():
+    # A hand-written "## Related" with prose (not a pure wikilink-bullet list) is preserved.
+    body = "# Note\n\ncontent\n\n## Related\nSee the discussion we had last week about pricing.\n"
+    assert strip_cocapture_related(body) == _normalize(body)
+
+
+def test_strip_cocapture_related_leaves_related_notes_heading():
+    # "## Related notes" (the graph block heading) must not be caught by the co-capture stripper.
+    body = "# Note\n\ncontent\n\n## Related notes\n- [[Ideas/Foo]]\n"
+    assert strip_cocapture_related(body) == _normalize(body)
+
+
+def test_chunk_note_strips_cocapture_related_section():
+    text = (
+        "---\nid: abc\n---\n"
+        "# Braindan — personal second brain app\n\nAn app idea.\n\n"
+        "## Related\n- [[Friends/2026-07-12 Picnic in the park with Diana]]\n"
+    )
+    chunks = chunk_note(text, chunk_size=1200, chunk_overlap=200)
+    assert chunks == ["# Braindan — personal second brain app\n\nAn app idea."]
+    assert all("Picnic" not in c and "## Related" not in c for c in chunks)
+
+
+def test_chunk_note_strips_both_related_blocks_together():
+    # A note carrying BOTH the co-capture section and the graph block (graph appended last).
+    text = (
+        "# A\n\nbody\n\n"
+        "## Related\n- [[B/other]]\n\n"
+        f"{RELATED_BLOCK_START}\n## Related notes\n\n[[C/x|X]]\n{RELATED_BLOCK_END}\n"
+    )
+    chunks = chunk_note(text, chunk_size=1200, chunk_overlap=200)
+    assert chunks == ["# A\n\nbody"]
+
+
+def _normalize(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 # --- chunk_note: the indexer entry point ------------------------------------------------
