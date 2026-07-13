@@ -3,7 +3,7 @@
 React + Vite + TypeScript (strict). Talks **only** to the HTTP API (ADR-006); the single
 fact it knows about the server is the API base path in `src/config.ts`.
 
-## M0 scope
+## M0 scope (as-built snapshot — pre-pivot vocabulary; see the root README's pivot note)
 
 Premium, animated foundation with stubbed features (ADR-012):
 
@@ -13,7 +13,8 @@ Premium, animated foundation with stubbed features (ADR-012):
   (real theme switcher over 5 palettes, session info, sign out).
 - 5 switchable themes as pure CSS-variable swaps; choice persisted in `localStorage`.
   Default **Nebula**. `prefers-reduced-motion` respected globally.
-- Installable manifest + icon. (Service-worker offline shell is M5 polish.)
+- Installable manifest + icon. (Service-worker offline shell is backlog polish —
+  see the docs repo's 08 backlog.)
 
 ## Structure
 

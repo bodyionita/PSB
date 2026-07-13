@@ -33,9 +33,11 @@ uv run pytest
 uv run ruff check .
 ```
 
-Endpoints are served under `/api/v1` (Caddy proxies `/api` → FastAPI). M0 exposes
-`/health`, `/auth/login`, `/auth/logout`, `/auth/me`; later milestones add capture, chat,
-search, activity, settings, agents, admin (see `../../second-brain-docs/03-api.md`).
+Endpoints are served under `/api/v1` (Caddy proxies `/api` → FastAPI). M0 exposed
+`/health`, `/auth/login`, `/auth/logout`, `/auth/me`; M1/M2 added capture, search, admin.
+The current contract (incl. the mind-graph pivot renames — `/nodes/{id}`, graph, review,
+MCP surface) lives in `../../second-brain-docs/03-api.md`; the code adopts the renamed
+surface at M3 (see the root README's pivot note).
 
 ## Notes
 
