@@ -33,6 +33,7 @@ from ..graph.node_writer import NodeEdge, NodeWriter
 from ..indexing.indexer import NodeIndexer
 from ..services.agent_runs import FAILED, SUCCEEDED, AgentRunStore
 from ..services.store_backup import StoreCommitter
+from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .entity_store import EntityStore
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class BackfillService:
         indexer: NodeIndexer,
         store_backup: StoreCommitter,
         run_store: AgentRunStore,
+        vocab: VocabularyProvider | None = None,
     ) -> None:
         self._settings = settings
         self._entities = entity_store
@@ -89,6 +91,8 @@ class BackfillService:
         self._indexer = indexer
         self._backup = store_backup
         self._runs = run_store
+        # Effective entity-like types (seeds ∪ approved additions — ADR-027/035); None ⇒ seeds.
+        self._vocab = vocab
 
     async def run_scheduled(self) -> None:
         """The scheduler/CLI entry point. Opens the run, scans, closes it; never raises (rule 7)."""
@@ -114,8 +118,9 @@ class BackfillService:
         min_len = self._settings.entity_alias_min_fuzzy_len
         max_links = self._settings.backfill_max_links
 
+        entity_like = (await effective_vocabulary(self._vocab, self._settings)).entity_like_types
         entities = await self._entities.entities_touched_since(
-            types=list(self._settings.entity_like_types), since=watermark
+            types=list(entity_like), since=watermark
         )
         changed: set[str] = set()
         links = 0

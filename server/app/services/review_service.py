@@ -10,10 +10,11 @@ delegates to (rule 5). Two kinds are resolvable in M3:
         content node that wanted it, targeting the chosen entity;
       - ``choice = "new"`` → mint a fresh thin entity hub, then materialize the edge onto it;
       - ``choice = "maybe"`` → defer (status ``maybe``), draw nothing.
-  * ``vocab-proposal`` — a proposed node/edge type outside the seeded vocabulary (ADR-027):
-      - ``verdict = "approve"`` → record the approval + open a **queued** ``vocab-consolidation``
-        marker run; the retro-consolidation job that mutates the live vocabulary lands in M3 task 7;
-      - ``verdict = "reject"`` → discard.
+  * ``vocab-proposal`` — a proposed node/edge type outside the seeded vocabulary (ADR-027). This
+    branch is **delegated in full** to the Vocabulary service (M3 task 7 / ADR-035): approve mutates
+    the live vocabulary + opens the ``vocab-consolidation`` job, reject discards. Governance lives
+    at one choke point shared with ``PUT /settings/vocabulary`` (ADR-027 §4), which owns its own
+    status transition — so this service just hands the item over (:class:`VocabGovernance`).
 
 Materialization reuses the store's own machinery: :meth:`NodeWriter.add_edges` appends the edge to
 the node file (atomic, idempotent), then the indexer re-reads that file and materializes the
@@ -28,21 +29,24 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from ..config import Settings
 from ..graph.node_writer import NodeDocument, NodeEdge, NodeWriter
 from ..indexing.indexer import NodeIndexer
 from ..indexing.store import IndexStore
-from .agent_runs import SKIPPED as RUN_SKIPPED
+from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .agent_runs import AgentRunStore
 from .review_queue import (
     KIND_ENTITY_AMBIGUITY,
     KIND_VOCAB_PROPOSAL,
-    STATUS_DISCARDED,
     STATUS_MAYBE,
     STATUS_PENDING,
     STATUS_RESOLVED,
+    BadResolution,
+    ReviewNotFound,
+    ReviewNotPending,
     ReviewReadStore,
     ReviewRecord,
 )
@@ -50,24 +54,20 @@ from .store_backup import StoreBackup
 
 logger = logging.getLogger(__name__)
 
-# The queued marker's agent name — the M3-task-7 consolidation job consumes approvals under it.
-AGENT_VOCAB_CONSOLIDATION = "vocab-consolidation"
+# Re-exported for the review router, which imports the resolution exceptions from here; they now
+# live in review_queue (shared with the Vocabulary service). Keep the names importable.
+__all__ = ["ReviewService", "ReviewNotFound", "ReviewNotPending", "BadResolution"]
 
 
-class ReviewError(Exception):
-    """Base for review-resolution problems surfaced to the API layer."""
+class VocabGovernance(VocabularyProvider, Protocol):
+    """What the Review service needs from the Vocabulary service (task 7 / ADR-027 §4).
 
+    Two things: delegate the whole ``vocab-proposal`` branch (mutate the live vocabulary + open the
+    consolidation job + own the status transition) via :meth:`resolve_proposal`, and read the
+    **effective** entity-like types (inherited :meth:`effective`) so minting a ``new`` entity of a
+    freshly-approved type is accepted. Both are satisfied by the one ``VocabularyService``."""
 
-class ReviewNotFound(ReviewError):
-    """No review item with the given id (404)."""
-
-
-class ReviewNotPending(ReviewError):
-    """The item was already resolved/discarded/deferred — it cannot be resolved again (409)."""
-
-
-class BadResolution(ReviewError):
-    """The resolution body is invalid for the item's kind (400)."""
+    async def resolve_proposal(self, review_id: str, verdict: str | None) -> ReviewRecord: ...
 
 
 class ReviewService:
@@ -81,6 +81,7 @@ class ReviewService:
         node_writer: NodeWriter,
         store_backup: StoreBackup,
         run_store: AgentRunStore,
+        vocab: VocabGovernance | None = None,
     ) -> None:
         self._settings = settings
         self._store = review_store
@@ -89,6 +90,10 @@ class ReviewService:
         self._writer = node_writer
         self._backup = store_backup
         self._runs = run_store
+        # Vocabulary governance (task 7): delegates the vocab-proposal branch + supplies the
+        # effective entity-like types for minting. None ⇒ vocab-proposals unresolvable + seed-only
+        # entity types (existing task-4 tests construct without it).
+        self._vocab = vocab
         self._tz = ZoneInfo(settings.scheduler_tz)
 
     async def list_items(
@@ -116,16 +121,18 @@ class ReviewService:
         if record.status != STATUS_PENDING:
             raise ReviewNotPending(review_id)
 
+        if record.kind == KIND_VOCAB_PROPOSAL:
+            # Vocabulary governance (mutate the live vocab + open the consolidation job) is the
+            # Vocabulary service's concern; it owns its own status transition (ADR-027 §4 / task 7).
+            if self._vocab is None:  # pragma: no cover — always wired in main.py
+                raise BadResolution("vocab-proposal resolution is not configured")
+            return await self._vocab.resolve_proposal(review_id, verdict)
         if record.kind == KIND_ENTITY_AMBIGUITY:
             new_status, resolution = await self._resolve_entity(record, choice)
-        elif record.kind == KIND_VOCAB_PROPOSAL:
-            new_status, resolution = await self._resolve_vocab(record, verdict)
-        else:
-            raise BadResolution(f"kind {record.kind!r} is not resolvable in M3")
-
-        await self._store.resolve(review_id, status=new_status, resolution=resolution)
-        updated = await self._store.get(review_id)
-        return updated if updated is not None else record
+            await self._store.resolve(review_id, status=new_status, resolution=resolution)
+            updated = await self._store.get(review_id)
+            return updated if updated is not None else record
+        raise BadResolution(f"kind {record.kind!r} is not resolvable in M3")
 
     # --- entity-ambiguity ---------------------------------------------------------------
 
@@ -154,7 +161,10 @@ class ReviewService:
         mention = record.payload.get("mention") or {}
         name = str(mention.get("name") or "").strip()
         entity_type = str(mention.get("type") or "").strip()
-        if not name or entity_type not in self._settings.entity_like_types:
+        # Effective entity-like types (seeds ∪ approved additions): a type approved after this item
+        # was filed is still mintable (ADR-027/035). None provider ⇒ seed-only fallback.
+        entity_like = (await effective_vocabulary(self._vocab, self._settings)).entity_like_types
+        if not name or entity_type not in entity_like:
             raise BadResolution("cannot mint a new entity: the review item has no usable mention")
         doc = NodeDocument(
             id=str(uuid.uuid4()),
@@ -209,54 +219,6 @@ class ReviewService:
         if to_index:
             await self._indexer.index_paths(to_index)
             await self._backup.request_commit("review: materialize entity edge")
-
-    # --- vocab-proposal -----------------------------------------------------------------
-
-    async def _resolve_vocab(
-        self, record: ReviewRecord, verdict: str | None
-    ) -> tuple[str, dict]:
-        if verdict == "reject":
-            return STATUS_DISCARDED, {"verdict": "reject"}
-        if verdict != "approve":
-            raise BadResolution("vocab-proposal requires a 'verdict' of 'approve' or 'reject'")
-
-        vocab = record.payload.get("vocab")
-        value = record.payload.get("value")
-        run_id = await self._queue_consolidation(vocab, value, record.id)
-        return STATUS_RESOLVED, {
-            "verdict": "approve",
-            "vocab": vocab,
-            "value": value,
-            "run_id": run_id,
-        }
-
-    async def _queue_consolidation(
-        self, vocab: object, value: object, review_id: str
-    ) -> str | None:
-        """Record the approval as a **queued** ``vocab-consolidation`` marker run (vision P8 —
-        everything visible). Task 4 only queues: the retro-consolidation job that mutates the live
-        vocabulary and re-walks the graph lands in M3 task 7, which consumes these markers. Opening
-        the marker must never fail the resolution (rule 7)."""
-        try:
-            run_id = await self._runs.start(AGENT_VOCAB_CONSOLIDATION)
-            await self._runs.finish(
-                run_id,
-                status=RUN_SKIPPED,
-                summary=(
-                    f"vocab approval queued: {vocab} '{value}' — "
-                    "retro-consolidation runs in M3 task 7"
-                ),
-                details={
-                    "queued": True,
-                    "vocab": vocab,
-                    "value": value,
-                    "review_id": review_id,
-                },
-            )
-            return run_id
-        except Exception:  # noqa: BLE001 — a run-store hiccup must not fail the approval
-            logger.exception("could not open the vocab-consolidation marker run (ignored)")
-            return None
 
 
 def _normalize_filter(value: str | None) -> str | None:

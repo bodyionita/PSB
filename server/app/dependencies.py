@@ -21,6 +21,7 @@ from .services.reindex import ReindexService
 from .services.review_service import ReviewService
 from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
+from .vocab.service import VocabularyService
 
 
 def get_settings(request: Request) -> Settings:
@@ -73,6 +74,10 @@ def get_review_service(request: Request) -> ReviewService:
 
 def get_merge_service(request: Request) -> MergeService:
     return request.app.state.merge_service
+
+
+def get_vocabulary_service(request: Request) -> VocabularyService:
+    return request.app.state.vocabulary_service
 
 
 async def require_session(

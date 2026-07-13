@@ -46,6 +46,7 @@ from ..providers.base import ChatMessage, ProviderUnavailable, TranscriptResult
 from ..providers.registry import ProviderRegistry
 from ..services.review_queue import KIND_VOCAB_PROPOSAL, ReviewItem, ReviewQueue
 from ..tags.store import TagVocabulary
+from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .agent_runs import (
     FAILED as RUN_FAILED,
 )
@@ -151,6 +152,7 @@ class CapturePipeline:
         entity_resolver: EntityResolver,
         review_queue: ReviewQueue,
         tag_vocabulary: TagVocabulary | None = None,
+        vocab: VocabularyProvider | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -164,6 +166,10 @@ class CapturePipeline:
         # Live tag vocabulary injected into the organizer prompt (ADR-024 §1). Optional so the
         # pipeline degrades to organic-only tagging when no index is wired (tests / cold boot).
         self._tag_vocabulary = tag_vocabulary
+        # Effective node/edge vocabulary (seeds ∪ approved additions — ADR-027/035). Optional so
+        # tests fall back to the config seeds; production wires the VocabularyService so a
+        # newly-approved type is recognised by the organizer at once (forward-live governance).
+        self._vocab = vocab
         self._tz = ZoneInfo(settings.scheduler_tz)
         # Strong refs to in-flight background tasks so they are not GC'd mid-run.
         self._tasks: set[asyncio.Task] = set()
@@ -475,11 +481,13 @@ class CapturePipeline:
         """
         # Token replacement (not str.format): the prompt embeds literal JSON braces.
         vocabulary = render_tag_vocabulary(await self._fetch_tag_vocabulary())
+        # Effective vocabulary (seeds ∪ approved additions) so an approved type is forward-live.
+        vocab = await effective_vocabulary(self._vocab, self._settings)
         system = (
             ORGANIZER_SYSTEM_PROMPT.replace("{planes}", ", ".join(self._settings.planes))
-            .replace("{node_types}", ", ".join(self._settings.node_types))
-            .replace("{edge_rels}", ", ".join(self._settings.edge_rels))
-            .replace("{entity_types}", ", ".join(self._settings.entity_like_types))
+            .replace("{node_types}", ", ".join(vocab.node_types))
+            .replace("{edge_rels}", ", ".join(vocab.edge_rels))
+            .replace("{entity_types}", ", ".join(vocab.entity_like_types))
             .replace("{tag_vocabulary}", vocabulary)
         )
         messages = [
@@ -497,9 +505,9 @@ class CapturePipeline:
         nodes, proposals = validate_organizer_output(
             parse_organizer_json(result.text),
             planes=list(self._settings.planes),
-            node_types=list(self._settings.node_types),
-            edge_rels=list(self._settings.edge_rels),
-            entity_types=list(self._settings.entity_like_types),
+            node_types=list(vocab.node_types),
+            edge_rels=list(vocab.edge_rels),
+            entity_types=list(vocab.entity_like_types),
             max_nodes=self._settings.organizer_max_nodes,
             max_tags=self._settings.organizer_max_tags,
             max_edges=self._settings.organizer_max_edges,

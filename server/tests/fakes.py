@@ -23,6 +23,7 @@ from app.services.agent_runs import RUNNING, AgentRun
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
 from app.services.review_queue import ReviewItem, ReviewRecord
+from app.vocab.store import VocabularyAdditions
 
 
 class FakeChatProvider(ChatProvider):
@@ -407,6 +408,37 @@ class FakeReviewQueue:
             return False
         self.records[review_id] = replace(row, status=status, resolution=resolution)
         return True
+
+
+class FakeVocabularyStore:
+    """In-memory approved-vocabulary store — mirrors ``PgVocabularyStore`` (dedup, order-preserving,
+    idempotent append) without a DB (ADR-027/035, M3 task 7)."""
+
+    def __init__(self) -> None:
+        self.node_types: list[str] = []
+        self.edge_rels: list[str] = []
+        self.entity_like_types: list[str] = []
+
+    async def get_additions(self) -> VocabularyAdditions:
+        return VocabularyAdditions(
+            node_types=tuple(self.node_types),
+            edge_rels=tuple(self.edge_rels),
+            entity_like_types=tuple(self.entity_like_types),
+        )
+
+    async def add(
+        self, *, node_types=(), edge_rels=(), entity_like_types=()
+    ) -> VocabularyAdditions:
+        for axis, incoming in (
+            (self.node_types, node_types),
+            (self.edge_rels, edge_rels),
+            (self.entity_like_types, entity_like_types),
+        ):
+            for value in incoming:
+                v = value.strip()
+                if v and v not in axis:
+                    axis.append(v)
+        return await self.get_additions()
 
 
 class FakeGitRepo:

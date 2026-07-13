@@ -22,6 +22,7 @@ from ..config import Settings
 from ..providers.base import ProviderUnavailable
 from ..providers.registry import ProviderRegistry
 from ..services.agent_runs import FAILED, SUCCEEDED, AgentRunStore
+from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .entity_store import EntityRef, EntityStore
 from .profile_store import ProfileStore
 from .profiles import (
@@ -86,12 +87,15 @@ class ProfileRefreshService:
         profile_store: ProfileStore,
         registry: ProviderRegistry,
         run_store: AgentRunStore,
+        vocab: VocabularyProvider | None = None,
     ) -> None:
         self._settings = settings
         self._entities = entity_store
         self._profiles = profile_store
         self._registry = registry
         self._runs = run_store
+        # Effective entity-like types (seeds ∪ approved additions — ADR-027/035); None ⇒ seeds.
+        self._vocab = vocab
 
     async def run_scheduled(self) -> None:
         """The scheduler/CLI entry point. Opens the run, refreshes, closes it; never raises."""
@@ -111,9 +115,8 @@ class ProfileRefreshService:
             await self._safe_finish(run_id, exc)
 
     async def _refresh_all(self) -> ProfileRefreshOutcome:
-        entities = await self._entities.list_entities(
-            types=list(self._settings.entity_like_types)
-        )
+        entity_like = (await effective_vocabulary(self._vocab, self._settings)).entity_like_types
+        entities = await self._entities.list_entities(types=list(entity_like))
         refreshed = skipped = failed = degraded = 0
         tiers: dict[str, int] = {}
         for entity in entities:

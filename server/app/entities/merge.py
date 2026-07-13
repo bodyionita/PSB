@@ -33,6 +33,7 @@ from ..graph.node_writer import NodeWriter, merged_alias_union
 from ..indexing.indexer import NodeIndexer
 from ..services.agent_runs import FAILED, SUCCEEDED, AgentRunStore
 from ..services.store_backup import StoreCommitter
+from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .entity_store import EntityNode, EntityStore, InboundEdge
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ class MergeService:
         indexer: NodeIndexer,
         store_backup: StoreCommitter,
         run_store: AgentRunStore,
+        vocab: VocabularyProvider | None = None,
     ) -> None:
         self._settings = settings
         self._entities = entity_store
@@ -105,6 +107,8 @@ class MergeService:
         self._indexer = indexer
         self._backup = store_backup
         self._runs = run_store
+        # Effective entity-like types (seeds ∪ approved additions — ADR-027/035); None ⇒ seeds.
+        self._vocab = vocab
         self._tasks: set[asyncio.Task] = set()
 
     # --- propose ----------------------------------------------------------------------------
@@ -231,7 +235,8 @@ class MergeService:
             raise BadMerge(f"loser {loser_id} is already a tombstone (merged away)")
         if survivor.merged_into is not None:
             raise BadMerge(f"survivor {survivor_id} is a tombstone; merge into its survivor")
-        entity_types = set(self._settings.entity_like_types)
+        effective = await effective_vocabulary(self._vocab, self._settings)
+        entity_types = set(effective.entity_like_types)
         if loser.type not in entity_types or survivor.type not in entity_types:
             raise BadMerge("merge is for entity-like nodes only (aliases substrate — ADR-030)")
         return loser, survivor

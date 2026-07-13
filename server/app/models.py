@@ -287,6 +287,39 @@ class TagConsolidateAcceptedResponse(BaseModel):
     run_id: str
 
 
+# --- Vocabulary governance (03-api §Search/Settings, M3 task 7 / ADR-027 / ADR-035) ---
+class VocabProposalItem(BaseModel):
+    """A pending ``vocab-proposal`` the organizer filed (GET /types). ``vocab`` is the axis
+    (``node_type`` | ``entity_type`` | ``edge_rel``); resolve it with the review item ``id``."""
+
+    id: str
+    vocab: str | None = None
+    value: str | None = None
+    excerpt: str | None = None
+    created_at: str
+
+
+class TypesResponse(BaseModel):
+    """GET /types — the effective node/edge vocabulary (config seeds ∪ approved additions) plus the
+    still-pending type proposals (ADR-027). Entity-like types are the subset carrying the entity
+    substrate (aliases/profiles — ADR-030)."""
+
+    node_types: list[str] = Field(default_factory=list)
+    edge_rels: list[str] = Field(default_factory=list)
+    entity_like_types: list[str] = Field(default_factory=list)
+    proposals: list[VocabProposalItem] = Field(default_factory=list)
+
+
+class VocabularyResolveRequest(BaseModel):
+    """PUT /settings/vocabulary — approve or reject a pending type proposal by its review item id.
+
+    Approve writes the type to the live vocabulary + opens the ``vocab-consolidation`` job; reject
+    discards. Same choke point as ``POST /review/{id}`` for a ``vocab-proposal`` (ADR-027 §4)."""
+
+    review_id: str = Field(min_length=1)
+    verdict: str  # "approve" | "reject"
+
+
 # --- Health ---
 class HealthResponse(BaseModel):
     status: str  # "ok" | "degraded"

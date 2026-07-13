@@ -30,6 +30,7 @@ from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
 from .providers.registry import build_registry
 from .routers import activity, admin, auth, capture, health, meta, review, search
+from .routers import settings as settings_router
 from .search.service import SearchService
 from .search.store import PgSearchStore
 from .services.agent_runs import PgAgentRunStore
@@ -46,6 +47,9 @@ from .services.scheduler import BackupScheduler
 from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
 from .tags.store import PgTagStore
+from .vocab.consolidation import VocabConsolidation
+from .vocab.service import VocabularyService
+from .vocab.store import PgVocabularyStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -125,16 +129,32 @@ async def lifespan(app: FastAPI):
     # when it can't confidently resolve; the review queue also holds vocab proposals (ADR-027).
     review_queue = PgReviewQueue(db)
     app.state.review_queue = review_queue
+
+    # Vocabulary governance (ADR-027 / ADR-035, M3 task 7): the effective vocabulary every writer
+    # reads (config seeds ∪ approved additions in app_settings) + the approve/reject choke point
+    # behind PUT /settings/vocabulary and POST /review/{id}. Approving a type opens a
+    # vocab-consolidation run (VocabConsolidation). Constructed before the writers so it can be
+    # threaded into each — a newly approved type is then recognised forward-live everywhere.
+    vocabulary_service = VocabularyService(
+        settings=settings,
+        vocab_store=PgVocabularyStore(db),
+        review_store=review_queue,
+        consolidation=VocabConsolidation(run_store=run_store),
+    )
+    app.state.vocabulary_service = vocabulary_service
+
     entity_resolver = EntityResolver(
         settings=settings,
         alias_store=PgAliasStore(db),
         review_queue=review_queue,
         registry=app.state.registry,
+        vocab=vocabulary_service,
     )
 
     # Review read/resolve surface (ADR-030 §3, M3 task 4): lists pending items and resolves them —
-    # materializing a pending entity edge onto the store (writer + reindex + commit) or queuing a
-    # vocab-consolidation marker (the mutation job is M3 task 7).
+    # materializing a pending entity edge onto the store (writer + reindex + commit); the
+    # vocab-proposal branch is delegated to the Vocabulary service (task 7 — mutate live vocab +
+    # open the consolidation job).
     app.state.review_service = ReviewService(
         settings=settings,
         review_store=review_queue,
@@ -143,6 +163,7 @@ async def lifespan(app: FastAPI):
         node_writer=node_writer,
         store_backup=store_backup,
         run_store=run_store,
+        vocab=vocabulary_service,
     )
 
     # Entity services (ADR-030 §5/§6 + §4, M3 task 6). All share the one entity-read store; the
@@ -156,6 +177,7 @@ async def lifespan(app: FastAPI):
         indexer=indexer,
         store_backup=store_backup,
         run_store=run_store,
+        vocab=vocabulary_service,
     )
     # Nightly profile-refresh (derived entity profiles → node_profiles, served by GET /nodes/{id})
     # and entity backfill (recent memories re-checked against touched entities' aliases).
@@ -165,6 +187,7 @@ async def lifespan(app: FastAPI):
         profile_store=PgProfileStore(db),
         registry=app.state.registry,
         run_store=run_store,
+        vocab=vocabulary_service,
     )
     app.state.profile_refresh_service = profile_refresh_service
     backfill_service = BackfillService(
@@ -174,6 +197,7 @@ async def lifespan(app: FastAPI):
         indexer=indexer,
         store_backup=store_backup,
         run_store=run_store,
+        vocab=vocabulary_service,
     )
     app.state.backfill_service = backfill_service
 
@@ -190,6 +214,7 @@ async def lifespan(app: FastAPI):
         entity_resolver=entity_resolver,
         review_queue=review_queue,
         tag_vocabulary=tag_store,
+        vocab=vocabulary_service,
     )
     app.state.capture_pipeline = pipeline
 
@@ -257,6 +282,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(search.router, prefix=settings.api_prefix)
     app.include_router(meta.router, prefix=settings.api_prefix)
     app.include_router(review.router, prefix=settings.api_prefix)
+    app.include_router(settings_router.router, prefix=settings.api_prefix)
     app.include_router(activity.router, prefix=settings.api_prefix)
     app.include_router(admin.router, prefix=settings.api_prefix)
 

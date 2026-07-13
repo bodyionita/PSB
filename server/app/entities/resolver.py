@@ -34,6 +34,7 @@ from ..graph.node_writer import ORGANIZER_VERSION, NodeDocument
 from ..providers.base import ChatMessage, ProviderUnavailable
 from ..providers.registry import ProviderRegistry
 from ..services.review_queue import KIND_ENTITY_AMBIGUITY, ReviewItem, ReviewQueue
+from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .store import AliasStore, EntityCandidate, normalize_alias
 
 logger = logging.getLogger(__name__)
@@ -104,11 +105,15 @@ class EntityResolver:
         alias_store: AliasStore,
         review_queue: ReviewQueue,
         registry: ProviderRegistry,
+        vocab: VocabularyProvider | None = None,
     ) -> None:
         self._settings = settings
         self._aliases = alias_store
         self._review = review_queue
         self._registry = registry
+        # Effective entity-like types (seeds ∪ approved additions — ADR-027/035): an approved
+        # entity type is resolvable at once. None ⇒ config seeds (tests / no-provider construction).
+        self._vocab = vocab
 
     async def resolve(
         self,
@@ -132,11 +137,13 @@ class EntityResolver:
         """
         edge_map = pending_edges_by_key or {}
         result = ResolutionResult()
+        effective = await effective_vocabulary(self._vocab, self._settings)
+        entity_like = set(effective.entity_like_types)
         # Intra-capture dedup (ADR-032 §2): resolve each distinct (name, type) once.
         by_key: dict[tuple[str, str], Mention] = {}
         for m in mentions:
             key = mention_key(m.name, m.type)
-            if not key[0] or m.type not in self._settings.entity_like_types:
+            if not key[0] or m.type not in entity_like:
                 continue  # entropy guard: drop empty/degenerate or non-entity-like mentions
             if key not in by_key:
                 by_key[key] = m

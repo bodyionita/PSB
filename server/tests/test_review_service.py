@@ -1,8 +1,11 @@
 """ReviewService tests (ADR-030 §3, M3 task 4): list + resolve, with fakes + a real NodeWriter.
 
 Covers the two resolvable kinds — entity-ambiguity (pick / new / maybe, materializing the pending
-edge onto the store) and vocab-proposal (approve queues a marker / reject discards) — plus the
-error paths (404/409/400 shapes) and the resolver-side payload enrichment those depend on.
+edge onto the store) and vocab-proposal (delegated to the Vocabulary service — approve resolves +
+opens the consolidation run, reject discards) — plus the error paths (404/409/400 shapes) and the
+resolver-side payload enrichment those depend on. The vocab-proposal *semantics* (app_settings
+mutation, effective vocab, list_types) are covered in test_vocab_service; here we prove the
+delegation routes correctly (ADR-035 / M3 task 7).
 """
 
 from __future__ import annotations
@@ -25,12 +28,14 @@ from app.services.review_queue import (
     ReviewItem,
 )
 from app.services.review_service import (
-    AGENT_VOCAB_CONSOLIDATION,
     BadResolution,
     ReviewNotFound,
     ReviewNotPending,
     ReviewService,
 )
+from app.vocab.consolidation import AGENT as AGENT_VOCAB_CONSOLIDATION
+from app.vocab.consolidation import VocabConsolidation
+from app.vocab.service import VocabularyService
 
 from .fakes import (
     FakeAgentRunStore,
@@ -40,6 +45,7 @@ from .fakes import (
     FakeIndexStore,
     FakeReviewQueue,
     FakeStoreBackup,
+    FakeVocabularyStore,
 )
 
 CREATED = datetime(2026, 7, 12, 12, 0, 0)
@@ -62,6 +68,13 @@ def _build(tmp_path: Path):
     indexer = FakeIndexer()
     backup = FakeStoreBackup()
     runs = FakeAgentRunStore()
+    # Real VocabularyService over fakes so the delegated vocab-proposal branch is exercised.
+    vocab = VocabularyService(
+        settings=settings,
+        vocab_store=FakeVocabularyStore(),
+        review_store=review,
+        consolidation=VocabConsolidation(run_store=runs),
+    )
     service = ReviewService(
         settings=settings,
         review_store=review,
@@ -70,6 +83,7 @@ def _build(tmp_path: Path):
         node_writer=writer,
         store_backup=backup,
         run_store=runs,
+        vocab=vocab,
     )
     return service, review, index, indexer, backup, runs, writer, settings
 
@@ -206,7 +220,9 @@ async def test_entity_requires_choice(tmp_path: Path):
 # --- vocab-proposal resolution ------------------------------------------------------------
 
 
-async def test_vocab_approve_queues_consolidation_marker(tmp_path: Path):
+async def test_vocab_approve_delegates_and_opens_consolidation(tmp_path: Path):
+    """POST /review/{id} approve is delegated to the Vocabulary service: the item resolves and a
+    visible ``vocab-consolidation`` run is opened (semantics tested in test_vocab_service)."""
     service, review, _, _, _, runs, _, _ = _build(tmp_path)
     rid = await review.enqueue(
         ReviewItem(kind=KIND_VOCAB_PROPOSAL, payload={"vocab": "node_type", "value": "dream"})
@@ -217,10 +233,9 @@ async def test_vocab_approve_queues_consolidation_marker(tmp_path: Path):
     assert record.status == "resolved"
     assert record.resolution["verdict"] == "approve"
     assert record.resolution["value"] == "dream"
-    # A queued, visible marker run was opened under the consolidation agent (mutation = task 7).
+    # A visible run was opened under the consolidation agent (the type is now live — task 7).
     marker = next(r for r in runs.runs.values() if r.agent == AGENT_VOCAB_CONSOLIDATION)
-    assert marker.status == "skipped"
-    assert marker.details["queued"] is True and marker.details["value"] == "dream"
+    assert marker.status == "succeeded"
     assert record.resolution["run_id"] == marker.id
 
 
@@ -234,7 +249,7 @@ async def test_vocab_reject_discards(tmp_path: Path):
 
     assert record.status == "discarded"
     assert record.resolution == {"verdict": "reject"}
-    assert not runs.runs  # reject queues nothing
+    assert not runs.runs  # reject opens no run
 
 
 async def test_vocab_requires_valid_verdict(tmp_path: Path):

@@ -36,6 +36,26 @@ STATUS_DISCARDED = "discarded"
 STATUS_MAYBE = "maybe"
 
 
+# Resolution errors, shared by every service that resolves a review item (the Review service for
+# entity-ambiguity, the Vocabulary service for vocab-proposals) so the router maps one exception
+# set to HTTP status codes regardless of which service handled the kind. They live here — the
+# neutral, already-shared module — to keep those services from importing each other.
+class ReviewError(Exception):
+    """Base for review-resolution problems surfaced to the API layer."""
+
+
+class ReviewNotFound(ReviewError):
+    """No review item with the given id (404)."""
+
+
+class ReviewNotPending(ReviewError):
+    """The item was already resolved/discarded/deferred — it cannot be resolved again (409)."""
+
+
+class BadResolution(ReviewError):
+    """The resolution body is invalid for the item's kind (400)."""
+
+
 @dataclass(frozen=True)
 class ReviewItem:
     """One item to file. ``payload`` carries the kind-specific data (candidates / proposed type);
