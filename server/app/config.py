@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -53,6 +53,48 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://braindan:braindan@localhost:5432/braindan"
     db_pool_min_size: int = 1
     db_pool_max_size: int = 10
+
+    # --- Graph store (M3 pivot, ADR-026/030/031/032) ---
+    # Coexists with the vault_* settings below only until M3 task 2 performs the code
+    # rename (CLAUDE.md pivot note); new work reads these, never vault_*.
+    graph_store_path: str = "../graph-store"  # prod: /srv/graph-store (07-infra)
+    # SSH URL of the private PSB-graph repo (ADR-031 §6). Empty ⇒ bootstrap skips the
+    # remote (dev: commits stay local, same semantics as a remoteless vault today).
+    graph_store_repo: str = ""
+    # Seeded node-type vocabulary (9) + edge rels (6) — ADR-031 §3. Growth is governed
+    # (LLM proposes, user approves — ADR-027); approved additions land in app_settings,
+    # these are the seeds.
+    node_types: CsvList = Field(
+        default=[
+            "memory",
+            "person",
+            "idea",
+            "conversation",
+            "insight",
+            "place",
+            "event",
+            "project",
+            "topic",
+        ]
+    )
+    edge_rels: CsvList = Field(
+        default=["involves", "about", "part_of", "led_to", "follows", "at"]
+    )
+    # Types carrying the entity substrate (aliases/disambig/profiles — ADR-030); must be
+    # a subset of node_types (memory/conversation/insight are content, not entities).
+    entity_like_types: CsvList = Field(
+        default=["person", "place", "topic", "idea", "event", "project"]
+    )
+    # Entity-resolution confidence floor (ADR-030 §3, live-tuned at the M3 Accept):
+    # below it the organizer never links — edge goes pending + entity-ambiguity review item.
+    entity_match_min_conf: float = Field(default=0.8, ge=0.0, le=1.0)
+    # MCP capture burst queue (ADR-031 §1): beyond this many in-flight synchronous
+    # organizes on the MCP surface, further captures wait their turn.
+    mcp_capture_max_inflight: int = 2
+    # Nightly derived-profile refresh (ADR-030 §4/ADR-032 §3): regenerate categorized
+    # observation profiles for entities whose 1-hop neighborhood changed. Runs in the
+    # ADR-010 window after the 03:40 reindex so the day's edges are in the DB.
+    profile_refresh_cron: str = "10 4 * * *"
 
     # --- Vault (ADR-001) ---
     vault_path: str = "../ObisidanVault"
@@ -186,8 +228,8 @@ class Settings(BaseSettings):
 
     # --- Durability schedule (ADR-010 window, ADR-014 §1/§6). Standard 5-field crontab, all
     # evaluated in scheduler_tz. Staggered inside 03:00–05:00 to avoid RAM stacking on the VPS;
-    # M2 fills rescan 03:40 (reindex_cron below); the M4 slots (Slack 03:00 / summary 04:10 /
-    # review 04:40) are still free. ---
+    # M2 fills rescan 03:40 (reindex_cron below); M3 fills 04:10 (profile_refresh_cron above —
+    # the retired daily-summary slot); still free: 03:00 (connectors) / 04:40 (reflection). ---
     # Combined nightly reindex (M2, ADR-023 §4): git pull → rescan → recompute graph → commit+push.
     # In the ADR-010 window, ahead of the summary jobs so search/graph reflect the day's captures.
     reindex_cron: str = "40 3 * * *"  # nightly full rescan + relatedness recompute (04 §5)
@@ -206,6 +248,9 @@ class Settings(BaseSettings):
     @field_validator(
         "planes",
         "vault_ignore",
+        "node_types",
+        "edge_rels",
+        "entity_like_types",
         "chat_chain",
         "distill_chain",
         "stt_chain",
@@ -215,6 +260,20 @@ class Settings(BaseSettings):
     @classmethod
     def _coerce_lists(cls, value: str | list[str]) -> list[str]:
         return _split_csv(value)
+
+    @model_validator(mode="after")
+    def _check_vocabulary(self) -> Settings:
+        # Boot-time typo guard on the governed vocabulary (ADR-027/030/031): the
+        # organizer's no-fit fallback type must exist, and only known types can carry
+        # the entity substrate.
+        if "memory" not in self.node_types:
+            raise ValueError("NODE_TYPES must include 'memory' (the organizer fallback type)")
+        unknown = set(self.entity_like_types) - set(self.node_types)
+        if unknown:
+            raise ValueError(
+                f"ENTITY_LIKE_TYPES not present in NODE_TYPES: {sorted(unknown)}"
+            )
+        return self
 
 
 @lru_cache

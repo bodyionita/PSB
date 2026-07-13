@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.config import Settings
 from app.migration_check import compute_head
 
@@ -46,6 +48,47 @@ def test_embedding_provider_defaults_to_ollama():
     assert s.ollama_base_url == "http://localhost:11434/v1"
 
 
-def test_compute_head_is_migration_004():
-    # M2 adds revision 004 (embeddings 768 + note_links, ADR-022/023); head advances to it.
-    assert compute_head() == "004"
+def test_seeded_graph_vocabulary_defaults():
+    # M3 (ADR-031 §3): 9 node types / 6 edge rels ship as seeds; entity substrate covers
+    # the 6 entity-like types (ADR-030); resolution floor defaults to 0.8, live-tuned.
+    s = Settings()
+    assert s.node_types == [
+        "memory",
+        "person",
+        "idea",
+        "conversation",
+        "insight",
+        "place",
+        "event",
+        "project",
+        "topic",
+    ]
+    assert s.edge_rels == ["involves", "about", "part_of", "led_to", "follows", "at"]
+    assert s.entity_like_types == ["person", "place", "topic", "idea", "event", "project"]
+    assert s.entity_match_min_conf == 0.8
+    assert s.mcp_capture_max_inflight == 2
+
+
+def test_graph_vocabulary_parses_from_csv():
+    s = Settings(
+        node_types="memory, person , topic",
+        edge_rels="involves, about",
+        entity_like_types="person,topic",
+    )
+    assert s.node_types == ["memory", "person", "topic"]
+    assert s.edge_rels == ["involves", "about"]
+    assert s.entity_like_types == ["person", "topic"]
+
+
+def test_vocabulary_guards_reject_bad_config():
+    # Boot-time typo guard: the organizer fallback type must exist, and entity-like
+    # types must be known node types.
+    with pytest.raises(ValueError, match="memory"):
+        Settings(node_types="person,topic")
+    with pytest.raises(ValueError, match="ENTITY_LIKE_TYPES"):
+        Settings(node_types="memory,person", entity_like_types="person,ghost")
+
+
+def test_compute_head_is_migration_005():
+    # M3 ships revision 005 (the graph pivot, ADR-030/031); head advances to it.
+    assert compute_head() == "005"
