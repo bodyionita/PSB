@@ -11,16 +11,11 @@ ENV PYTHONUNBUFFERED=1 \
 # System deps: git + openssh-client for vault backup (SSH push to GitHub), nodejs/npm for the
 # Claude Code CLI, curl for uv, and postgresql-client-17 for the M1 db-backup job's pg_dump
 # (v17 to match the Supabase Postgres 17 server — an older client refuses to dump a newer server).
-# Debian bookworm ships an older postgresql-client, so add the PGDG apt repo for v17.
+# The python:3.12-slim base is Debian 13 (trixie), whose main repo ships PostgreSQL 17 directly,
+# so no external PGDG repo is needed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        git openssh-client curl ca-certificates gnupg nodejs npm \
-    && install -d /etc/apt/keyrings \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc \
-    && echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
-        > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends postgresql-client-17 \
+        git openssh-client curl ca-certificates nodejs npm postgresql-client-17 \
     && rm -rf /var/lib/apt/lists/*
 
 # /srv/vault is bind-mounted and owned by the host 'deploy' user, but this container runs
