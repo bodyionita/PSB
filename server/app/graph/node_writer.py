@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from ..indexing.chunking import split_frontmatter
+
 # The generation stamp written into every pipeline node's frontmatter (02 §2). Retrofit passes
 # target "everything below vN" instead of re-walking the whole graph (ADR-031 §4). Bump on any
 # change to the node contract the organizer emits.
@@ -168,6 +170,49 @@ def render_node(node: NodeDocument) -> str:
     )
 
 
+def append_edges(raw_text: str, edges: tuple[NodeEdge, ...] | list[NodeEdge]) -> str:
+    """Append canonical ``edges`` to an existing node file's frontmatter, leaving body untouched.
+
+    Pure (no I/O) so it is unit-tested directly. Used to **materialize a pending entity edge on
+    review resolution** (ADR-030 §3) — the organizer left the edge unwritten pending a human pick,
+    and this writes it once the target is known. An edge already present (same ``rel`` + ``to``) is
+    skipped, so re-materialization is idempotent (rule 6). Creates the ``edges:`` block if absent.
+
+    The node contract renders ``edges:`` as the frontmatter's last block, but this inserts at the
+    end of the existing block wherever it sits, so a hand-authored ordering is preserved too. Raises
+    :class:`ValueError` if the file has no frontmatter (there is no contract node to edit).
+    """
+    inner, body = split_frontmatter(raw_text)
+    if inner is None:
+        raise ValueError("cannot append edges: node file has no frontmatter")
+    lines = inner.rstrip("\n").split("\n")
+    to_add = [e for e in edges if not _edge_present(lines, e)]
+    if not to_add:
+        return raw_text
+    edges_idx = next((i for i, line in enumerate(lines) if line.strip() == "edges:"), None)
+    if edges_idx is None:
+        lines.append("edges:")
+        insert_at = len(lines)
+    else:
+        # End of the block = first line after `edges:` that is not an indented list continuation.
+        insert_at = edges_idx + 1
+        while insert_at < len(lines) and lines[insert_at][:1] in (" ", "\t"):
+            insert_at += 1
+    for offset, edge in enumerate(to_add):
+        lines.insert(insert_at + offset, f"  - {edge.render()}")
+    return f"---\n{chr(10).join(lines)}\n---\n{body}"
+
+
+def _edge_present(frontmatter_lines: list[str], edge: NodeEdge) -> bool:
+    """True if an ``edges:`` item already links the same ``rel`` + ``to`` (ignoring dates)."""
+    rel_token = f"rel: {_yaml_scalar(edge.rel)}"
+    to_token = f"to: {_yaml_scalar(edge.to)}"
+    return any(
+        line.lstrip().startswith("-") and rel_token in line and to_token in line
+        for line in frontmatter_lines
+    )
+
+
 @dataclass(frozen=True)
 class WrittenNode:
     """The result of writing one node — its id and store-relative (``/``-separated) path."""
@@ -219,6 +264,18 @@ class NodeWriter:
             self._atomic_write(abs_path, render_node(node))
             written.append(WrittenNode(node_id=node.id, store_path=rel))
         return written
+
+    def add_edges(self, store_path: str, edges: list[NodeEdge]) -> None:
+        """Materialize canonical ``edges`` onto an existing node file (ADR-030 §3 resolution).
+
+        Atomic (temp + ``os.replace``, ADR-014) and idempotent (:func:`append_edges` skips edges
+        already present). A missing file raises ``FileNotFoundError`` — the caller (review service)
+        treats an un-indexed / vanished source node as unmaterializable and skips it, never crashing
+        (rule 7). The DB edge row is materialized separately by re-indexing this path afterwards.
+        """
+        path = self._root / Path(*store_path.split("/"))
+        raw_text = path.read_text(encoding="utf-8")
+        self._atomic_write(path, append_edges(raw_text, edges))
 
     def remove_nodes(self, store_paths: list[str]) -> None:
         """Delete files by store-relative path (Pass-2 supersede / reorganize). Missing files are

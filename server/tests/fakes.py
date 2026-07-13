@@ -22,7 +22,7 @@ from app.search.store import NodeRow, SearchHit
 from app.services.agent_runs import RUNNING, AgentRun
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
-from app.services.review_queue import ReviewItem
+from app.services.review_queue import ReviewItem, ReviewRecord
 
 
 class FakeChatProvider(ChatProvider):
@@ -290,16 +290,55 @@ class FakeAliasStore:
 
 
 class FakeReviewQueue:
-    """Records filed review items (the ReviewQueue write surface)."""
+    """In-memory review queue — the write (``enqueue``) + read/resolve (``list_items``/``get``/
+    ``resolve``) surfaces over one dict of rows, keyed by id. ``items`` keeps the filed
+    :class:`ReviewItem`s (write-path assertions); ``records`` holds the full rows the read path
+    returns. Mirrors the guarded ``pending``-only transition of the real store."""
 
     def __init__(self) -> None:
         self.items: list[ReviewItem] = []
+        self.records: dict[str, ReviewRecord] = {}
         self._seq = 0
 
     async def enqueue(self, item: ReviewItem) -> str:
         self._seq += 1
+        review_id = f"review-{self._seq}"
         self.items.append(item)
-        return f"review-{self._seq}"
+        self.records[review_id] = ReviewRecord(
+            id=review_id,
+            kind=item.kind,
+            payload=dict(item.payload),
+            excerpt=item.excerpt,
+            source=item.source,
+            source_ref=item.source_ref,
+            status="pending",
+            resolution=None,
+            created_at=datetime.now(UTC),
+        )
+        return review_id
+
+    async def list_items(
+        self, *, status: str | None, kind: str | None, limit: int
+    ) -> list[ReviewRecord]:
+        rows = [
+            r
+            for r in self.records.values()
+            if (status is None or r.status == status) and (kind is None or r.kind == kind)
+        ]
+        rows.sort(key=lambda r: r.created_at, reverse=True)
+        return rows[:limit]
+
+    async def get(self, review_id: str) -> ReviewRecord | None:
+        return self.records.get(review_id)
+
+    async def resolve(self, review_id: str, *, status: str, resolution: dict) -> bool:
+        from dataclasses import replace
+
+        row = self.records.get(review_id)
+        if row is None or row.status != "pending":
+            return False
+        self.records[review_id] = replace(row, status=status, resolution=resolution)
+        return True
 
 
 class FakeGitRepo:

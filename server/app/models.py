@@ -152,6 +152,35 @@ class PlanesResponse(BaseModel):
     inbox: str
 
 
+# --- Review queue (03-api.md §Review, M3 / ADR-030 §3) ---
+class ReviewItemResponse(BaseModel):
+    """One ``review_queue`` row for the admin Review surface (GET /review, POST /review/{id}).
+
+    ``payload`` carries the kind-specific data decidable in place — an ``entity-ambiguity`` item's
+    candidates (``{id,name,disambig,aliases}``) + ``pending_edges``, or a ``vocab-proposal``'s
+    proposed ``{vocab,value}``. ``resolution`` is null until the item is resolved."""
+
+    id: str
+    kind: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    excerpt: str | None = None
+    source: str | None = None
+    source_ref: str | None = None
+    status: str
+    resolution: dict[str, Any] | None = None
+    created_at: datetime
+
+
+class ReviewResolveRequest(BaseModel):
+    """Resolution body for POST /review/{id}; the meaningful field depends on the item's kind.
+
+    entity-ambiguity → ``choice`` (a candidate node id | ``"new"`` | ``"maybe"``); vocab-proposal →
+    ``verdict`` (``"approve"`` | ``"reject"``). The server validates per kind (400 otherwise)."""
+
+    choice: str | None = None
+    verdict: str | None = None
+
+
 # --- Activity (03-api.md §Activity feed) ---
 class AgentRunResponse(BaseModel):
     """One ``agent_runs`` row (GET /activity/runs/{id}). M2 pull-forward of the M4 feed so the

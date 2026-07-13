@@ -128,6 +128,11 @@ class Settings(BaseSettings):
     # an exact/normalized hit or it goes to review. Guards "Al"/"IT"/"mom" style collisions.
     entity_alias_min_fuzzy_len: int = 4
 
+    # --- Review queue (ADR-030 §3 / ADR-029) ---
+    # Upper bound on the admin Review list (GET /review) — a personal store's pending queue is
+    # small, so one page suffices; bounds a runaway response if it ever isn't.
+    review_list_max: int = 200
+
     # --- Graph-store backup / durability (ADR-014; ex-`vault_*`, renamed at M3 — ADR-031) ---
     # The server only ever fast-forward pushes to this remote/branch; never force/rebase/reset.
     store_git_remote: str = "origin"

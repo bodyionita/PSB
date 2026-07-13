@@ -119,9 +119,18 @@ class EntityResolver:
         created_local: datetime,
         since: str | None,
         excerpt: str,
+        pending_edges_by_key: dict[tuple[str, str], list[dict]] | None = None,
     ) -> ResolutionResult:
         """Resolve a capture's entity mentions. ``since`` = the memory's currency date
-        (``occurred ?? created``) stamped on each auto-linked edge (ADR-031 §4)."""
+        (``occurred ?? created``) stamped on each auto-linked edge (ADR-031 §4).
+
+        ``pending_edges_by_key`` maps a mention key to the ``[{src, rel, since}]`` edges that would
+        be drawn if it resolved — carried into an ``entity-ambiguity`` review item's payload so
+        resolution can **materialize the pending edge** once a human picks the target (ADR-030 §3,
+        M3 task 4). The content-node ids are assigned by the pipeline before resolution, so the
+        review item knows which nodes the edge originates from.
+        """
+        edge_map = pending_edges_by_key or {}
         result = ResolutionResult()
         # Intra-capture dedup (ADR-032 §2): resolve each distinct (name, type) once.
         by_key: dict[tuple[str, str], Mention] = {}
@@ -144,7 +153,8 @@ class EntityResolver:
                 )
             else:
                 await self._disambiguate(
-                    result, key, m, candidates, source, source_ref, created_local, since, excerpt
+                    result, key, m, candidates, source, source_ref, created_local, since, excerpt,
+                    pending_edges=edge_map.get(key, []),
                 )
         return result
 
@@ -190,6 +200,8 @@ class EntityResolver:
         created_local: datetime,
         since: str | None,
         excerpt: str,
+        *,
+        pending_edges: list[dict],
     ) -> None:
         """Multi-candidate case: ask the resolver LLM (structured candidates only), gated by the
         confidence floor. A down chain or a low-confidence answer → review item, never a guess."""
@@ -199,7 +211,8 @@ class EntityResolver:
         except ProviderUnavailable:
             result.resolver_fallback_used = True
             await self._file_review(
-                result, m, capped, source, source_ref, excerpt, reason="resolver-unavailable"
+                result, m, capped, source, source_ref, excerpt,
+                reason="resolver-unavailable", pending_edges=pending_edges,
             )
             return
 
@@ -213,7 +226,8 @@ class EntityResolver:
             self._mint(result, key, m, source, source_ref, created_local, since)
         else:
             await self._file_review(
-                result, m, capped, source, source_ref, excerpt, reason="low-confidence"
+                result, m, capped, source, source_ref, excerpt,
+                reason="low-confidence", pending_edges=pending_edges,
             )
 
     async def _ask(
@@ -254,8 +268,12 @@ class EntityResolver:
         excerpt: str,
         *,
         reason: str,
+        pending_edges: list[dict],
     ) -> None:
-        """File an ``entity-ambiguity`` item and leave the edge pending (ADR-030 §3)."""
+        """File an ``entity-ambiguity`` item and leave the edge pending (ADR-030 §3).
+
+        ``pending_edges`` (``[{src, rel, since}]``) records which content nodes wanted this edge, so
+        resolution can materialize it once a human picks the target (M3 task 4)."""
         result.pending += 1
         result.resolutions.append(
             {"mention": m.name, "type": m.type, "outcome": "review", "reason": reason}
@@ -276,6 +294,7 @@ class EntityResolver:
                             for c in candidates
                         ],
                         "reason": reason,
+                        "pending_edges": list(pending_edges),
                     },
                     excerpt=excerpt,
                     source=source,

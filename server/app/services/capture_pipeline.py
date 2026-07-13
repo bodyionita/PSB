@@ -39,7 +39,7 @@ from ..capture.organizer import (
     validate_organizer_output,
 )
 from ..config import Settings
-from ..entities.resolver import EntityResolver, Mention, ResolutionResult
+from ..entities.resolver import EntityResolver, Mention, ResolutionResult, mention_key
 from ..graph.node_writer import NodeDocument, NodeEdge, NodeWriter
 from ..indexing.indexer import NodeIndexer
 from ..providers.base import ChatMessage, ProviderUnavailable, TranscriptResult
@@ -554,6 +554,14 @@ class CapturePipeline:
         for proposal in organize.proposals:
             await self._file_vocab_proposal(proposal, source=source, source_ref=capture_id)
 
+        # Assign each content node its id up front so a pending mention's review item can record
+        # which nodes wanted the edge (`pending_edges`) and resolution can materialize it later
+        # (ADR-030 §3, M3 task 4). `_build_documents` reuses these ids so file ↔ review agree.
+        node_ids = [str(uuid.uuid4()) for _ in organize.nodes]
+        pending_edges_by_key = self._pending_edges_by_key(
+            organize.nodes, node_ids, created_local=created_local
+        )
+
         mentions = [
             Mention(name=e.name, type=e.type, rel=e.rel, aliases=e.aliases, disambig=e.disambig)
             for node in organize.nodes
@@ -565,17 +573,38 @@ class CapturePipeline:
             source=source,
             source_ref=capture_id,
             created_local=created_local,
+            pending_edges_by_key=pending_edges_by_key,
         )
 
         documents = self._build_documents(
             organize.nodes,
             resolution,
+            node_ids=node_ids,
             capture_id=capture_id,
             created_local=created_local,
             source=source,
         )
         written = await asyncio.to_thread(self._writer.write_nodes, documents)
         return [w.store_path for w in written]
+
+    def _pending_edges_by_key(
+        self,
+        nodes: tuple[OrganizerNode, ...],
+        node_ids: list[str],
+        *,
+        created_local: datetime,
+    ) -> dict[tuple[str, str], list[dict]]:
+        """Map each mention key → the ``[{src, rel, since}]`` edges its content nodes would draw, so
+        an ``entity-ambiguity`` review item carries enough to materialize the edge on resolution.
+        ``since`` matches what :meth:`_build_documents` stamps (``occurred ?? created``)."""
+        by_key: dict[tuple[str, str], list[dict]] = {}
+        for node_id, node in zip(node_ids, nodes, strict=True):
+            since = node.occurred or created_local.date().isoformat()
+            for e in node.entities:
+                by_key.setdefault(mention_key(e.name, e.type), []).append(
+                    {"src": node_id, "rel": e.rel, "since": since}
+                )
+        return by_key
 
     async def _resolve_entities(
         self,
@@ -585,6 +614,7 @@ class CapturePipeline:
         source: str,
         source_ref: str,
         created_local: datetime,
+        pending_edges_by_key: dict[tuple[str, str], list[dict]],
     ) -> ResolutionResult:
         if not mentions:
             return ResolutionResult()
@@ -599,6 +629,7 @@ class CapturePipeline:
                 created_local=created_local,
                 since=since,
                 excerpt=excerpt,
+                pending_edges_by_key=pending_edges_by_key,
             )
         except Exception:  # noqa: BLE001 — resolution must never fail an otherwise-good capture
             logger.exception(
@@ -611,17 +642,16 @@ class CapturePipeline:
         nodes: tuple[OrganizerNode, ...],
         resolution: ResolutionResult,
         *,
+        node_ids: list[str],
         capture_id: str,
         created_local: datetime,
         source: str,
     ) -> list[NodeDocument]:
         """Turn organizer nodes + the resolution into writable :class:`NodeDocument`s. Each content
-        node gets a fresh id; its entity edges point at resolved ids (pending mentions are skipped —
-        their review item is already filed). Minted entity nodes are appended."""
-        from ..entities.resolver import mention_key  # local import avoids a cycle at module load
-
+        node keeps its pre-assigned id; its entity edges point at resolved ids (pending mentions are
+        skipped — their review item is already filed). Minted entity nodes are appended."""
         documents: list[NodeDocument] = []
-        for node in nodes:
+        for node_id, node in zip(node_ids, nodes, strict=True):
             since = node.occurred or created_local.date().isoformat()
             edges: list[NodeEdge] = []
             for e in node.entities:
@@ -632,7 +662,7 @@ class CapturePipeline:
                     )
             documents.append(
                 NodeDocument(
-                    id=str(uuid.uuid4()),
+                    id=node_id,
                     type=node.type,
                     title=node.title,
                     body=node.body,

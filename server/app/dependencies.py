@@ -17,6 +17,7 @@ from .services.agent_runs import AgentRunStore
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
 from .services.reindex import ReindexService
+from .services.review_service import ReviewService
 from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
 
@@ -63,6 +64,10 @@ def get_tag_consolidation_service(request: Request) -> TagConsolidationService:
 
 def get_agent_run_store(request: Request) -> AgentRunStore:
     return request.app.state.agent_run_store
+
+
+def get_review_service(request: Request) -> ReviewService:
+    return request.app.state.review_service
 
 
 async def require_session(

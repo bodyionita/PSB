@@ -24,7 +24,7 @@ from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
 from .providers.registry import build_registry
-from .routers import activity, admin, auth, capture, health, meta, search
+from .routers import activity, admin, auth, capture, health, meta, review, search
 from .search.service import SearchService
 from .search.store import PgSearchStore
 from .services.agent_runs import PgAgentRunStore
@@ -36,6 +36,7 @@ from .services.git_repo import GitRepo
 from .services.rate_limit import RateLimiter
 from .services.reindex import ReindexService
 from .services.review_queue import PgReviewQueue
+from .services.review_service import ReviewService
 from .services.scheduler import BackupScheduler
 from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
@@ -70,9 +71,15 @@ async def lifespan(app: FastAPI):
     app.state.store_backup = store_backup
 
     # Indexer (ADR-022/026): the real index step — node files → nodes/chunks + canonical edges.
-    # Owns embed-on-index; the capture pipeline calls it to index freshly-written nodes.
-    indexer = Indexer(settings=settings, store=PgIndexStore(db), registry=app.state.registry)
+    # Owns embed-on-index; the capture pipeline calls it to index freshly-written nodes. The index
+    # store is shared with the review service (source-node store-path lookup for materializing).
+    index_store = PgIndexStore(db)
+    indexer = Indexer(settings=settings, store=index_store, registry=app.state.registry)
     app.state.indexer = indexer
+
+    # The single filesystem writer of node files (ADR-026), shared by the capture pipeline and the
+    # review service (which appends a materialized entity edge onto an existing node file).
+    node_writer = NodeWriter(settings.graph_store_path)
 
     # Derived-edge graph (ADR-023 surviving half): recomputes the DB-only `similar` edges.
     # Nightly + on /admin/reindex (via the reindex service); never on the capture path.
@@ -120,13 +127,26 @@ async def lifespan(app: FastAPI):
         registry=app.state.registry,
     )
 
+    # Review read/resolve surface (ADR-030 §3, M3 task 4): lists pending items and resolves them —
+    # materializing a pending entity edge onto the store (writer + reindex + commit) or queuing a
+    # vocab-consolidation marker (the mutation job is M3 task 7).
+    app.state.review_service = ReviewService(
+        settings=settings,
+        review_store=review_queue,
+        index_store=index_store,
+        indexer=indexer,
+        node_writer=node_writer,
+        store_backup=store_backup,
+        run_store=run_store,
+    )
+
     # Capture pipeline (ADR-019/026/030): in-process, nodes-to-store, backed by the real store
     # backup. The tag store feeds the organizer prompt the live vocabulary (ADR-024 §1).
     pipeline = CapturePipeline(
         settings=settings,
         store=PgCaptureStore(db),
         registry=app.state.registry,
-        node_writer=NodeWriter(settings.graph_store_path),
+        node_writer=node_writer,
         store_backup=store_backup,
         run_store=run_store,
         indexer=indexer,
@@ -196,6 +216,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(capture.router, prefix=settings.api_prefix)
     app.include_router(search.router, prefix=settings.api_prefix)
     app.include_router(meta.router, prefix=settings.api_prefix)
+    app.include_router(review.router, prefix=settings.api_prefix)
     app.include_router(activity.router, prefix=settings.api_prefix)
     app.include_router(admin.router, prefix=settings.api_prefix)
 
