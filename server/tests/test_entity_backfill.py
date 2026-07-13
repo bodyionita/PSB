@@ -104,6 +104,54 @@ async def test_short_alias_is_not_used(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_same_memory_matched_by_two_aliases_counts_once(tmp_path: Path):
+    writer = NodeWriter(str(tmp_path))
+    mem_path = _memory(writer, "mem-1", "Alexandru Popescu came over.")
+    match = AliasMatchNode("mem-1", mem_path, "…Alexandru Popescu…")
+    # Two distinct qualifying aliases of the SAME entity both match the same memory. The first adds
+    # the edge; the second must not re-count it (add_edges returns False when nothing changed).
+    store = FakeEntityStore(
+        entities=[_entity(["alexandru", "popescu"])],
+        alias_matches={"alexandru": [match], "popescu": [match]},
+    )
+    runs = FakeAgentRunStore()
+    service = _service(tmp_path, store, writer, FakeIndexer(), FakeCommitBackup(), runs)
+
+    await service.run_scheduled()
+
+    meta = parse_node_metadata(
+        (tmp_path / Path(*mem_path.split("/"))).read_text("utf-8"),
+        store_path=mem_path,
+        fallback_created=CREATED,
+    )
+    assert [(e.rel, e.to) for e in meta.edges] == [("involves", "e1")]  # one edge
+    run = list(runs.runs.values())[0]
+    assert run.details["links_added"] == 1
+    assert run.details["nodes_changed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scan_uses_last_successful_run_as_watermark(tmp_path: Path):
+    from datetime import UTC, datetime
+
+    writer = NodeWriter(str(tmp_path))
+    store = FakeEntityStore(entities=[_entity(["alexandru"])])
+    runs = FakeAgentRunStore()
+    # A prior successful backfill run fixes the watermark; entities are only re-scanned from there.
+    watermark = datetime(2026, 7, 1, 3, 20, tzinfo=UTC)
+    from app.services.agent_runs import SUCCEEDED, AgentRun
+
+    runs.preloaded["entity-backfill"] = AgentRun(
+        id="prev", agent="entity-backfill", status=SUCCEEDED, started_at=watermark
+    )
+    service = _service(tmp_path, store, writer, FakeIndexer(), FakeCommitBackup(), runs)
+
+    await service.run_scheduled()
+
+    assert store.touched_since_arg == watermark
+
+
+@pytest.mark.asyncio
 async def test_missing_memory_file_is_skipped(tmp_path: Path):
     writer = NodeWriter(str(tmp_path))
     store = FakeEntityStore(

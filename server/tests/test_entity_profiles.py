@@ -173,8 +173,9 @@ async def test_llm_down_degrades_to_stub_and_clears_hash():
     runs = FakeAgentRunStore()
     await _service(store, profiles, _registry(chat_up=False)[0], runs).run_scheduled()
 
-    # Snapshot tier but the LLM is down → stub text stored, hash cleared so the next run retries.
+    # Snapshot-degree entity but the LLM is down → stub text + stub tier (so the badge matches the
+    # content), hash cleared so the next run retries the synthesis.
     up = profiles.upserts[0]
-    assert up["tier"] == TIER_SNAPSHOT
+    assert up["tier"] == TIER_STUB
     assert "[involves] Dinner" in up["profile"]
     assert up["neighborhood_hash"] == ""

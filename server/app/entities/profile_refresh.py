@@ -26,6 +26,7 @@ from .entity_store import EntityRef, EntityStore
 from .profile_store import ProfileStore
 from .profiles import (
     PROFILE_EMBED_PREFIX,
+    TIER_STUB,
     ProfilePlan,
     build_profile_messages,
     clean_profile_text,
@@ -152,16 +153,22 @@ class ProfileRefreshService:
 
         profile_text, degraded = await self._render(entity, plan)
         stored_hash = _RETRY_HASH if degraded else plan.neighborhood_hash
+        # When the LLM is down the stored text is the mechanical stub, so record the stub tier too —
+        # the tier badge then matches the content (the cleared hash heals it to its real tier next
+        # run). The stored observations are bounded like the LLM input (row size, matching the
+        # PROFILE_MAX_OBSERVATIONS setting's intent).
+        stored_tier = TIER_STUB if degraded else plan.tier
+        max_obs = self._settings.profile_max_observations
         embedding = await self._embed(profile_text)
         await self._profiles.upsert_profile(
             entity.id,
-            tier=plan.tier,
+            tier=stored_tier,
             profile=profile_text,
-            observations=[o.as_dict() for o in plan.observations],
+            observations=[o.as_dict() for o in plan.observations[:max_obs]],
             neighborhood_hash=stored_hash,
             embedding=embedding,
         )
-        return plan.tier, degraded
+        return stored_tier, degraded
 
     async def _render(self, entity: EntityRef, plan: ProfilePlan) -> tuple[str, bool]:
         """The profile text: mechanical stub (no LLM) or the LLM synthesis; returns

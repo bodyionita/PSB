@@ -133,15 +133,20 @@ class BackfillService:
                 for match in matches:
                     edge = NodeEdge(rel=_BACKFILL_REL, to=entity.id)
                     try:
-                        await asyncio.to_thread(self._writer.add_edges, match.store_path, [edge])
+                        wrote = await asyncio.to_thread(
+                            self._writer.add_edges, match.store_path, [edge]
+                        )
                     except FileNotFoundError:
                         logger.warning(
                             "backfill: memory file %s gone; edge not added (skipped)",
                             match.store_path,
                         )
                         continue
-                    changed.add(match.store_path)
-                    links += 1
+                    # Count only real additions — a node matched by two aliases of the same entity
+                    # (its edge already appended on the first) must not double-spend the budget.
+                    if wrote:
+                        changed.add(match.store_path)
+                        links += 1
 
         committed = pushed = False
         if changed:

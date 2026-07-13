@@ -393,17 +393,23 @@ class NodeWriter:
             written.append(WrittenNode(node_id=node.id, store_path=rel))
         return written
 
-    def add_edges(self, store_path: str, edges: list[NodeEdge]) -> None:
+    def add_edges(self, store_path: str, edges: list[NodeEdge]) -> bool:
         """Materialize canonical ``edges`` onto an existing node file (ADR-030 §3 resolution).
 
         Atomic (temp + ``os.replace``, ADR-014) and idempotent (:func:`append_edges` skips edges
-        already present). A missing file raises ``FileNotFoundError`` — the caller (review service)
-        treats an un-indexed / vanished source node as unmaterializable and skips it, never crashing
-        (rule 7). The DB edge row is materialized separately by re-indexing this path afterwards.
+        already present). Returns ``True`` when the file changed and ``False`` when every edge was
+        already present (so a caller can count only real additions). A missing file raises
+        ``FileNotFoundError`` — the caller (review/backfill) treats an un-indexed / vanished source
+        node as unmaterializable and skips it, never crashing (rule 7). The DB edge row is
+        materialized separately by re-indexing this path afterwards.
         """
         path = self._root / Path(*store_path.split("/"))
         raw_text = path.read_text(encoding="utf-8")
-        self._atomic_write(path, append_edges(raw_text, edges))
+        new_text = append_edges(raw_text, edges)
+        if new_text == raw_text:
+            return False
+        self._atomic_write(path, new_text)
+        return True
 
     def retarget_edges(self, store_path: str, *, old_to: str, new_to: str) -> int:
         """Redirect a node file's edges from ``old_to`` to ``new_to`` (merge, ADR-030 §5). Atomic;
