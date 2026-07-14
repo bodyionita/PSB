@@ -41,6 +41,7 @@ from .services.capture_store import PgCaptureStore
 from .services.git_repo import GitRepo
 from .services.rate_limit import RateLimiter
 from .services.reindex import ReindexService
+from .services.reprocess import PgReprocessStore, ReprocessService
 from .services.review_queue import PgReviewQueue
 from .services.review_service import ReviewService
 from .services.scheduler import BackupScheduler
@@ -234,6 +235,20 @@ async def lifespan(app: FastAPI):
     )
     app.state.capture_pipeline = pipeline
 
+    # Reprocess-all-from-raw (ADR-042, M3 task 11): the standing data-survival op. Constructed after
+    # the pipeline (it drives the pipeline's per-capture re-ingestion) + reuses the node writer,
+    # derived-edge graph, and store backup for the reset → replay → recompute → force-commit pass.
+    reprocess_service = ReprocessService(
+        settings=settings,
+        store=PgReprocessStore(db),
+        reprocessor=pipeline,
+        node_writer=node_writer,
+        store_backup=store_backup,
+        run_store=run_store,
+        graph=graph,
+    )
+    app.state.reprocess_service = reprocess_service
+
     await warn_if_behind_head(db)
     # Boot recovery: any capture left in-flight by a restart is marked failed (retryable).
     await pipeline.sweep_orphans()
@@ -263,6 +278,7 @@ async def lifespan(app: FastAPI):
         if scheduler is not None:
             scheduler.shutdown()
         await reindex_service.drain()
+        await reprocess_service.drain()
         await app.state.tag_consolidation_service.drain()
         await app.state.edge_consolidation_service.drain()
         await app.state.merge_service.drain()

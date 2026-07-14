@@ -64,7 +64,9 @@ def test_seeded_graph_vocabulary_defaults():
         "topic",
     ]
     assert s.edge_rels == ["involves", "about", "part_of", "led_to", "follows", "at"]
-    assert s.entity_like_types == ["person", "place", "topic", "idea", "event", "project"]
+    # `idea` is a CONTENT type (ADR-039, M3 task 11) — no longer minted as an entity hub, so it is
+    # not in the entity-hub set. entity_like_types now realizes the ADR-038/039 `entity_types`.
+    assert s.entity_like_types == ["person", "place", "topic", "event", "project"]
     assert s.entity_match_min_conf == 0.8
     assert s.mcp_capture_max_inflight == 2
 

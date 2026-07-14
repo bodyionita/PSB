@@ -21,7 +21,8 @@ NODE_TYPES = [
     "topic",
 ]
 EDGE_RELS = ["involves", "about", "part_of", "led_to", "follows", "at"]
-ENTITY_TYPES = ["person", "place", "topic", "idea", "event", "project"]
+# The entity-hub types (ADR-038/039). `idea` is a CONTENT type — not here (M3 task 11).
+ENTITY_TYPES = ["person", "place", "topic", "event", "project"]
 
 
 def _validate(parsed, *, max_nodes=8, max_tags=12, max_edges=12):
@@ -63,7 +64,7 @@ def test_parse_returns_none_for_garbage():
 
 
 def test_valid_node_keeps_known_type():
-    nodes, proposals = _validate(
+    nodes, proposals, _ = _validate(
         {"nodes": [{"title": "Q3 plan", "type": "idea", "plane": "professional", "body": "text"}]}
     )
     assert len(nodes) == 1
@@ -74,7 +75,7 @@ def test_valid_node_keeps_known_type():
 
 
 def test_unknown_type_coerces_to_memory_and_files_a_proposal():
-    nodes, proposals = _validate(
+    nodes, proposals, _ = _validate(
         {"nodes": [{"title": "t", "type": "recipe", "plane": "Ideas", "body": "b"}]}
     )
     assert nodes[0].type == "memory"
@@ -82,18 +83,18 @@ def test_unknown_type_coerces_to_memory_and_files_a_proposal():
 
 
 def test_missing_type_defaults_to_memory():
-    nodes, _ = _validate({"nodes": [{"title": "t", "plane": "Ideas", "body": "b"}]})
+    nodes, _, _ = _validate({"nodes": [{"title": "t", "plane": "Ideas", "body": "b"}]})
     assert nodes[0].type == "memory"
 
 
 def test_unknown_plane_becomes_none():
-    nodes, _ = _validate({"nodes": [{"title": "t", "plane": "Nonsense", "body": "b"}]})
+    nodes, _, _ = _validate({"nodes": [{"title": "t", "plane": "Nonsense", "body": "b"}]})
     assert nodes[0].plane is None  # no inbox-plane fallback anymore; plane is optional
     assert nodes[0].planes == ()
 
 
 def test_planes_filtered_and_superset_of_primary():
-    nodes, _ = _validate(
+    nodes, _, _ = _validate(
         {
             "nodes": [
                 {
@@ -113,18 +114,18 @@ def test_planes_filtered_and_superset_of_primary():
 
 
 def test_occurred_kept_only_when_valid_partial_iso():
-    good, _ = _validate(
+    good, _, _ = _validate(
         {"nodes": [{"title": "t", "type": "memory", "occurred": "2025-07", "body": "b"}]}
     )
     assert good[0].occurred == "2025-07"
-    bad, _ = _validate(
+    bad, _, _ = _validate(
         {"nodes": [{"title": "t", "type": "memory", "occurred": "last summer", "body": "b"}]}
     )
     assert bad[0].occurred is None
 
 
 def test_entities_kept_with_known_type_and_rel():
-    nodes, _ = _validate(
+    nodes, _, _ = _validate(
         {
             "nodes": [
                 {
@@ -143,7 +144,7 @@ def test_entities_kept_with_known_type_and_rel():
 
 
 def test_entity_unknown_type_or_rel_is_dropped_with_a_proposal():
-    nodes, proposals = _validate(
+    nodes, proposals, _ = _validate(
         {
             "nodes": [
                 {
@@ -164,7 +165,7 @@ def test_entity_unknown_type_or_rel_is_dropped_with_a_proposal():
 
 
 def test_tags_cleaned_lowercased_deduped_and_capped():
-    nodes, _ = _validate(
+    nodes, _, _ = _validate(
         {
             "nodes": [
                 {
@@ -182,7 +183,7 @@ def test_tags_cleaned_lowercased_deduped_and_capped():
 
 def test_nodes_capped_at_max():
     parsed = {"nodes": [{"title": f"t{i}", "plane": "Ideas", "body": "b"} for i in range(20)]}
-    nodes, _ = _validate(parsed, max_nodes=3)
+    nodes, _, _ = _validate(parsed, max_nodes=3)
     assert len(nodes) == 3
 
 
@@ -195,14 +196,57 @@ def test_nodes_missing_title_or_body_are_dropped():
             {"title": "good", "body": "keeps"},
         ]
     }
-    nodes, _ = _validate(parsed)
+    nodes, _, _ = _validate(parsed)
     assert [n.title for n in nodes] == ["good"]
 
 
 def test_empty_or_malformed_returns_no_nodes():
-    assert _validate(None) == ((), ())
-    assert _validate({"nodes": "nope"}) == ((), ())
-    assert _validate({}) == ((), ())
+    assert _validate(None) == ((), (), ())
+    assert _validate({"nodes": "nope"}) == ((), (), ())
+    assert _validate({}) == ((), (), ())
+
+
+# --- entity-type coercion guard (ADR-039, M3 task 11) -----------------------------------
+
+
+def test_entity_typed_content_node_is_coerced_to_memory():
+    # The organizer must never emit a person/place/… as a content node; the structural guard
+    # coerces it to memory, keeping the body + entities so the narrative + mentions survive.
+    nodes, proposals, coerced = _validate(
+        {
+            "nodes": [
+                {
+                    "title": "How I know Horia",
+                    "type": "person",
+                    "body": "Horia is the husband of Madalina.",
+                    "entities": [{"name": "Horia", "type": "person", "rel": "involves"}],
+                }
+            ]
+        }
+    )
+    assert nodes[0].type == "memory"  # coerced
+    assert nodes[0].body == "Horia is the husband of Madalina."  # content kept
+    assert nodes[0].entities[0].name == "Horia"  # mentions kept → hub still minted downstream
+    assert coerced == ("person",)
+    assert proposals == ()  # coercion is not a vocab proposal (the type is known, just misused)
+
+
+def test_each_entity_type_is_coerced():
+    for etype in ENTITY_TYPES:
+        nodes, _, coerced = _validate(
+            {"nodes": [{"title": "t", "type": etype, "body": "b"}]}
+        )
+        assert nodes[0].type == "memory", etype
+        assert coerced == (etype,)
+
+
+def test_content_types_are_not_coerced():
+    for ctype in ("memory", "idea", "insight", "conversation"):
+        nodes, _, coerced = _validate(
+            {"nodes": [{"title": "t", "type": ctype, "body": "b"}]}
+        )
+        assert nodes[0].type == ctype, ctype
+        assert coerced == ()
 
 
 # --- inbox_fallback_node ----------------------------------------------------------------

@@ -342,20 +342,47 @@ class FakeProfileStore:
 
 class FakeAliasStore:
     """In-memory alias index for resolver tests. ``candidates_by_key`` maps a
-    (normalized_name, type) to the candidates a mention resolves against."""
+    (normalized_name, type) to the exact-leg candidates a mention resolves against; ``entities`` is
+    a flat pool of :class:`EntityCandidate` scanned by the **token-overlap** leg (ADR-040) when the
+    resolver passes significant ``tokens``."""
 
     def __init__(
-        self, *, candidates_by_key: dict[tuple[str, str], list[EntityCandidate]] | None = None
+        self,
+        *,
+        candidates_by_key: dict[tuple[str, str], list[EntityCandidate]] | None = None,
+        entities: list[EntityCandidate] | None = None,
     ) -> None:
         self._by_key = candidates_by_key or {}
+        self._entities = list(entities or [])
         self.queries: list[tuple[str, tuple[str, ...]]] = []
+        self.token_calls: list[tuple[str, ...]] = []
 
-    async def find_candidates(self, name: str, *, types: list[str]) -> list[EntityCandidate]:
+    async def find_candidates(
+        self,
+        name: str,
+        *,
+        types: list[str],
+        tokens: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[EntityCandidate]:
         self.queries.append((name, tuple(types)))
+        self.token_calls.append(tuple(tokens or []))
         out: list[EntityCandidate] = []
         for t in types:
             out.extend(self._by_key.get((normalize_alias(name), t), []))
-        return out
+        if tokens:  # token-overlap leg: same-type hubs sharing a significant token
+            tokset = set(tokens)
+            seen = {c.id for c in out}
+            for c in self._entities:
+                if c.type not in set(types) or c.id in seen:
+                    continue
+                surf_tokens: set[str] = set()
+                for s in [c.title or "", *c.aliases]:
+                    surf_tokens.update(normalize_alias(s).split())
+                if surf_tokens & tokset:
+                    out.append(c)
+                    seen.add(c.id)
+        return out[:limit] if limit is not None else out
 
 
 class FakeReviewQueue:

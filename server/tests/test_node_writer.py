@@ -242,6 +242,106 @@ def test_merged_alias_union_dedupes_and_keeps_loser_forms():
     assert union == ["alex", "Alex", "Alexandru Popescu", "alexandru", "al"]
 
 
+# --- Diacritic folding at the write chokepoint (ADR-041, M3 task 11) ---
+
+
+def test_write_nodes_folds_every_derived_field(tmp_path: Path):
+    writer = NodeWriter(str(tmp_path))
+    [written] = writer.write_nodes(
+        [
+            NodeDocument(
+                id="22222222-2222-4222-8222-222222222222",
+                type="person",
+                title="Mădălina Fairfax",
+                body="Ștefan met Mădălina in Iași.",
+                created_local=CREATED,
+                source="text",
+                tags=("prietenă",),
+                aliases=("Mădă", "Mădălina"),
+                disambig="prietenă din copilărie",
+            )
+        ]
+    )
+    # Filename slug is folded (no `m-d-lina` mangling).
+    assert "madalina-fairfax" in written.store_path
+    raw = (tmp_path / Path(*written.store_path.split("/"))).read_text(encoding="utf-8")
+    # Nothing written to the store carries a diacritic — every derived field folded.
+    assert "ă" not in raw and "ș" not in raw and "Ș" not in raw and "ț" not in raw
+    meta = parse_node_metadata(raw, store_path=written.store_path, fallback_created=CREATED)
+    assert meta.title == "Madalina Fairfax"
+    assert meta.aliases == ["Mada", "Madalina"]
+    assert meta.disambig == "prietena din copilarie"
+    assert meta.tags == ["prietena"]
+    assert "Stefan met Madalina in Iasi." in raw
+
+
+def test_set_aliases_folds(tmp_path: Path):
+    writer = NodeWriter(str(tmp_path))
+    [hub] = writer.write_nodes(
+        [
+            NodeDocument(
+                id="33333333-3333-4333-8333-333333333333",
+                type="person",
+                title="Horia",
+                body="",
+                created_local=CREATED,
+                source="text",
+                aliases=("Horia",),
+            )
+        ]
+    )
+    writer.set_aliases(hub.store_path, ["Horia", "Horia Ashford"])
+    raw = (tmp_path / Path(*hub.store_path.split("/"))).read_text(encoding="utf-8")
+    meta = parse_node_metadata(raw, store_path=hub.store_path, fallback_created=CREATED)
+    assert meta.aliases == ["Horia", "Horia Ashford"]
+
+
+# --- Type-aware removal + full reset (ADR-038 / ADR-042, M3 task 11) ---
+
+
+def test_remove_nodes_keeps_entity_hub_types(tmp_path: Path):
+    writer = NodeWriter(str(tmp_path))
+    [mem] = writer.write_nodes([_memory_doc()])
+    [hub] = writer.write_nodes(
+        [
+            NodeDocument(
+                id="44444444-4444-4444-8444-444444444444",
+                type="person",
+                title="Alex",
+                body="",
+                created_local=CREATED,
+                source="text",
+                aliases=("Alex",),
+            )
+        ]
+    )
+    removed = writer.remove_nodes([mem.store_path, hub.store_path], keep_types={"person"})
+    assert removed == [mem.store_path]  # only the content node removed
+    assert not (tmp_path / Path(*mem.store_path.split("/"))).exists()
+    assert (tmp_path / Path(*hub.store_path.split("/"))).exists()  # hub preserved (ADR-038)
+
+
+def test_remove_all_nodes_clears_the_store(tmp_path: Path):
+    writer = NodeWriter(str(tmp_path))
+    written = writer.write_nodes(
+        [
+            _memory_doc(),
+            NodeDocument(
+                id="55555555-5555-4555-8555-555555555555",
+                type="person",
+                title="Bob",
+                body="",
+                created_local=CREATED,
+                source="text",
+            ),
+        ]
+    )
+    count = writer.remove_all_nodes(ignore={".git", "templates"})
+    assert count == 2
+    for w in written:
+        assert not (tmp_path / Path(*w.store_path.split("/"))).exists()
+
+
 def test_writer_merge_methods_atomic(tmp_path: Path):
     writer = NodeWriter(str(tmp_path))
     [loser] = writer.write_nodes(

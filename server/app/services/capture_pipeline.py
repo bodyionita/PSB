@@ -23,6 +23,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,14 @@ from ..capture.organizer import (
     validate_organizer_output,
 )
 from ..config import Settings
-from ..entities.resolver import EntityResolver, Mention, ResolutionResult, mention_key
+from ..entities.resolver import (
+    AliasAccretion,
+    EntityResolver,
+    Mention,
+    ResolutionResult,
+    mention_key,
+)
+from ..entities.store import normalize_alias
 from ..graph.node_writer import NodeDocument, NodeEdge, NodeWriter
 from ..indexing.indexer import NodeIndexer
 from ..providers.base import ChatMessage, ProviderUnavailable, TranscriptResult
@@ -95,6 +103,7 @@ class _Interaction:
         self.kind = kind
         self.stt: dict[str, Any] | None = None
         self.organize: dict[str, Any] | None = None
+        self.entities: dict[str, Any] | None = None
         self.nudge: dict[str, Any] | None = None
         self.index: dict[str, Any] | None = None
         self.timings_ms: dict[str, int] = {}
@@ -112,10 +121,23 @@ class _Interaction:
             "kind": self.kind,
             "stt": self.stt,
             "organize": self.organize,
+            "entities": self.entities,
             "nudge": self.nudge,
             "index": self.index,
             "timings_ms": self.timings_ms,
         }
+
+
+@dataclass(frozen=True)
+class ReprocessOne:
+    """Outcome of re-ingesting one capture during ``reprocess-all`` (ADR-042) — aggregated into the
+    op's ``agent_runs`` summary."""
+
+    capture_id: str
+    ok: bool
+    node_count: int = 0
+    used_inbox_fallback: bool = False
+    error: str | None = None
 
 
 class CaptureError(Exception):
@@ -228,6 +250,45 @@ class CapturePipeline:
         await self._store.set_follow_up_answer(capture_id, answer)
         self._spawn(self._reprocess_with_follow_up(capture_id))
 
+    async def reprocess_capture(self, capture_id: str) -> ReprocessOne:
+        """Re-ingest ONE capture from its stored raw input through the current pipeline (ADR-042).
+
+        Awaited (not spawned) so the ``reprocess-all`` op can replay captures in **chronological
+        order** — each capture's entities are in the DB before the next resolves, so alias accretion
+        rebuilds faithfully. Unlike the admin reorganize, this mirrors ``_process``'s write
+        behaviour: an unusable organize writes the never-lose ``inbox/`` node (there is no prior
+        good set to protect after a reset). No re-transcription (raw text is already stored) and no
+        nudge. Best-effort per capture (rule 7): a failure marks the capture ``failed`` and is
+        reported, never aborting the whole reprocess. Assumes the caller has reset derived state, so
+        it does not remove old nodes."""
+        record = await self._store.get(capture_id)
+        if record is None:
+            return ReprocessOne(capture_id=capture_id, ok=False, error="capture vanished")
+        try:
+            inter = _Interaction(capture_id=capture_id, kind=f"{record.kind}-reprocess")
+            organize = await self._organize(self._combined_text(record))
+            created_local = self._local(record.created_at)
+            paths = await self._resolve_and_write(
+                organize, capture_id=capture_id, created_local=created_local,
+                source=record.kind, inter=inter,
+            )
+            await self._store.set_node_paths(capture_id, paths)
+            await self._index_nodes(paths)
+            await self._store.mark_status(capture_id, INDEXED)
+            await self._backup.request_commit(f"reprocess {capture_id}")
+            return ReprocessOne(
+                capture_id=capture_id,
+                ok=True,
+                node_count=len(paths),
+                used_inbox_fallback=organize.used_fallback,
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad capture must not abort the reprocess
+            logger.exception("reprocess of capture %s failed", capture_id)
+            await self._safe_mark_failed(capture_id, f"reprocess: {type(exc).__name__}: {exc}")
+            return ReprocessOne(
+                capture_id=capture_id, ok=False, error=f"{type(exc).__name__}: {exc}"
+            )
+
     async def reorganize_capture(self, capture_id: str) -> None:
         """Re-run organize on an existing capture's stored raw text and REPLACE its notes — the
         admin re-run path (e.g. re-deriving notes after the organizer prompt changed to
@@ -264,7 +325,13 @@ class CapturePipeline:
             self._spawn(self._reprocess_with_follow_up(capture_id))
             return
         if record.node_paths:
-            await asyncio.to_thread(self._writer.remove_nodes, list(record.node_paths))
+            # Keep any entity hubs this capture minted (shared substrate — ADR-038); the retry's
+            # fresh pass re-links to them by their live alias. Only the content nodes are removed
+            # so the re-run can't duplicate them.
+            keep = await self._entity_hub_types()
+            await asyncio.to_thread(
+                self._writer.remove_nodes, list(record.node_paths), keep_types=keep
+            )
             await self._store.set_node_paths(capture_id, [])
         self._spawn(self._process(capture_id))
 
@@ -331,13 +398,15 @@ class CapturePipeline:
                 "model": organize.model_used or None,
                 "fallback_used": organize.provider_fallback_used,
                 "inbox_fallback": organize.used_fallback,
+                "coerced_entity_nodes": list(organize.coerced_entity_types),
             }
             inter.model_used = organize.model_used or inter.model_used
             inter.fallback_used = inter.fallback_used or organize.provider_fallback_used
 
             created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
-                organize, capture_id=capture_id, created_local=created_local, source=record.kind
+                organize, capture_id=capture_id, created_local=created_local,
+                source=record.kind, inter=inter,
             )
             await self._store.set_node_paths(capture_id, paths)
             # `written` reflects nodes actually on disk (matters for a future retry-resume).
@@ -367,22 +436,27 @@ class CapturePipeline:
 
     async def _reprocess_with_follow_up(self, capture_id: str) -> None:
         # Pass 2 (ADR-019 §2): re-organize the original capture + the follow-up answer.
-        def _combined(record: CaptureRecord) -> str:
-            return (
-                f"{record.raw_text or ''}\n\n"
-                f"[Follow-up] {record.follow_up_question}\n"
-                f"[Answer] {record.follow_up_answer}"
-            ).strip()
-
         await self._replace_notes_via_reorganize(
             capture_id,
-            text_of=_combined,
+            text_of=self._combined_text,
             kind_suffix="-followup",
             commit_reason=f"capture {capture_id} follow-up",
             fallback_msg=(
                 "follow-up re-organize unavailable; original notes kept (retry to re-apply)"
             ),
         )
+
+    @staticmethod
+    def _combined_text(record: CaptureRecord) -> str:
+        """The capture's raw text, plus the follow-up Q+A when one was answered (ADR-019 §2). This
+        is the text a fresh organize (Pass 2 / reprocess-all, ADR-042) replays."""
+        if not record.follow_up_answer:
+            return record.raw_text or ""
+        return (
+            f"{record.raw_text or ''}\n\n"
+            f"[Follow-up] {record.follow_up_question}\n"
+            f"[Answer] {record.follow_up_answer}"
+        ).strip()
 
     async def _reorganize(self, capture_id: str) -> None:
         # Admin re-organize: re-run organize on the stored raw capture (e.g. to re-derive notes
@@ -429,6 +503,7 @@ class CapturePipeline:
                 "model": organize.model_used or None,
                 "fallback_used": organize.provider_fallback_used,
                 "inbox_fallback": organize.used_fallback,
+                "coerced_entity_nodes": list(organize.coerced_entity_types),
             }
             inter.model_used = organize.model_used or inter.model_used
             inter.fallback_used = organize.provider_fallback_used
@@ -437,12 +512,18 @@ class CapturePipeline:
                 await self._finish_run(run_id, RUN_FAILED, inter, error=fallback_msg)
                 return
 
-            # Soft-delete the old nodes, write the fresh set, REPLACE node_paths. Removal is a
-            # filesystem unlink; git history retains the content (ADR-014 §3).
-            await asyncio.to_thread(self._writer.remove_nodes, list(record.node_paths))
+            # Soft-delete the old CONTENT nodes, write the fresh set, REPLACE node_paths. Entity
+            # hubs this capture minted are KEPT (shared substrate — ADR-038): deleting them would
+            # dangle every other node's edge; the fresh pass re-links to the live hub by alias.
+            # Removal is a filesystem unlink; git history retains the content (ADR-014 §3).
+            keep = await self._entity_hub_types()
+            await asyncio.to_thread(
+                self._writer.remove_nodes, list(record.node_paths), keep_types=keep
+            )
             created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
-                organize, capture_id=capture_id, created_local=created_local, source=record.kind
+                organize, capture_id=capture_id, created_local=created_local,
+                source=record.kind, inter=inter,
             )
             await self._store.set_node_paths(capture_id, paths)
             await self._store.mark_status(capture_id, WRITTEN)
@@ -502,7 +583,7 @@ class CapturePipeline:
             logger.warning("organize chain exhausted, using inbox fallback: %s", exc)
             return self._inbox_result(text)
 
-        nodes, proposals = validate_organizer_output(
+        nodes, proposals, coerced = validate_organizer_output(
             parse_organizer_json(result.text),
             planes=list(self._settings.planes),
             node_types=list(vocab.node_types),
@@ -512,6 +593,9 @@ class CapturePipeline:
             max_tags=self._settings.organizer_max_tags,
             max_edges=self._settings.organizer_max_edges,
         )
+        if coerced:
+            logger.info("organizer emitted %d entity-typed node(s), coerced to memory: %s",
+                        len(coerced), coerced)
         if not nodes:
             logger.info("organize produced no valid nodes, using inbox fallback")
             return self._inbox_result(text)
@@ -521,6 +605,7 @@ class CapturePipeline:
             used_fallback=False,
             model_used=result.model_used,
             provider_fallback_used=result.fallback_used,
+            coerced_entity_types=coerced,
         )
 
     async def _fetch_tag_vocabulary(self) -> list[str]:
@@ -541,6 +626,11 @@ class CapturePipeline:
     def _inbox_result(self, text: str) -> OrganizeResult:
         return OrganizeResult(nodes=(inbox_fallback_node(text),), used_fallback=True)
 
+    async def _entity_hub_types(self) -> set[str]:
+        """The effective entity-hub types (ADR-038) — the folders a reorganize/retry must never
+        delete. Uses the effective vocab so a governed entity-type addition is protected too."""
+        return set((await effective_vocabulary(self._vocab, self._settings)).entity_like_types)
+
     # --- entity resolution + node writing ------------------------------------------------
 
     async def _resolve_and_write(
@@ -550,9 +640,12 @@ class CapturePipeline:
         capture_id: str,
         created_local: datetime,
         source: str,
+        inter: _Interaction | None = None,
     ) -> list[str]:
         """Resolve entity mentions, build the node documents (content nodes + minted entities),
-        write them to the store, and file any vocab proposals. Returns the written store paths.
+        write them to the store, apply any alias accretions, and file any vocab proposals. Returns
+        the written **content** store paths (accreted hub files are re-indexed but are not this
+        capture's nodes, so they are not in ``node_paths``).
 
         Entity resolution is best-effort for *linking*: a resolver failure leaves an edge pending
         + a review item (never a guess, ADR-030 §3) — the content nodes still land (never-lose).
@@ -593,7 +686,52 @@ class CapturePipeline:
             source=source,
         )
         written = await asyncio.to_thread(self._writer.write_nodes, documents)
+
+        # Alias accretion (ADR-040 §4): record each newly-met surface form on the linked hub's file,
+        # then re-index those hubs so the alias index picks the form up for next time. Best-effort
+        # (rule 7) — an accretion failure never fails the capture; the content nodes are already
+        # durable. The accreted hubs belong to the entity substrate, so they are NOT in node_paths.
+        accreted = await self._apply_accretions(resolution.accretions)
+        if inter is not None:
+            inter.entities = {
+                "linked": sum(1 for r in resolution.resolutions if r.get("outcome") == "linked"),
+                "exact": sum(1 for r in resolution.resolutions if r.get("outcome") == "exact"),
+                "minted": len(resolution.new_documents),
+                "pending": resolution.pending,
+                "accreted": accreted,
+                "resolver_fallback": resolution.resolver_fallback_used,
+            }
         return [w.store_path for w in written]
+
+    async def _apply_accretions(self, accretions: list[AliasAccretion]) -> list[str]:
+        """Rewrite the linked hubs' ``aliases`` (folded by the writer) then re-index them so the
+        alias index reflects the new surface forms (ADR-040 §4). Accretions to the **same** hub in
+        one capture are merged (last-writer-wins would otherwise drop an addition). Returns the
+        accreted surface forms for the run summary. Best-effort: a missing hub file is skipped."""
+        if not accretions:
+            return []
+        by_path: dict[str, list[str]] = {}
+        surfaces: list[str] = []
+        for a in accretions:
+            merged = by_path.setdefault(a.store_path, [])
+            seen = {normalize_alias(x) for x in merged}
+            for alias in a.aliases:
+                if normalize_alias(alias) not in seen:
+                    merged.append(alias)
+                    seen.add(normalize_alias(alias))
+            surfaces.append(a.surface)
+        applied: list[str] = []
+        for path, aliases in by_path.items():
+            try:
+                await asyncio.to_thread(self._writer.set_aliases, path, aliases)
+                applied.append(path)
+            except FileNotFoundError:
+                logger.warning("accretion: hub file %s is gone; alias not accreted (skipped)", path)
+            except Exception:  # noqa: BLE001 — accretion is best-effort, never fails the capture
+                logger.exception("accretion: could not rewrite %s (ignored)", path)
+        if applied:
+            await self._index_nodes(applied)
+        return surfaces
 
     def _pending_edges_by_key(
         self,

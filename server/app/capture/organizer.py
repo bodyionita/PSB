@@ -21,9 +21,11 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from ..text import fold_diacritics
+
 # --- Versioned prompt constants (ADR-019 §4). Bump the suffix on any wording change. ---
 
-ORGANIZER_PROMPT_VERSION = "organizer-v4"  # v4: typed nodes + entities + occurred (M3 pivot)
+ORGANIZER_PROMPT_VERSION = "organizer-v5"  # v5: entity types are mention-only (ADR-039)
 NUDGE_PROMPT_VERSION = "nudge-v2"  # v2: sourced from the raw capture; explicit language match
 
 ORGANIZER_SYSTEM_PROMPT = """\
@@ -39,10 +41,13 @@ Return ONLY a JSON object, no prose, in exactly this shape:
 Rules:
 - Split the capture into as few atomic nodes as the content honestly needs. One coherent thought =
   one node. Only split when the capture genuinely spans separate topics or life areas.
-- "type" is the node's kind. Choose from: {node_types}. Guidance: memory = something that
-  happened / was felt; idea = an actionable proposal; insight = a realization; conversation = a
-  discussion; event = a bounded happening; project = an ongoing directed effort; topic = a
-  recurring theme; person/place = entities. If nothing fits, use "memory".
+- "type" is the node's kind. A node is CONTENT: choose one of memory / idea / insight /
+  conversation. Guidance: memory = something that happened / was felt; idea = an actionable
+  proposal; insight = a realization; conversation = a discussion. If nothing fits, use "memory".
+- NEVER make a node whose type is a person, place, organization, project, event or topic. Those are
+  NOT content nodes — they appear ONLY inside a node's "entities" list (below). A memory ABOUT a
+  person is a "memory" node that lists that person as an entity — never a "person" node. (The full
+  type vocabulary, for reference, is {node_types}, but you only ever emit the content types above.)
 - "occurred" is when the thing happened, as a partial ISO date ("2025", "2025-07", or
   "2025-07-10") — ONLY when the text implies a time. Never invent one; use null if unknown.
 - "plane" is the node's primary life area, one of {planes} (case-insensitive), or null if unclear.
@@ -130,6 +135,8 @@ class OrganizeResult:
     used_fallback: bool = field(default=False)
     model_used: str = field(default="")
     provider_fallback_used: bool = field(default=False)
+    # Entity types the structural guard coerced to `memory` (ADR-039) — surfaced in agent_runs.
+    coerced_entity_types: tuple[str, ...] = ()
 
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
@@ -170,9 +177,10 @@ _TAG_INVALID = re.compile(r"[^a-z0-9_/-]+")
 
 def _slugify_tag(raw: str) -> str:
     """Reduce a free-form tag to a valid slug (02-data-model): lower-case, no spaces, hyphenated.
-    Allows letters/digits/``_ - /`` and MUST contain a non-numeric character; a purely-numeric or
-    empty result is dropped (returns "")."""
-    tag = _TAG_INVALID.sub("-", raw.strip().lstrip("#").strip().lower())
+    Diacritics are **folded to ASCII first** (ADR-041) so a base letter survives instead of
+    collapsing to ``-``. Allows letters/digits/``_ - /`` and MUST contain a non-numeric character;
+    a purely-numeric or empty result is dropped (returns "")."""
+    tag = _TAG_INVALID.sub("-", fold_diacritics(raw).strip().lstrip("#").strip().lower())
     tag = re.sub(r"-{2,}", "-", tag).strip("-/_")
     return tag if any(c.isalpha() for c in tag) else ""
 
@@ -202,12 +210,16 @@ def validate_organizer_output(
     max_nodes: int,
     max_tags: int,
     max_edges: int,
-) -> tuple[tuple[OrganizerNode, ...], tuple[dict, ...]]:
+) -> tuple[tuple[OrganizerNode, ...], tuple[dict, ...], tuple[str, ...]]:
     """Pure validation of a parsed organize object into safe :class:`OrganizerNode`s + vocab
-    proposals (ADR-027/030/031).
+    proposals + the entity types coerced to ``memory`` (ADR-027/030/031/039).
 
     - ``type`` is validated against ``node_types``; an unknown type coerces to ``memory`` and files
-      a ``node_type`` proposal.
+      a ``node_type`` proposal. A **known entity type** (in ``entity_types``) is coerced to
+      ``memory`` too (ADR-039 structural guard — entity types are mention-only; a person/place/…
+      node is a category error), keeping the node's body/title/tags/planes/entities so the narrative
+      survives as a memory and its mentions still mint the proper thin hubs. Coerced entity types
+      are returned (third tuple) so the pipeline can surface the count in ``agent_runs`` (rule 7).
     - ``plane`` normalises to a configured plane's canonical spelling (case-insensitive) or None;
       ``planes`` is filtered to configured planes and made a superset of ``plane``.
     - ``occurred`` is kept only when it is a valid partial-ISO date (never fabricated here).
@@ -216,20 +228,22 @@ def validate_organizer_output(
     - a node with an empty title/body after stripping is dropped; at most ``max_nodes`` nodes,
       ``max_tags`` tags, ``max_edges`` entity edges per node.
 
-    Returns ``((), ())`` when nothing usable is present — the caller then applies the inbox
+    Returns ``((), (), ())`` when nothing usable is present — the caller then applies the inbox
     fallback.
     """
     if not isinstance(parsed, dict):
-        return (), ()
+        return (), (), ()
     raw_nodes = parsed.get("nodes")
     if not isinstance(raw_nodes, list):
-        return (), ()
+        return (), (), ()
 
     plane_lookup = {p.strip().lower(): p for p in planes}
     known_types = {t.lower(): t for t in node_types}
     known_rels = {r.lower(): r for r in edge_rels}
     known_entity = {t.lower(): t for t in entity_types}
+    entity_type_set = set(known_entity)  # lower-cased entity types — the coercion guard's target
     proposals: list[dict] = []
+    coerced: list[str] = []
 
     def _propose(vocab: str, value: str) -> None:
         item = {"vocab": vocab, "value": value}
@@ -252,7 +266,11 @@ def validate_organizer_output(
         node_type = "memory"
         if isinstance(raw_type, str) and raw_type.strip():
             canon = known_types.get(raw_type.strip().lower())
-            if canon:
+            if canon and canon.lower() in entity_type_set:
+                # Entity types are mention-only (ADR-039): coerce to a memory, keep the content.
+                # The narrative survives and its `entities` still mint/link the proper thin hub.
+                coerced.append(canon)
+            elif canon:
                 node_type = canon
             else:
                 _propose("node_type", raw_type.strip())  # unknown ⇒ memory + proposal (ADR-027)
@@ -287,7 +305,7 @@ def validate_organizer_output(
         if len(result) >= max_nodes:
             break
 
-    return tuple(result), tuple(proposals)
+    return tuple(result), tuple(proposals), tuple(coerced)
 
 
 def _clean_occurred(value: object) -> str | None:

@@ -214,6 +214,29 @@ class ReindexAcceptedResponse(BaseModel):
     run_id: str
 
 
+# --- Reprocess-all-from-raw (03-api §Admin, M3 task 11 / ADR-042) ---
+class ReprocessRequest(BaseModel):
+    """POST /admin/reprocess body. ``confirm=false`` (default) previews what a reprocess would
+    touch (no writes); ``confirm=true`` runs the destructive replay in the background."""
+
+    confirm: bool = False
+
+
+class ReprocessPreviewResponse(BaseModel):
+    """Preview (no writes): how many captures would replay + the current derived-node count, plus
+    any standing merges the rebuild cannot re-apply by id (reported, never silently dropped)."""
+
+    captures: int
+    nodes: int
+    merges: int
+
+
+class ReprocessAcceptedResponse(BaseModel):
+    """202 body for the confirm step — the ``agent_runs`` id of the background reprocess run."""
+
+    run_id: str
+
+
 # --- Entity merge (03-api §Admin, M3 / ADR-030 §5) ---
 class EntityMergeRequest(BaseModel):
     """POST /admin/entities/merge body. ``apply=false`` (default) proposes the inbound-edge

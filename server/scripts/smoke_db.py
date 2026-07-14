@@ -154,6 +154,17 @@ async def main() -> int:
         check("tombstoned 'Ghost' excluded", ghost_hit == [], str(ghost_hit))
         wrong_type = await alias.find_candidates("Alex", types=["idea"])
         check("type filter excludes person", wrong_type == [], str(wrong_type))
+        # ADR-040 (M3 task 11): the token-overlap leg — a variant surface form must surface the hub
+        # by a shared significant token, exercising the regexp_split_to_array + && SQL on real pg.
+        overlap = await alias.find_candidates(
+            "Alex Marsh", types=["person"], tokens=["alex", "marsh"], limit=8
+        )
+        check("token-overlap 'Alex Marsh' -> ALEX (shared token)",
+              ALEX in [c.id for c in overlap], str(overlap))
+        no_tokens = await alias.find_candidates("Nomatch", types=["person"], tokens=[], limit=8)
+        check("empty tokens -> exact-only (no fan-out)", no_tokens == [], str(no_tokens))
+        check("candidate carries store_path (for accretion)",
+              all(c.store_path for c in by_title), str(by_title))
 
         print("\n== PgEntityStore (task-6 merge/backfill/profile reads) ==")
         n = await ent.get_node(ALEX)

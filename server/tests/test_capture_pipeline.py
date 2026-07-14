@@ -14,7 +14,9 @@ import pytest
 
 from app.config import Settings
 from app.entities.resolver import EntityResolver
-from app.graph.node_writer import NodeWriter
+from app.entities.store import EntityCandidate
+from app.graph.node_writer import NodeDocument, NodeWriter
+from app.indexing.frontmatter import parse_node_metadata
 from app.providers.registry import ProviderRegistry
 from app.services.capture_pipeline import (
     CaptureNotFound,
@@ -92,6 +94,7 @@ def _make_pipeline(
     run_store: object | None = None,
     indexer: FakeIndexer | None = None,
     tag_vocabulary: object | None = None,
+    alias_store: FakeAliasStore | None = None,
 ):
     settings = Settings(
         graph_store_path=str(tmp_path / "store"),
@@ -114,7 +117,10 @@ def _make_pipeline(
     indexer = indexer if indexer is not None else FakeIndexer()
     review = FakeReviewQueue()
     resolver = EntityResolver(
-        settings=settings, alias_store=FakeAliasStore(), review_queue=review, registry=registry
+        settings=settings,
+        alias_store=alias_store if alias_store is not None else FakeAliasStore(),
+        review_queue=review,
+        registry=registry,
     )
     pipeline = CapturePipeline(
         settings=settings,
@@ -252,6 +258,91 @@ async def test_reorganize_replaces_nodes(tmp_path: Path):
     assert any(r.details.get("kind", "").endswith("-reorganize") for r in runs.runs.values())
 
 
+def _organizer_json_entity(title: str, entity_name: str = "Alex") -> str:
+    node = {
+        "title": title, "type": "memory", "plane": "Ideas", "planes": ["Ideas"],
+        "tags": ["x"], "body": "b",
+        "entities": [{"name": entity_name, "type": "person", "rel": "involves"}],
+    }
+    return json.dumps({"nodes": [node]})
+
+
+async def test_reorganize_keeps_entity_hubs(tmp_path: Path):
+    # ADR-038: a reorganize deletes the content nodes but NEVER the shared entity hubs, so no
+    # other node's edge to the hub is left dangling.
+    def responder(messages):
+        if "organize a person's raw capture" in messages[0].content:
+            title = "Second" if responder.calls else "First"
+            responder.calls += 1
+            return _organizer_json_entity(title)
+        return "nudge?"
+
+    responder.calls = 0
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, store, _, _, root = _make_pipeline(tmp_path, chat=chat)
+
+    cid = await pipeline.create_text_capture("text", created_at=CREATED)
+    await pipeline.drain()
+    hub = next(p for p in store.records[cid].node_paths if p.startswith("person/"))
+    assert (root / hub).exists()
+
+    await pipeline.reorganize_capture(cid)
+    await pipeline.drain()
+
+    # The originally-minted hub is preserved (ADR-038); node_paths refreshed to the new content.
+    assert (root / hub).exists()
+    assert any(p.startswith("memory/") and "second" in p for p in store.records[cid].node_paths)
+
+
+async def test_pipeline_coerces_entity_typed_node_to_memory(tmp_path: Path):
+    # ADR-039: an entity-typed content node the model emits is coerced to memory (+ surfaced).
+    def responder(messages):
+        if "organize a person's raw capture" in messages[0].content:
+            return json.dumps({"nodes": [{
+                "title": "How I know Horia", "type": "person", "plane": "Ideas",
+                "planes": ["Ideas"], "tags": [], "body": "Horia is my friend", "entities": [],
+            }]})
+        return "nudge?"
+
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, store, _, runs, _ = _make_pipeline(tmp_path, chat=chat)
+    cid = await pipeline.create_text_capture("x", created_at=CREATED)
+    await pipeline.drain()
+
+    assert store.records[cid].node_paths[0].startswith("memory/")  # coerced person → memory
+    run = next(iter(runs.runs.values()))
+    assert run.details["organize"]["coerced_entity_nodes"] == ["person"]
+
+
+async def test_capture_accretes_variant_alias_onto_existing_hub(tmp_path: Path):
+    # ADR-040 §4: a confident link under a new surface form accretes it onto the hub's file.
+    writer = NodeWriter(str(tmp_path / "store"))
+    [hub] = writer.write_nodes([NodeDocument(
+        id="horia-1", type="person", title="Horia", body="",
+        created_local=CREATED, source="text", aliases=("Horia",),
+    )])
+    alias = FakeAliasStore(entities=[EntityCandidate(
+        id="horia-1", type="person", title="Horia", aliases=["Horia"], store_path=hub.store_path,
+    )])
+
+    def responder(messages):
+        system = messages[0].content
+        if "organize a person's raw capture" in system:
+            return _organizer_json_entity("Standup", entity_name="Horia Fenwick")
+        if "You resolve which existing entity" in system:
+            return '{"choice": "horia-1", "conf": 0.95}'
+        return "nudge?"
+
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, _, _, _, root = _make_pipeline(tmp_path, chat=chat, alias_store=alias)
+    await pipeline.create_text_capture("Talked to Horia Fenwick at standup", created_at=CREATED)
+    await pipeline.drain()
+
+    raw = (root / Path(*hub.store_path.split("/"))).read_text(encoding="utf-8")
+    meta = parse_node_metadata(raw, store_path=hub.store_path, fallback_created=CREATED)
+    assert "Horia Fenwick" in meta.aliases  # accreted onto the existing hub
+
+
 async def test_reorganize_missing_capture_raises(tmp_path: Path):
     pipeline, *_ = _make_pipeline(tmp_path)
     with pytest.raises(CaptureNotFound):
@@ -275,6 +366,7 @@ async def test_capture_writes_agent_runs_interaction_row(tmp_path: Path):
         "model": "fake-chat",
         "fallback_used": False,
         "inbox_fallback": False,
+        "coerced_entity_nodes": [],
     }
     assert "total" in run.details["timings_ms"]
 

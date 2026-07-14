@@ -20,11 +20,12 @@ from __future__ import annotations
 import os
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
 from ..indexing.chunking import split_frontmatter
+from ..text import fold_diacritics
 
 # The generation stamp written into every pipeline node's frontmatter (02 §2). Retrofit passes
 # target "everything below vN" instead of re-walking the whole graph (ADR-031 §4). Bump on any
@@ -38,11 +39,12 @@ _MAX_SLUG_LEN = 80  # keep filenames comfortably under path limits
 def slugify(title: str) -> str:
     """Filename-safe slug: lower-case, non-alphanumerics collapsed to ``-``, length-bounded.
 
-    Never returns empty (falls back to ``"untitled"``). This is a *filename* slug — distinct from
-    the stricter Obsidian *tag* slug (``organizer._slugify_tag``), which must also stay valid as a
-    ``#tag``.
+    Diacritics are **folded to ASCII first** (ADR-041), so a Romanian base letter survives instead
+    of collapsing to ``-`` (``"Mădălina"`` → ``madalina``, not ``m-d-lina``). Never returns empty
+    (falls back to ``"untitled"``). This is a *filename* slug — distinct from the stricter *tag*
+    slug (``organizer._slugify_tag``), which folds too and must also stay valid as a ``#tag``.
     """
-    slug = _SLUG_INVALID.sub("-", title.strip().lower()).strip("-")
+    slug = _SLUG_INVALID.sub("-", fold_diacritics(title).strip().lower()).strip("-")
     slug = slug[:_MAX_SLUG_LEN].strip("-")
     return slug or "untitled"
 
@@ -405,6 +407,20 @@ def _unique(values: list[str]) -> list[str]:
     return seen
 
 
+def _fold_document(node: NodeDocument) -> NodeDocument:
+    """A copy of ``node`` with every derived text field diacritic-folded (ADR-041). Identity/
+    structural fields (id/type/source/plane/planes/occurred/edges) are ASCII by construction and
+    left untouched; the folded fields are the ones a person's language flows into."""
+    return replace(
+        node,
+        title=fold_diacritics(node.title),
+        body=fold_diacritics(node.body),
+        tags=tuple(fold_diacritics(t) for t in node.tags),
+        aliases=tuple(fold_diacritics(a) for a in node.aliases),
+        disambig=fold_diacritics(node.disambig) if node.disambig else None,
+    )
+
+
 @dataclass(frozen=True)
 class WrittenNode:
     """The result of writing one node — its id and store-relative (``/``-separated) path."""
@@ -440,12 +456,16 @@ class NodeWriter:
     def write_nodes(self, nodes: list[NodeDocument]) -> list[WrittenNode]:
         """Write a set of nodes, each to its ``<folder>/<slug>--<shortid>.md``. Atomic per file.
 
-        Returns the written nodes in input order (id + store-relative path). Edge targets are
-        already resolved by the caller, so ordering here is irrelevant to linking.
+        Every derived text field is **diacritic-folded** here (ADR-041) — the single write
+        chokepoint guarantees nothing in the store carries a diacritic (title, aliases, disambig,
+        tags, body; the slug folds inside :func:`slugify`). Returns the written nodes in input order
+        (id + store-relative path). Edge targets are already resolved by the caller, so ordering
+        here is irrelevant to linking.
         """
         reserved: set[str] = set()
         written: list[WrittenNode] = []
         for node in nodes:
+            node = _fold_document(node)
             filename = node_filename(
                 node_id=node.id,
                 node_type=node.type,
@@ -499,11 +519,14 @@ class NodeWriter:
         return count
 
     def set_aliases(self, store_path: str, aliases: tuple[str, ...] | list[str]) -> None:
-        """Set a node file's ``aliases:`` frontmatter line (merge alias union, ADR-030 §5). Atomic;
-        a missing file raises ``FileNotFoundError`` (the caller degrades, rule 7)."""
+        """Set a node file's ``aliases:`` frontmatter line — the merge alias union (ADR-030 §5) and
+        alias accretion (ADR-040). The surface forms are diacritic-folded on the way to disk
+        (ADR-041), consistent with :meth:`write_nodes`. Atomic; a missing file raises
+        ``FileNotFoundError`` (the caller degrades, rule 7)."""
         path = self._root / Path(*store_path.split("/"))
         raw_text = path.read_text(encoding="utf-8")
-        self._atomic_write(path, upsert_frontmatter_list(raw_text, "aliases", aliases))
+        folded = [fold_diacritics(a) for a in aliases]
+        self._atomic_write(path, upsert_frontmatter_list(raw_text, "aliases", folded))
 
     def write_tombstone(
         self, store_path: str, *, node_id: str, node_type: str, survivor_id: str
@@ -517,15 +540,51 @@ class NodeWriter:
             node_id=node_id, node_type=node_type, survivor_id=survivor_id
         ))
 
-    def remove_nodes(self, store_paths: list[str]) -> None:
-        """Delete files by store-relative path (Pass-2 supersede / reorganize). Missing files are
-        ignored; git history retains the content once the backup service commits the deletion."""
+    def remove_nodes(
+        self, store_paths: list[str], *, keep_types: set[str] | tuple[str, ...] = ()
+    ) -> list[str]:
+        """Delete files by store-relative path (Pass-2 supersede / reorganize / retry). Returns the
+        paths actually removed. Missing files are ignored; git history retains the content once the
+        backup service commits the deletion.
+
+        ``keep_types`` are node types (top-level folders) to **skip** — a capture's reorganize/retry
+        passes the **entity-hub types** here so a shared entity hub the capture once minted is never
+        deleted (ADR-038: hubs are shared substrate, owned by the entity lifecycle, not by whichever
+        capture first mentioned the entity — deleting one leaves every other node's edge dangling).
+        An empty ``keep_types`` removes everything (the default for any non-capture caller).
+        """
+        keep = set(keep_types)
+        removed: list[str] = []
         for rel in store_paths:
+            if rel.split("/", 1)[0] in keep:
+                continue  # entity hub — shared substrate, never deleted by a capture (ADR-038)
             path = self._root / Path(*rel.split("/"))
             try:
                 path.unlink()
+                removed.append(rel)
             except FileNotFoundError:
                 continue
+        return removed
+
+    def remove_all_nodes(self, *, ignore: set[str] | tuple[str, ...] = ()) -> int:
+        """Delete **every** node file (``*.md``) in the store — the reset half of
+        ``reprocess-all-from-raw`` (ADR-042). Files under an ``ignore`` top-level segment
+        (``.git``/``.trash``/``templates``) are left alone. Returns the count removed. The type
+        folders remain (empty); git history retains every deleted file's content (ADR-014 §3), so a
+        reprocess is fully reversible by ``git`` even before the replay rewrites the store."""
+        if not self._root.exists():
+            return 0
+        ig = set(ignore)
+        count = 0
+        for abs_path in self._root.rglob("*.md"):
+            if not abs_path.is_file() or ig.intersection(abs_path.relative_to(self._root).parts):
+                continue
+            try:
+                abs_path.unlink()
+                count += 1
+            except FileNotFoundError:
+                continue
+        return count
 
     @staticmethod
     def _atomic_write(path: Path, contents: str) -> None:

@@ -33,6 +33,8 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from ..config import Settings
+from ..entities.resolver import significant_tokens
+from ..entities.store import normalize_alias
 from ..graph.node_writer import NodeDocument, NodeEdge, NodeWriter
 from ..indexing.indexer import NodeIndexer
 from ..indexing.store import IndexStore
@@ -154,7 +156,38 @@ class ReviewService:
         if choice not in candidate_ids:
             raise BadResolution("'choice' must be a candidate id, 'new', or 'maybe'")
         await self._materialize(choice, pending_edges)
+        await self._accrete_on_link(record, choice)  # ADR-040 §4 — review-resolution link path
         return STATUS_RESOLVED, {"choice": choice}
+
+    async def _accrete_on_link(self, record: ReviewRecord, entity_id: str) -> None:
+        """Accrete the mention's surface form onto the chosen hub's ``aliases`` (ADR-040 §4), so a
+        human's disambiguation teaches the hub the variant for next time. Guarded (skip short/low-
+        entropy forms) + idempotent (skip if already an alias); best-effort (rule 7)."""
+        mention = record.payload.get("mention") or {}
+        surface = str(mention.get("name") or "").strip()
+        if not surface or not significant_tokens(
+            surface,
+            min_len=self._settings.entity_min_token_len,
+            stop=set(self._settings.entity_stop_tokens),
+        ):
+            return
+        candidate = next(
+            (c for c in record.payload.get("candidates", []) if c.get("id") == entity_id), None
+        )
+        if candidate is None:
+            return
+        aliases = [a for a in (candidate.get("aliases") or []) if isinstance(a, str)]
+        if normalize_alias(surface) in {normalize_alias(a) for a in aliases}:
+            return
+        state = await self._index.get_index_state(entity_id)
+        if state is None:
+            return
+        try:
+            await asyncio.to_thread(self._writer.set_aliases, state.store_path, [*aliases, surface])
+            await self._indexer.index_paths([state.store_path])
+            await self._backup.request_commit("review: accrete alias")
+        except FileNotFoundError:
+            logger.warning("review: hub %s gone; alias not accreted (skipped)", state.store_path)
 
     async def _mint_entity(self, record: ReviewRecord) -> tuple[str, str]:
         """Mint a thin entity hub for the ``new`` choice (title + alias, ADR-030 §4), then index."""

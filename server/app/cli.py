@@ -23,6 +23,7 @@ from .entities.profile_refresh import build_profile_refresh_service
 from .services.backup_jobs import build_backup_jobs
 from .services.git_repo import GitRepo
 from .services.reindex import build_reindex_service
+from .services.reprocess import build_reprocess_service
 from .services.store_backup import StoreBackupService
 
 logger = logging.getLogger(__name__)
@@ -40,8 +41,11 @@ BACKUP_JOBS: dict[str, str] = {
 REINDEX = "reindex"
 PROFILE_REFRESH = "profile-refresh"
 BACKFILL = "entity-backfill"
-# Every valid CLI job name (backup jobs + reindex + entity jobs).
-JOBS: tuple[str, ...] = (*BACKUP_JOBS.keys(), REINDEX, PROFILE_REFRESH, BACKFILL)
+# The reprocess-all-from-raw op (ADR-042). Destructive of derived state but confirm is implicit at
+# the CLI (an operator running it deliberately) — raw + approved vocab are preserved.
+REPROCESS = "reprocess-all"
+# Every valid CLI job name (backup jobs + reindex + entity jobs + reprocess).
+JOBS: tuple[str, ...] = (*BACKUP_JOBS.keys(), REINDEX, PROFILE_REFRESH, BACKFILL, REPROCESS)
 
 
 async def run_job(name: str) -> None:
@@ -54,6 +58,12 @@ async def run_job(name: str) -> None:
         await store_backup.ensure_ready()
         if name == REINDEX:
             await build_reindex_service(settings, db, store_backup).run_scheduled()
+        elif name == REPROCESS:
+            # Run the pass to completion in this process (apply spawns it in the background; drain
+            # awaits it) — the sanctioned path for the pre-prod local dry-run (ADR-042).
+            service = build_reprocess_service(settings, db, store_backup)
+            await service.apply()
+            await service.drain()
         elif name == PROFILE_REFRESH:
             await build_profile_refresh_service(settings, db).run_scheduled()
         elif name == BACKFILL:

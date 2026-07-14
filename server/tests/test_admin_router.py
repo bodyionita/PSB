@@ -10,6 +10,7 @@ from app.dependencies import (
     get_edge_consolidation_service,
     get_merge_service,
     get_reindex_service,
+    get_reprocess_service,
     get_store_backup,
     get_tag_consolidation_service,
     require_session,
@@ -91,6 +92,57 @@ def test_reindex_returns_409_when_already_running():
     resp = client.post(f"{PREFIX}/admin/reindex")
     assert resp.status_code == 409
     assert fake.calls == 1
+
+
+# --- POST /admin/reprocess (ADR-042, M3 task 11) ---
+class FakeReprocess:
+    """confirm=false → preview; confirm=true → apply (run_id, or None for the 409 path)."""
+
+    def __init__(self, *, run_id: str | None = "run-9") -> None:
+        from app.services.reprocess import ReprocessPreview
+
+        self._run_id = run_id
+        self._preview = ReprocessPreview(captures=4, nodes=12, merges=0)
+        self.applied = 0
+        self.previewed = 0
+
+    async def preview(self):
+        self.previewed += 1
+        return self._preview
+
+    async def apply(self):
+        self.applied += 1
+        return self._run_id
+
+
+def _reprocess_client(fake: FakeReprocess) -> TestClient:
+    app = FastAPI()
+    app.include_router(admin.router, prefix=PREFIX)
+    app.dependency_overrides[get_reprocess_service] = lambda: fake
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def test_reprocess_preview_returns_counts():
+    fake = FakeReprocess()
+    resp = _reprocess_client(fake).post(f"{PREFIX}/admin/reprocess", json={"confirm": False})
+    assert resp.status_code == 200
+    assert resp.json() == {"captures": 4, "nodes": 12, "merges": 0}
+    assert fake.previewed == 1 and fake.applied == 0
+
+
+def test_reprocess_confirm_returns_202_run_id():
+    fake = FakeReprocess(run_id="run-9")
+    resp = _reprocess_client(fake).post(f"{PREFIX}/admin/reprocess", json={"confirm": True})
+    assert resp.status_code == 202
+    assert resp.json() == {"run_id": "run-9"}
+    assert fake.applied == 1
+
+
+def test_reprocess_confirm_409_when_already_running():
+    fake = FakeReprocess(run_id=None)
+    resp = _reprocess_client(fake).post(f"{PREFIX}/admin/reprocess", json={"confirm": True})
+    assert resp.status_code == 409
 
 
 class FakeTagConsolidation:

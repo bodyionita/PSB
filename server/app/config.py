@@ -76,10 +76,16 @@ class Settings(BaseSettings):
         ]
     )
     edge_rels: CsvList = Field(default=["involves", "about", "part_of", "led_to", "follows", "at"])
-    # Types carrying the entity substrate (aliases/disambig/profiles — ADR-030); must be
-    # a subset of node_types (memory/conversation/insight are content, not entities).
+    # The entity-hub types (ADR-030) — the set the resolver mints as thin hubs and that carry the
+    # entity substrate (aliases/disambig/profiles). Must be a subset of node_types; the content
+    # types (memory/conversation/insight/**idea**) are NOT entities. This set realizes the ADR-038/
+    # ADR-039 `entity_types` concept: reorganize never deletes a node of one of these types (hubs
+    # are shared substrate) and the organizer may never emit one as a content node (coercion guard).
+    # `idea` was reclassified content-only in the M3 task-11 quality pass (ADR-039) — the resolver
+    # no longer mints idea hubs. The config/API key keeps its `entity_like_types` name (the web
+    # `GET /types` contract, ADR-006) even though it now realizes the ADRs' `entity_types`.
     entity_like_types: CsvList = Field(
-        default=["person", "place", "topic", "idea", "event", "project"]
+        default=["person", "place", "topic", "event", "project"]
     )
     # Entity-resolution confidence floor (ADR-030 §3, live-tuned at the M3 Accept):
     # below it the organizer never links — edge goes pending + entity-ambiguity review item.
@@ -145,6 +151,20 @@ class Settings(BaseSettings):
     # Entropy guard (ADR-032 §2): an alias shorter than this never *fuzzy* auto-links — it needs
     # an exact/normalized hit or it goes to review. Guards "Al"/"IT"/"mom" style collisions.
     entity_alias_min_fuzzy_len: int = 4
+    # Token-overlap candidate retrieval + alias accretion (ADR-040). A mention's surface form is
+    # tokenized (folded + whitespace-split); a token drives the fuzzy retrieval leg / is accreted
+    # only when it is at least this long AND not a stop token — so "Horia Fenwick" surfaces the
+    # existing "Horia" hub while "Ana"/"the"/initials never fan out to everything (low-entropy
+    # guard). A mention with no significant token falls back to exact-only retrieval.
+    entity_min_token_len: int = 4
+    # Low-entropy tokens excluded from token-overlap retrieval + accretion regardless of length
+    # (English store; generic words that would over-match). Extend as needed.
+    entity_stop_tokens: CsvList = Field(
+        default=[
+            "the", "and", "for", "with", "from", "this", "that", "her", "his", "their",
+            "our", "your", "mom", "dad", "guy", "man", "boss", "friend", "team", "work",
+        ]
+    )
 
     # --- Review queue (ADR-030 §3 / ADR-029) ---
     # Upper bound on the admin Review list (GET /review) — a personal store's pending queue is
@@ -286,6 +306,7 @@ class Settings(BaseSettings):
         "node_types",
         "edge_rels",
         "entity_like_types",
+        "entity_stop_tokens",
         "chat_chain",
         "distill_chain",
         "stt_chain",

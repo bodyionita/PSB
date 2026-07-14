@@ -19,6 +19,7 @@ from ..dependencies import (
     get_edge_consolidation_service,
     get_merge_service,
     get_reindex_service,
+    get_reprocess_service,
     get_store_backup,
     get_tag_consolidation_service,
     require_session,
@@ -34,6 +35,9 @@ from ..models import (
     InboundEdgeModel,
     MergeSideModel,
     ReindexAcceptedResponse,
+    ReprocessAcceptedResponse,
+    ReprocessPreviewResponse,
+    ReprocessRequest,
     TagConsolidateAcceptedResponse,
     TagConsolidateProposeResponse,
     TagConsolidateRequest,
@@ -45,6 +49,7 @@ from ..models import (
 from ..providers.base import ProviderUnavailable
 from ..services.capture_pipeline import CaptureNotFound, CapturePipeline
 from ..services.reindex import ReindexService
+from ..services.reprocess import ReprocessService
 from ..services.store_backup import StoreBackupService
 from ..tags.consolidation import TagMerge
 from ..tags.service import TagConsolidationService
@@ -80,6 +85,35 @@ async def reindex(
             status_code=status.HTTP_409_CONFLICT, detail="a reindex is already running"
         )
     return ReindexAcceptedResponse(run_id=run_id)
+
+
+@router.post("/reprocess", response_model=None)
+async def reprocess(
+    request: ReprocessRequest,
+    response: Response,
+    service: ReprocessService = Depends(get_reprocess_service),
+) -> ReprocessPreviewResponse | ReprocessAcceptedResponse:
+    """Reusable ``reprocess-all-from-raw`` op (ADR-042) — the data-survival mechanism (vision P10).
+
+    Confirm-gated (destructive of derived state). ``confirm=false`` (default) → ``200`` preview
+    (how many captures replay, current node count, standing merges not re-appliable), no writes.
+    ``confirm=true`` → ``202 {run_id}``: reset the derived index + store node files, replay every
+    capture's raw chronologically through the current pipeline, recompute derived edges, and force
+    a commit+push — all in the background. Raw + approved vocabulary are preserved. Single-flight —
+    ``409`` if a reprocess is already running.
+    """
+    if request.confirm:
+        run_id = await service.apply()
+        if run_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="a reprocess is already running"
+            )
+        response.status_code = status.HTTP_202_ACCEPTED
+        return ReprocessAcceptedResponse(run_id=run_id)
+    preview = await service.preview()
+    return ReprocessPreviewResponse(
+        captures=preview.captures, nodes=preview.nodes, merges=preview.merges
+    )
 
 
 @router.post("/tags/consolidate", response_model=None)

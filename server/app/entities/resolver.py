@@ -9,12 +9,14 @@ Given the entity **mentions** the organizer extracted from a capture, resolve ea
     goes to the **review queue** (``entity-ambiguity``) with the edge left **pending** — never
     guessed (ADR-030 §3). A down resolver chain also routes to review, never a guess.
 
-One adopted refinement (ADR-032 §2): an **intra-capture dedup** pass (the same new entity mentioned
-twice in one capture mints one node), plus an **entropy guard** (an empty/degenerate mention is
-dropped, not minted). Matching is exact-on-normalized for M3; fuzzy matching and cross-capture
-*alias accretion* (recording a newly-met surface form onto the matched entity) are documented
-follow-ups (see 08-logs/m3.md) — so distinct surface forms of the same entity across captures do
-not yet collapse to one hub.
+Refinements adopted (ADR-032 §2 / ADR-040): an **intra-capture dedup** pass (the same new entity
+mentioned twice in one capture mints one node), an **entropy guard** (an empty/degenerate mention
+is dropped, not minted), a **token-overlap** candidate leg so a variant surface form surfaces the
+existing hub (``"Horia Fenwick"`` retrieves the ``"Horia"`` hub — the LLM then confirms, never a
+fuzzy auto-link), and **alias accretion** (a confirmed link under a new surface form records that
+form onto the hub's ``aliases``, so the exact short-circuit covers it next time). The exact
+short-circuit still auto-links **only** an exact/normalized hit — a single fuzzy candidate goes to
+the LLM. Token-*prefix* matching (``Alex``/``Alexandru``) stays a documented fuzzy follow-up.
 
 The resolver depends on protocols (``AliasStore``, ``ReviewQueue``) + the provider registry, so it
 unit-tests against fakes (no live DB/LLM in CI — 08 testing policy).
@@ -73,16 +75,30 @@ class ResolvedLink:
     conf: float | None
 
 
+@dataclass(frozen=True)
+class AliasAccretion:
+    """A surface form to accrete onto an existing hub's ``aliases`` after a confirmed link
+    (ADR-040 §4). ``aliases`` is the hub's **full new** alias list (existing + the new form) — the
+    pipeline rewrites the file (``NodeWriter.set_aliases`` folds + upserts) then re-indexes it."""
+
+    store_path: str
+    entity_id: str
+    surface: str
+    aliases: tuple[str, ...]
+
+
 @dataclass
 class ResolutionResult:
-    """The resolver's output: linkable mentions, freshly-minted entity docs, and the review count.
+    """The resolver's output: linkable mentions, freshly-minted entity docs, accretions, and count.
 
     ``links`` is keyed by a mention's ``(normalized_name, type)``; a key absent from ``links`` is
-    a **pending** mention (its edge is not written; a review item was filed).
+    a **pending** mention (its edge is not written; a review item was filed). ``accretions`` are
+    alias-file rewrites the pipeline applies after writing the content nodes (ADR-040 §4).
     """
 
     links: dict[tuple[str, str], ResolvedLink] = field(default_factory=dict)
     new_documents: list[NodeDocument] = field(default_factory=list)
+    accretions: list[AliasAccretion] = field(default_factory=list)
     pending: int = 0
     resolutions: list[dict] = field(default_factory=list)
     resolver_fallback_used: bool = False
@@ -90,6 +106,14 @@ class ResolutionResult:
 
 def mention_key(name: str, node_type: str) -> tuple[str, str]:
     return (normalize_alias(name), node_type)
+
+
+def significant_tokens(name: str, *, min_len: int, stop: set[str]) -> list[str]:
+    """The folded, lower-cased tokens of ``name`` that may drive token-overlap retrieval + accretion
+    (ADR-040 §2): each at least ``min_len`` long and not a stop token. Empty ⇒ the low-entropy guard
+    fired (exact-only retrieval, no accretion). ``normalize_alias`` folds diacritics (ADR-041), so
+    the tokens compare equal to the already-folded stored surface forms."""
+    return [t for t in normalize_alias(name).split() if len(t) >= min_len and t not in stop]
 
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
@@ -139,6 +163,9 @@ class EntityResolver:
         result = ResolutionResult()
         effective = await effective_vocabulary(self._vocab, self._settings)
         entity_like = set(effective.entity_like_types)
+        min_len = self._settings.entity_min_token_len
+        stop = set(self._settings.entity_stop_tokens)
+        cap = self._settings.entity_candidate_max
         # Intra-capture dedup (ADR-032 §2): resolve each distinct (name, type) once.
         by_key: dict[tuple[str, str], Mention] = {}
         for m in mentions:
@@ -149,19 +176,24 @@ class EntityResolver:
                 by_key[key] = m
 
         for key, m in by_key.items():
-            candidates = await self._aliases.find_candidates(m.name, types=[m.type])
+            tokens = significant_tokens(m.name, min_len=min_len, stop=stop)
+            candidates = await self._aliases.find_candidates(
+                m.name, types=[m.type], tokens=tokens, limit=cap
+            )
+            exact = [c for c in candidates if _is_exact(c, m.name)]
             if not candidates:
                 self._mint(result, key, m, source, source_ref, created_local, since)
-            elif len(candidates) == 1:
-                # Single exact hit → auto-link, no LLM (ADR-032 §2). conf omitted ⇒ 1.0.
-                result.links[key] = ResolvedLink(entity_id=candidates[0].id, conf=None)
+            elif len(exact) == 1:
+                # A single EXACT hit → auto-link, no LLM (ADR-032 §2), even if fuzzy candidates also
+                # surfaced. Fuzzy-only single candidates fall through to the LLM (never guessed).
+                result.links[key] = ResolvedLink(entity_id=exact[0].id, conf=None)
                 result.resolutions.append(
-                    {"mention": m.name, "type": m.type, "outcome": "exact", "id": candidates[0].id}
+                    {"mention": m.name, "type": m.type, "outcome": "exact", "id": exact[0].id}
                 )
             else:
                 await self._disambiguate(
                     result, key, m, candidates, source, source_ref, created_local, since, excerpt,
-                    pending_edges=edge_map.get(key, []),
+                    pending_edges=edge_map.get(key, []), min_len=min_len, stop=stop,
                 )
         return result
 
@@ -209,9 +241,12 @@ class EntityResolver:
         excerpt: str,
         *,
         pending_edges: list[dict],
+        min_len: int,
+        stop: set[str],
     ) -> None:
-        """Multi-candidate case: ask the resolver LLM (structured candidates only), gated by the
-        confidence floor. A down chain or a low-confidence answer → review item, never a guess."""
+        """Multi-/fuzzy-candidate case: ask the resolver LLM (structured candidates only), gated by
+        the confidence floor. A down chain or a low-confidence answer → review item, never a guess.
+        A confident pick **accretes** the mention's surface form onto the hub (ADR-040 §4)."""
         capped = candidates[: self._settings.entity_candidate_max]
         try:
             choice, conf = await self._ask(m, capped, excerpt)
@@ -223,12 +258,13 @@ class EntityResolver:
             )
             return
 
-        candidate_ids = {c.id for c in capped}
-        if conf >= self._settings.entity_match_min_conf and choice in candidate_ids:
+        by_id = {c.id: c for c in capped}
+        if conf >= self._settings.entity_match_min_conf and choice in by_id:
             result.links[key] = ResolvedLink(entity_id=choice, conf=conf)
             result.resolutions.append(
                 {"mention": m.name, "type": m.type, "outcome": "linked", "id": choice, "conf": conf}
             )
+            self._maybe_accrete(result, by_id[choice], m.name, min_len=min_len, stop=stop)
         elif conf >= self._settings.entity_match_min_conf and choice == "new":
             self._mint(result, key, m, source, source_ref, created_local, since)
         else:
@@ -236,6 +272,37 @@ class EntityResolver:
                 result, m, capped, source, source_ref, excerpt,
                 reason="low-confidence", pending_edges=pending_edges,
             )
+
+    def _maybe_accrete(
+        self,
+        result: ResolutionResult,
+        candidate: EntityCandidate,
+        surface: str,
+        *,
+        min_len: int,
+        stop: set[str],
+    ) -> None:
+        """Record an alias accretion when a mention links to a hub under a **new** surface form
+        (ADR-040 §4): idempotent (skip if already an alias — rule 6), guarded (skip short/low-
+        entropy forms), and only when the hub's file path is known (review-minted have none)."""
+        if candidate.store_path is None:
+            return
+        if not significant_tokens(surface, min_len=min_len, stop=stop):
+            return  # short/low-entropy surface form — never accreted (would pollute the hub)
+        norm = normalize_alias(surface)
+        if norm in {normalize_alias(a) for a in candidate.aliases}:
+            return  # already recorded — nothing to accrete
+        result.accretions.append(
+            AliasAccretion(
+                store_path=candidate.store_path,
+                entity_id=candidate.id,
+                surface=surface.strip(),
+                aliases=(*candidate.aliases, surface.strip()),
+            )
+        )
+        result.resolutions.append(
+            {"mention": surface, "type": candidate.type, "outcome": "accreted", "id": candidate.id}
+        )
 
     async def _ask(
         self, m: Mention, candidates: list[EntityCandidate], excerpt: str
@@ -331,6 +398,16 @@ def _parse_choice(text: str) -> tuple[str, float]:
     except (TypeError, ValueError):
         conf_val = 0.0
     return choice, max(0.0, min(1.0, conf_val))
+
+
+def _is_exact(candidate: EntityCandidate, name: str) -> bool:
+    """True when ``name`` normalizes to the candidate's title or one of its aliases — an *exact*
+    hit that may auto-link with no LLM (ADR-032). A token-overlap-only candidate is not exact and
+    must go through the LLM gate (ADR-040)."""
+    key = normalize_alias(name)
+    if candidate.title and normalize_alias(candidate.title) == key:
+        return True
+    return any(normalize_alias(a) == key for a in candidate.aliases)
 
 
 def _unique(values: list[str]) -> list[str]:

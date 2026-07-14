@@ -18,6 +18,7 @@ from .services.agent_runs import AgentRunStore
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
 from .services.reindex import ReindexService
+from .services.reprocess import ReprocessService
 from .services.review_service import ReviewService
 from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
@@ -59,6 +60,10 @@ def get_derived_edge_graph(request: Request) -> DerivedEdgeGraph:
 
 def get_reindex_service(request: Request) -> ReindexService:
     return request.app.state.reindex_service
+
+
+def get_reprocess_service(request: Request) -> ReprocessService:
+    return request.app.state.reprocess_service
 
 
 def get_tag_consolidation_service(request: Request) -> TagConsolidationService:
