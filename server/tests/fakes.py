@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -665,11 +666,13 @@ class FakeChatStore:
         self._seq = 0
 
     def _next(self, prefix: str) -> str:
+        # Message ids stay human-readable; session ids must be real uuids to match the
+        # ``chat_sessions.id`` uuid column (the router validates the id as a uuid at the boundary).
         self._seq += 1
         return f"{prefix}-{self._seq}"
 
     async def create_session(self, *, title: str | None = None) -> str:
-        sid = self._next("session")
+        sid = str(uuid.uuid4())
         self.sessions[sid] = self._ChatSessionRecord(
             id=sid, title=title, created_at=datetime.now(UTC), last_model=None
         )

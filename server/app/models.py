@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -143,6 +144,86 @@ class NodeDetailResponse(BaseModel):
     body: str
     profile: str | None = None
     edges: list[NodeEdgeItem] = Field(default_factory=list)
+
+
+# --- Chat (03-api.md §Chat, M4 / ADR-025) ---
+class ChatRequest(BaseModel):
+    """One chat turn (POST /chat). ``session_id`` omitted ⇒ implicit session creation; ``model`` =
+    the composer's per-conversation picker override of the Chat group active model (ADR-025 §5)."""
+
+    message: str = Field(min_length=1)
+    # A uuid (the DB column type); a malformed id is a 422 here, not a 500 downstream. Absent ⇒
+    # implicit session creation. The router hands the service its string form.
+    session_id: UUID | None = None
+    model: str | None = None
+    planes: list[str] | None = None
+    top_k: int | None = Field(default=None, ge=1)
+
+
+class ChatSourceItem(BaseModel):
+    """A cited node backing a chat answer (03-api §Chat) — cited-only, renumbered ``[1..m]``."""
+
+    node_id: str
+    store_path: str
+    type: str
+    title: str | None = None
+    snippet: str
+    score: float
+    planes: list[str] = Field(default_factory=list)
+
+
+class ChatResponse(BaseModel):
+    """A chat answer (POST /chat). ``sources`` is empty for general / "not in your memories"
+    answers; ``fallback_used`` flags that a non-primary model answered (ADR-025 transparency)."""
+
+    session_id: str
+    answer: str
+    model_used: str
+    fallback_used: bool
+    sources: list[ChatSourceItem] = Field(default_factory=list)
+
+
+class ChatModelItem(BaseModel):
+    """A pickable chat model (GET /chat/models): stable ``id`` + human-readable ``label``."""
+
+    id: str
+    label: str
+
+
+class ChatModelsResponse(BaseModel):
+    """The composer's model picker (GET /chat/models): the registry's chat models + ``default`` =
+    the Chat group's active model."""
+
+    models: list[ChatModelItem] = Field(default_factory=list)
+    default: str
+
+
+class ChatSessionItem(BaseModel):
+    """A chat session in the thread list (GET /chat/sessions), newest-first."""
+
+    id: str
+    title: str | None = None
+    created_at: datetime | None = None
+    last_model: str | None = None
+
+
+class ChatMessageItem(BaseModel):
+    """One persisted turn in a session (GET /chat/sessions/{id}). ``sources`` carries the cited
+    nodes for assistant turns (empty otherwise), each in the ``ChatSourceItem`` shape."""
+
+    role: str
+    content: str
+    model: str | None = None
+    sources: list[ChatSourceItem] = Field(default_factory=list)
+    created_at: datetime | None = None
+
+
+class ChatSessionDetail(BaseModel):
+    """A session with its full message history (GET /chat/sessions/{id})."""
+
+    id: str
+    title: str | None = None
+    messages: list[ChatMessageItem] = Field(default_factory=list)
 
 
 # --- Meta (03-api.md §Meta) ---

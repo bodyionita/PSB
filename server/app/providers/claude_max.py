@@ -45,6 +45,7 @@ class ClaudeMaxProvider(ChatProvider):
         cli_path: str = "claude",
     ) -> None:
         self.id = id
+        self.label = model  # the configured model is the picker label (base.ChatProvider.label)
         self._model = model
         self._effort = effort
         self._cli_name = cli_path

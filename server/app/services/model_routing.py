@@ -30,7 +30,7 @@ from typing import Any, Protocol
 from ..config import Settings
 from ..db import Database
 from ..providers.base import ChatMessage, ChatResult
-from ..providers.registry import ProviderRegistry
+from ..providers.registry import ChatModelOption, ProviderRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,15 @@ class RoutingDecision:
 
     chain: list[str]
     effort_by_provider: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ChatCatalog:
+    """The chat model picker payload (GET /chat/models, 03-api §Chat): every pickable chat model +
+    the ``default`` = the resolved active model of the ``chat`` group (saved-over-seed)."""
+
+    models: list[ChatModelOption]
+    default: str
 
 
 class ModelRoutingStore(Protocol):
@@ -156,6 +165,14 @@ class ModelRoutingService:
             if pid and self._registry.supports_effort(pid)
         }
         return GroupRouting(active=active, fallback=fallback, effort_by_provider=ebp)
+
+    async def chat_catalog(self) -> ChatCatalog:
+        """The chat picker payload (GET /chat/models): all pickable chat models + the ``chat``
+        group's resolved active model as ``default`` (saved-over-seed, rule-7 safe). Falls back to
+        the registry's config default if the resolved chain is somehow empty."""
+        decision = await self.resolve("chat")
+        default = decision.chain[0] if decision.chain else self._registry.default_chat_model()
+        return ChatCatalog(models=self._registry.chat_models(), default=default)
 
     async def resolve(self, group: str) -> RoutingDecision:
         """Resolve a group to a chain + per-provider effort (saved over seed; rule-7 safe)."""

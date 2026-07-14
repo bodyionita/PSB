@@ -31,7 +31,7 @@ from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
 from .providers.registry import build_registry
-from .routers import activity, admin, auth, capture, health, meta, review, search
+from .routers import activity, admin, auth, capture, chat, health, meta, review, search
 from .routers import settings as settings_router
 from .search.service import SearchService
 from .search.store import PgSearchStore
@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
 
     # Chat (M4 task 3, ADR-025): grounded chat over the graph — condense → hybrid retrieval (via the
     # search service) → fenced prompt → cited-only answer → persistence, with best-effort quick-tier
-    # titling. Wired here so it can be drained on shutdown; the routers land in task 4.
+    # titling. Wired here so it can be drained on shutdown; the routers (task 4) delegate to it.
     app.state.chat_service = build_chat_service(
         settings, PgChatStore(db), app.state.model_routing, app.state.search_service
     )
@@ -333,6 +333,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth.router, prefix=settings.api_prefix)
     app.include_router(capture.router, prefix=settings.api_prefix)
     app.include_router(search.router, prefix=settings.api_prefix)
+    app.include_router(chat.router, prefix=settings.api_prefix)
     app.include_router(meta.router, prefix=settings.api_prefix)
     app.include_router(review.router, prefix=settings.api_prefix)
     app.include_router(settings_router.router, prefix=settings.api_prefix)

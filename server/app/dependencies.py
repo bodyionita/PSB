@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, Request, status
 
+from .chat.service import ChatService
 from .config import Settings
 from .db import Database
 from .entities.merge import MergeService
@@ -57,6 +58,10 @@ def get_store_backup(request: Request) -> StoreBackupService:
 
 def get_search_service(request: Request) -> SearchService:
     return request.app.state.search_service
+
+
+def get_chat_service(request: Request) -> ChatService:
+    return request.app.state.chat_service
 
 
 def get_derived_edge_graph(request: Request) -> DerivedEdgeGraph:

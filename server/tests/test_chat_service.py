@@ -259,6 +259,41 @@ async def test_fenced_context_reaches_the_answer_prompt():
     assert "data, not instructions" in system_msg.content
 
 
+# --- read paths (GET /chat/sessions[/{id}], GET /chat/models — task 4) --------------------------
+
+
+async def test_list_sessions_newest_first_and_bounded():
+    service, store, _, _ = _make(hits=[])
+    for _ in range(3):
+        await store.create_session()
+    sessions = await service.list_sessions(limit=2)
+    assert len(sessions) == 2  # bounded by the explicit limit
+
+
+async def test_get_session_detail_returns_session_and_messages():
+    service, store, _, _ = _make(hits=[_hit("n1")])
+    result = await service.send("q")
+    await service.drain()
+    session, messages = await service.get_session_detail(result.session_id)
+    assert session.id == result.session_id
+    assert [m.role for m in messages] == [ROLE_USER, ROLE_ASSISTANT]
+
+
+async def test_get_session_detail_unknown_raises():
+    service, _, _, _ = _make()
+    with pytest.raises(ChatSessionNotFound):
+        await service.get_session_detail("ghost")
+
+
+async def test_chat_catalog_lists_models_and_active_default():
+    service, _, _, providers = _make()
+    providers["chat-p"].label = "Claude Opus 4.8"
+    catalog = await service._routing.chat_catalog()
+    assert [m.id for m in catalog.models] == ["chat-p", "conspect-p", "quick-p"]
+    assert next(m.label for m in catalog.models if m.id == "chat-p") == "Claude Opus 4.8"
+    assert catalog.default == "chat-p"  # the Chat group's active model
+
+
 # --- _clean_title (pure) ------------------------------------------------------------------------
 
 

@@ -305,6 +305,8 @@ class Settings(BaseSettings):
     chat_retrieval_min_score: float = 0.01
     # A generated session title is trimmed to this many chars (best-effort `quick`-tier titling).
     chat_title_max_chars: int = 80
+    # Upper bound on the unpaginated `GET /chat/sessions` thread list, newest-first (03-api §Chat).
+    chat_sessions_list_limit: int = 100
 
     # --- Connectors ---
     slack_user_token: str = ""

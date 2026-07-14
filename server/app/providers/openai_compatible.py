@@ -38,6 +38,11 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         requires_api_key: bool = True,
     ) -> None:
         self.id = id
+        # This class also backs the STT/embedding providers (ADR-004); only an instance with a
+        # configured chat model can actually chat, so it's excluded from GET /chat/models otherwise
+        # (base.ChatProvider.can_chat). The label = that configured chat model (empty ⇒ not listed).
+        self.can_chat = bool(default_chat_model)
+        self.label = default_chat_model
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._default_chat_model = default_chat_model

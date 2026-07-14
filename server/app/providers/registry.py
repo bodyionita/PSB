@@ -9,6 +9,7 @@ is never swallowed (CLAUDE.md rule 3).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from ..config import Settings
 from .base import (
@@ -32,6 +33,14 @@ class RegistryExhausted(ProviderUnavailable):
     """Every provider in a chain was unavailable."""
 
 
+@dataclass(frozen=True)
+class ChatModelOption:
+    """A pickable chat model for the composer/settings picker (03-api §Chat, GET /chat/models)."""
+
+    id: str
+    label: str
+
+
 class ProviderRegistry:
     def __init__(
         self,
@@ -49,6 +58,18 @@ class ProviderRegistry:
         self._stt_chain = stt_chain
 
     # --- introspection (feeds GET /chat/models & GET /settings) ---
+    def chat_models(self) -> list[ChatModelOption]:
+        """Every genuinely chat-capable provider as ``{id, label}`` (registration order) — the
+        pickable universe for the chat composer + Settings model dropdowns (03-api §Chat). Filters
+        on ``can_chat`` (not merely the ``ChatProvider`` class), so the shared OpenAI-compatible
+        STT/embedding instances are excluded. The label is provider-sourced (its configured model),
+        falling back to the id."""
+        return [
+            ChatModelOption(id=pid, label=provider.label or pid)
+            for pid, provider in self._providers.items()
+            if isinstance(provider, ChatProvider) and provider.can_chat
+        ]
+
     def available_chat_models(self) -> list[str]:
         return [pid for pid in self._chat_chain if pid in self._providers]
 

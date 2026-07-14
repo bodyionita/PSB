@@ -62,11 +62,22 @@ class Provider(ABC):
 
 
 class ChatProvider(Provider):
+    # Whether this provider can actually serve chat. A provider may inherit ``ChatProvider`` for its
+    # class hierarchy yet have no chat model configured (the OpenAI-compatible class is also the
+    # STT/embedding provider — ADR-004): those are chat-capable by type but not by configuration.
+    # The registry filters ``GET /chat/models`` on this so the picker never offers a non-chat model.
+    can_chat: bool = True
+
     # Whether this provider honors a per-call reasoning ``effort`` (ADR-025 §4). Only models with
     # a native effort control (the Claude Max CLI's ``--effort``) set this True; the registry uses
     # it to route a group's effort only to providers that support one, and GET /settings to render
     # the effort control only where it applies. Providers without one ignore the arg.
     supports_effort: bool = False
+
+    # Human-readable display name for the model picker (GET /chat/models, GET /settings — 03-api
+    # §Chat/§Settings). Provider-sourced (like ``supports_effort``) so no router hardcodes a label;
+    # concrete providers set it to their configured model in ``__init__``. Empty ⇒ fall back to id.
+    label: str = ""
 
     @abstractmethod
     async def complete(

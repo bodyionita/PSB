@@ -40,7 +40,7 @@ from .prompts import (
     render_context,
     render_title_input,
 )
-from .store import ROLE_ASSISTANT, ROLE_USER, ChatStore
+from .store import ROLE_ASSISTANT, ROLE_USER, ChatMessageRecord, ChatSessionRecord, ChatStore
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +157,22 @@ class ChatService:
             fallback_used=result.fallback_used,
             sources=sources,
         )
+
+    async def list_sessions(self, *, limit: int | None = None) -> list[ChatSessionRecord]:
+        """The thread list, newest-first (GET /chat/sessions). Bounded by
+        ``chat_sessions_list_limit`` (03-api §Chat is unpaginated)."""
+        return await self._store.list_sessions(limit or self._settings.chat_sessions_list_limit)
+
+    async def get_session_detail(
+        self, session_id: str
+    ) -> tuple[ChatSessionRecord, list[ChatMessageRecord]]:
+        """One session + its full message history, oldest-first (GET /chat/sessions/{id}). Raises
+        ``ChatSessionNotFound`` (mapped to 404) when the id is unknown."""
+        session = await self._store.get_session(session_id)
+        if session is None:
+            raise ChatSessionNotFound(session_id)
+        messages = await self._store.session_messages(session_id)
+        return session, messages
 
     async def drain(self) -> None:
         """Await any in-flight titling tasks (used on shutdown / in tests)."""
