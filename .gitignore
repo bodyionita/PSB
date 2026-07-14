@@ -27,6 +27,8 @@ deploy/origin.crt          # CI-rendered origin TLS cert (ADR-017); never commit
 deploy/origin.key          # CI-rendered origin TLS key  (ADR-017); also caught by *.key
 srv/
 /data/
+# local dev graph store (default GRAPH_STORE_PATH=../graph-store)
+/graph-store/
 *.log
 
 # --- secrets & key material (never commit; enforced by .githooks/pre-commit) ---

@@ -62,7 +62,13 @@ class ClaudeMaxProvider(ChatProvider):
     @staticmethod
     def _probe_version(cli: str) -> bool:
         try:
-            result = subprocess.run([cli, "--version"], capture_output=True, text=True, timeout=10)
+            result = subprocess.run(
+                [cli, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+            )
         except (OSError, subprocess.SubprocessError):
             return False
         return result.returncode == 0
@@ -92,9 +98,14 @@ class ClaudeMaxProvider(ChatProvider):
     def _run_cli(
         cli: str, prompt: str, model: str, effort: str
     ) -> subprocess.CompletedProcess[str]:
+        # Pin UTF-8 for the CLI's stdio: the CLI emits UTF-8, but text-mode subprocess otherwise
+        # decodes with the host locale (cp1252 on a Windows dev box), which mojibakes any non-ASCII
+        # organizer output (e.g. Romanian diacritics) before it reaches the writer. On the Linux
+        # container the locale is already UTF-8, so this is a no-op there — pure host-robustness.
         return subprocess.run(
             [cli, "--print", "--model", model, "--effort", effort, prompt],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=300,
         )
