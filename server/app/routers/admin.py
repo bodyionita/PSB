@@ -18,6 +18,7 @@ from ..dependencies import (
     get_capture_pipeline,
     get_edge_consolidation_service,
     get_merge_service,
+    get_registry,
     get_reindex_service,
     get_reprocess_service,
     get_store_backup,
@@ -34,6 +35,9 @@ from ..models import (
     EntityMergeRequest,
     InboundEdgeModel,
     MergeSideModel,
+    ProviderErrorModel,
+    ProvidersResponse,
+    ProviderStatusItem,
     ReindexAcceptedResponse,
     ReprocessAcceptedResponse,
     ReprocessPreviewResponse,
@@ -47,6 +51,7 @@ from ..models import (
     VocabConsolidateRequest,
 )
 from ..providers.base import ProviderUnavailable
+from ..providers.registry import ProviderRegistry
 from ..services.capture_pipeline import CaptureNotFound, CapturePipeline
 from ..services.reindex import ReindexService
 from ..services.reprocess import ReprocessService
@@ -255,3 +260,37 @@ async def reorganize_capture(
             status_code=status.HTTP_404_NOT_FOUND, detail="capture not found"
         ) from None
     return CaptureAcceptedResponse(capture_id=capture_id)
+
+
+@router.get("/providers", response_model=ProvidersResponse)
+async def providers(
+    registry: ProviderRegistry = Depends(get_registry),
+) -> ProvidersResponse:
+    """Provider observability (ADR-044) — one row per registered provider: identity, configured
+    capabilities, a **live** ``health()`` reachability probe (config-reachability, *not* a success
+    guarantee), and the in-memory runtime status (sticky ``last_error`` + ``last_success_at`` +
+    ``consecutive_failures``). Closes the P8/rule-7 silent-fallback gap the M4 Accept exposed.
+
+    No LLM call, no persistence (in-memory, resets on redeploy). ``/health`` is left untouched — its
+    per-provider error text (endpoints, model ids, key-state) must not be public, so this is
+    session-gated (the router's ``require_session`` dependency).
+    """
+    report = await registry.provider_report()
+    return ProvidersResponse(
+        providers=[
+            ProviderStatusItem(
+                id=row.id,
+                label=row.label,
+                capabilities=row.capabilities,
+                reachable=row.reachable,
+                last_error=(
+                    ProviderErrorModel(message=row.last_error.message, at=row.last_error.at)
+                    if row.last_error is not None
+                    else None
+                ),
+                last_success_at=row.last_success_at,
+                consecutive_failures=row.consecutive_failures,
+            )
+            for row in report
+        ]
+    )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -9,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.dependencies import (
     get_edge_consolidation_service,
     get_merge_service,
+    get_registry,
     get_reindex_service,
     get_reprocess_service,
     get_store_backup,
@@ -17,6 +20,8 @@ from app.dependencies import (
 )
 from app.entities.merge import BadMerge, MergeNodeNotFound, MergeProposal, MergeSide
 from app.providers.base import ProviderUnavailable
+from app.providers.registry import ProviderReport
+from app.providers.status import ProviderError
 from app.routers import admin
 from app.services.store_backup import BackupResult
 from app.tags.consolidation import TagMerge
@@ -380,6 +385,97 @@ def test_entities_merge_400_bad_merge():
     client = _merge_client(FakeMerge(error=BadMerge("cannot merge a node into itself")))
     resp = client.post(f"{PREFIX}/admin/entities/merge", json={"loser": "x", "survivor": "x"})
     assert resp.status_code == 400
+
+
+# --- GET /admin/providers (ADR-044, M4 follow-up) ---
+class FakeRegistry:
+    """provider_report returns a preset report; the router maps it to the wire shape."""
+
+    def __init__(self, report: list[ProviderReport]) -> None:
+        self._report = report
+        self.calls = 0
+
+    async def provider_report(self) -> list[ProviderReport]:
+        self.calls += 1
+        return self._report
+
+
+def _providers_client(report: list[ProviderReport]) -> tuple[TestClient, FakeRegistry]:
+    app = FastAPI()
+    app.include_router(admin.router, prefix=PREFIX)
+    fake = FakeRegistry(report)
+    app.dependency_overrides[get_registry] = lambda: fake
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app), fake
+
+
+def test_providers_maps_report_to_wire_shape():
+    at = datetime(2026, 7, 15, 12, 0, 0, tzinfo=UTC)
+    report = [
+        # A provider with a sticky error → last_error present and serialized as {message, at}.
+        ProviderReport(
+            id="nebius",
+            label="Llama 3.3 70B",
+            capabilities=["chat"],
+            reachable=False,
+            last_error=ProviderError(message="nebius chat failed: 404", at=at),
+            last_success_at=None,
+            consecutive_failures=2,
+        ),
+        # A healthy provider with no error → last_error is null (the other mapping branch).
+        ProviderReport(
+            id="ollama",
+            label="ollama",
+            capabilities=["embedding"],
+            reachable=True,
+            last_error=None,
+            last_success_at=at,
+            consecutive_failures=0,
+        ),
+    ]
+    client, fake = _providers_client(report)
+    resp = client.get(f"{PREFIX}/admin/providers")
+    assert resp.status_code == 200
+    assert fake.calls == 1
+    body = resp.json()
+    assert body == {
+        "providers": [
+            {
+                "id": "nebius",
+                "label": "Llama 3.3 70B",
+                "capabilities": ["chat"],
+                "reachable": False,
+                "last_error": {"message": "nebius chat failed: 404", "at": "2026-07-15T12:00:00Z"},
+                "last_success_at": None,
+                "consecutive_failures": 2,
+            },
+            {
+                "id": "ollama",
+                "label": "ollama",
+                "capabilities": ["embedding"],
+                "reachable": True,
+                "last_error": None,
+                "last_success_at": "2026-07-15T12:00:00Z",
+                "consecutive_failures": 0,
+            },
+        ]
+    }
+
+
+def test_providers_requires_session():
+    from app.config import Settings
+
+    app = FastAPI()
+    app.state.settings = Settings(session_cookie_name="braindan_session")
+
+    class _DenyAuth:
+        async def validate(self, token):
+            return None
+
+    app.state.auth_service = _DenyAuth()
+    app.include_router(admin.router, prefix=PREFIX)
+    client = TestClient(app)
+    assert client.get(f"{PREFIX}/admin/providers").status_code == 401
 
 
 def test_backup_requires_session():

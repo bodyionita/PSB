@@ -8,8 +8,10 @@ is never swallowed (CLAUDE.md rule 3).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from ..config import Settings
 from .base import (
@@ -25,12 +27,42 @@ from .base import (
 )
 from .claude_max import ClaudeMaxProvider
 from .openai_compatible import OpenAICompatibleProvider
+from .status import ProviderError, ProviderStatusTracker
 
 logger = logging.getLogger(__name__)
 
 
 class RegistryExhausted(ProviderUnavailable):
     """Every provider in a chain was unavailable."""
+
+
+def _provider_capabilities(provider: Provider) -> list[str]:
+    """The configured capabilities of a provider for the ADR-044 observability row — reflects
+    configuration (``can_chat``/``can_transcribe``/``can_embed``), not merely the class hierarchy
+    (the OpenAI-compatible class backs all three by type)."""
+    caps: list[str] = []
+    if isinstance(provider, ChatProvider) and provider.can_chat:
+        caps.append("chat")
+    if isinstance(provider, STTProvider) and provider.can_transcribe:
+        caps.append("stt")
+    if isinstance(provider, EmbeddingProvider) and provider.can_embed:
+        caps.append("embedding")
+    return caps
+
+
+@dataclass(frozen=True)
+class ProviderReport:
+    """One provider's row for ``GET /admin/providers`` (ADR-044): identity + capabilities + a live
+    reachability probe + the in-memory runtime status (sticky ``last_error``, ``last_success_at``,
+    ``consecutive_failures``). ``reachable`` is config-reachability, **not** a success guarantee."""
+
+    id: str
+    label: str
+    capabilities: list[str]
+    reachable: bool
+    last_error: ProviderError | None
+    last_success_at: datetime | None
+    consecutive_failures: int
 
 
 @dataclass(frozen=True)
@@ -56,12 +88,17 @@ class ProviderRegistry:
         distill_chain: list[str],
         embedding_provider_id: str,
         stt_chain: list[str],
+        status_tracker: ProviderStatusTracker | None = None,
     ) -> None:
         self._providers = providers
         self._chat_chain = chat_chain
         self._distill_chain = distill_chain
         self._embedding_provider_id = embedding_provider_id
         self._stt_chain = stt_chain
+        # In-memory per-provider runtime status (ADR-044), recorded at every provider call site.
+        # Process-lifetime singleton on the registry (single uvicorn worker), so consistent across
+        # requests; resets on redeploy (accepted — the failure mode is persistent, it repopulates).
+        self._status = status_tracker or ProviderStatusTracker()
 
     # --- introspection (feeds GET /chat/models & GET /settings) ---
     def chat_models(self) -> list[ChatModelOption]:
@@ -126,8 +163,10 @@ class ProviderRegistry:
                 text = await provider.complete(messages, effort=efforts.get(provider_id))
             except ProviderUnavailable as exc:
                 logger.warning("chat provider %s unavailable: %s", provider_id, exc)
+                self._status.record_failure(provider_id, str(exc))
                 errors.append(str(exc))
                 continue
+            self._status.record_success(provider_id)
             return ChatResult(
                 text=text,
                 model_used=provider_id,
@@ -168,7 +207,15 @@ class ProviderRegistry:
             raise ProviderUnavailable(
                 f"embedding provider '{self._embedding_provider_id}' not registered"
             )
-        vectors = await provider.embed(texts)
+        # Embedding has no fallback (single provider), so a failure here is a total outage that was
+        # previously recorded nowhere — the most important ADR-044 blind spot to close. Record then
+        # re-raise (the caller still sees the ProviderUnavailable; nothing is swallowed, rule 3).
+        try:
+            vectors = await provider.embed(texts)
+        except ProviderUnavailable as exc:
+            self._status.record_failure(self._embedding_provider_id, str(exc))
+            raise
+        self._status.record_success(self._embedding_provider_id)
         return EmbeddingResult(vectors=vectors, model_used=self._embedding_provider_id)
 
     def available_stt_models(self) -> list[str]:
@@ -187,10 +234,49 @@ class ProviderRegistry:
                 text = await provider.transcribe(audio, filename=filename)
             except ProviderUnavailable as exc:
                 logger.warning("STT provider %s unavailable: %s", provider_id, exc)
+                self._status.record_failure(provider_id, str(exc))
                 errors.append(str(exc))
                 continue
+            self._status.record_success(provider_id)
             return TranscriptResult(text=text, model_used=provider_id, fallback_used=index > 0)
         raise RegistryExhausted("all STT providers unavailable: " + "; ".join(errors))
+
+    async def provider_report(self) -> list[ProviderReport]:
+        """One row per registered provider for ``GET /admin/providers`` (ADR-044).
+
+        Probes every provider's ``health()`` **concurrently** (``asyncio.gather``) — finally using
+        the dormant, LLM-free reachability seam — and folds in the in-memory status. ``reachable``
+        is config-reachability, **not** a success guarantee (it would show a mis-configured provider
+        green while every call fails); ``last_error``/``consecutive_failures`` carry the runtime
+        truth beside it. Registration order is preserved.
+        """
+        items = list(self._providers.items())
+        reachabilities = await asyncio.gather(*(self._probe_health(p) for _, p in items))
+        reports: list[ProviderReport] = []
+        for (pid, provider), reachable in zip(items, reachabilities, strict=True):
+            status = self._status.status_for(pid)
+            reports.append(
+                ProviderReport(
+                    id=pid,
+                    label=getattr(provider, "label", "") or pid,
+                    capabilities=_provider_capabilities(provider),
+                    reachable=reachable,
+                    last_error=status.last_error,
+                    last_success_at=status.last_success_at,
+                    consecutive_failures=status.consecutive_failures,
+                )
+            )
+        return reports
+
+    @staticmethod
+    async def _probe_health(provider: Provider) -> bool:
+        """``health()`` is contractually non-raising and LLM-free; guard anyway so one misbehaving
+        provider can't fail the whole report (a raise here means "not reachable")."""
+        try:
+            return await provider.health()
+        except Exception:  # noqa: BLE001 — defensive coercion of a non-raising contract to a bool
+            logger.warning("provider %s health probe raised (treating as unreachable)", provider.id)
+            return False
 
 
 def build_registry(settings: Settings) -> ProviderRegistry:

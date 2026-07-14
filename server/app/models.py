@@ -518,3 +518,31 @@ class HealthResponse(BaseModel):
     store: bool
     git_remote: bool
     backups: bool  # M1 (ADR-014 §6): latest integrity-drill fresh + not failed
+
+
+# --- Provider observability (03-api.md §Admin, M4 follow-up / ADR-044) ---
+class ProviderErrorModel(BaseModel):
+    """The last runtime failure for a provider — sticky (a later success does not clear it)."""
+
+    message: str
+    at: datetime
+
+
+class ProviderStatusItem(BaseModel):
+    """One provider row for GET /admin/providers (ADR-044). ``reachable`` is a live
+    ``Provider.health()`` probe — config-reachability, **not** a success guarantee; the runtime
+    truth is ``last_error`` (sticky) + ``last_success_at`` + ``consecutive_failures`` beside it."""
+
+    id: str
+    label: str
+    capabilities: list[Literal["chat", "stt", "embedding"]] = Field(default_factory=list)
+    reachable: bool
+    last_error: ProviderErrorModel | None = None
+    last_success_at: datetime | None = None
+    consecutive_failures: int
+
+
+class ProvidersResponse(BaseModel):
+    """Provider observability (GET /admin/providers): one row per registered provider."""
+
+    providers: list[ProviderStatusItem] = Field(default_factory=list)

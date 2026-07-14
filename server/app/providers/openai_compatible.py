@@ -45,6 +45,11 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         # (labels.py) — e.g. "meta-llama/Llama-3.3-70B-Instruct" -> "Llama 3.3 70B" (empty ⇒ not
         # listed). Non-chat instances (STT/embedding) pass "" here, so the empty label is harmless.
         self.can_chat = bool(default_chat_model)
+        # Parallel to ``can_chat`` — an instance only transcribes/embeds if configured with the
+        # matching model, so the ADR-044 ``capabilities`` row reflects configuration (openai/groq =
+        # stt-only, ollama = embedding-only, nebius = chat-only), not the all-capabilities class.
+        self.can_transcribe = bool(stt_model)
+        self.can_embed = bool(embedding_model)
         self.label = friendly_model_label(default_chat_model)
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key

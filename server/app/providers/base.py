@@ -98,12 +98,22 @@ class ChatProvider(Provider):
 
 
 class EmbeddingProvider(Provider):
+    # Whether this provider is actually configured to embed. Mirrors ``ChatProvider.can_chat``:
+    # the OpenAI-compatible class backs every capability by type, but only an instance with a
+    # configured embedding model can embed. Feeds the ADR-044 ``capabilities`` list so the
+    # provider-observability row reflects configuration, not merely the class hierarchy.
+    can_embed: bool = True
+
     @abstractmethod
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Return one vector per input text, or raise ProviderUnavailable."""
 
 
 class STTProvider(Provider):
+    # Whether this provider is actually configured to transcribe (mirrors ``can_chat``/``can_embed``
+    # — see EmbeddingProvider). Feeds the ADR-044 ``capabilities`` list.
+    can_transcribe: bool = True
+
     @abstractmethod
     async def transcribe(self, audio: bytes, *, filename: str) -> str:
         """Return the transcript text, or raise ProviderUnavailable."""
