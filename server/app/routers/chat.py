@@ -67,7 +67,10 @@ async def chat_models(
 ) -> ChatModelsResponse:
     catalog = await routing.chat_catalog()
     return ChatModelsResponse(
-        models=[ChatModelItem(id=m.id, label=m.label) for m in catalog.models],
+        models=[
+            ChatModelItem(id=m.id, label=m.label, effort=catalog.efforts.get(m.id))
+            for m in catalog.models
+        ],
         default=catalog.default,
     )
 
@@ -78,9 +81,7 @@ async def list_sessions(
 ) -> list[ChatSessionItem]:
     sessions = await service.list_sessions()
     return [
-        ChatSessionItem(
-            id=s.id, title=s.title, created_at=s.created_at, last_model=s.last_model
-        )
+        ChatSessionItem(id=s.id, title=s.title, created_at=s.created_at, last_model=s.last_model)
         for s in sessions
     ]
 
@@ -120,6 +121,7 @@ def _to_response(answer: ChatAnswer) -> ChatResponse:
         answer=answer.answer,
         model_used=answer.model_used,
         fallback_used=answer.fallback_used,
+        effort_used=answer.effort_used,
         sources=[
             ChatSourceItem(
                 node_id=s.node_id,

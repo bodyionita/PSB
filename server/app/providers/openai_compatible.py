@@ -16,6 +16,7 @@ from .base import (
     ProviderUnavailable,
     STTProvider,
 )
+from .labels import friendly_model_label
 
 _TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 
@@ -40,9 +41,11 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         self.id = id
         # This class also backs the STT/embedding providers (ADR-004); only an instance with a
         # configured chat model can actually chat, so it's excluded from GET /chat/models otherwise
-        # (base.ChatProvider.can_chat). The label = that configured chat model (empty ⇒ not listed).
+        # (base.ChatProvider.can_chat). The label = a friendly display name derived from that model
+        # (labels.py) — e.g. "meta-llama/Llama-3.3-70B-Instruct" -> "Llama 3.3 70B" (empty ⇒ not
+        # listed). Non-chat instances (STT/embedding) pass "" here, so the empty label is harmless.
         self.can_chat = bool(default_chat_model)
-        self.label = default_chat_model
+        self.label = friendly_model_label(default_chat_model)
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._default_chat_model = default_chat_model

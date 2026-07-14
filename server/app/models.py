@@ -180,14 +180,21 @@ class ChatResponse(BaseModel):
     answer: str
     model_used: str
     fallback_used: bool
+    # Reasoning effort applied to the answering model (None for effort-less models like Nebius);
+    # feeds the "answered by <model> · <effort>" caption on a fresh turn (ADR-025 §4). Not persisted
+    # (M4 follow-up scope), so history renders the model label without effort.
+    effort_used: str | None = None
     sources: list[ChatSourceItem] = Field(default_factory=list)
 
 
 class ChatModelItem(BaseModel):
-    """A pickable chat model (GET /chat/models): stable ``id`` + human-readable ``label``."""
+    """A pickable chat model (GET /chat/models): stable ``id`` + human-readable ``label`` +
+    ``effort`` = the reasoning effort the Chat group applies to it (None for effort-less models like
+    Nebius, or one with no configured Chat-group effort), so the picker can show it (ADR-025 §4)."""
 
     id: str
     label: str
+    effort: str | None = None
 
 
 class ChatModelsResponse(BaseModel):

@@ -19,13 +19,15 @@ const FAIL_COLOR = '#ff6b6b';
 
 // One turn in the active thread. Local render state; the server persists the same content. `reveal`
 // plays the client-side reveal on a freshly-arrived assistant turn (not on history). `fallbackUsed`
-// is a live-response-only signal (not persisted), so it's absent on seeded history.
+// and `effortUsed` are live-response-only signals (not persisted), so they're absent on seeded
+// history — history shows the model label without effort.
 interface ThreadMessage {
   key: string;
   role: 'user' | 'assistant';
   content: string;
   model?: string | null;
   fallbackUsed?: boolean;
+  effortUsed?: string | null;
   sources: ChatSourceItem[];
   reveal: boolean;
   error?: boolean;
@@ -281,7 +283,19 @@ function GroundingChip() {
   );
 }
 
-function FallbackBanner({ model }: { model: string }) {
+// A discreet "answered by <model> · <effort>" caption under each assistant turn, so it's always
+// clear which model + reasoning effort produced the answer (user request). `effort` is null for
+// effort-less models (Nebius) and absent on seeded history (not persisted). A non-primary answer
+// (`fallback`) keeps the ⤳ marker so a model switch still reads as a switch (ADR-025 transparency).
+function AnsweredBy({
+  label,
+  effort,
+  fallback,
+}: {
+  label: string;
+  effort?: string | null;
+  fallback?: boolean;
+}) {
   return (
     <div
       style={{
@@ -292,12 +306,19 @@ function FallbackBanner({ model }: { model: string }) {
         color: 'var(--muted)',
       }}
     >
-      <span aria-hidden>⤳</span> answered by {model}
+      {fallback && <span aria-hidden>⤳</span>} answered by {label}
+      {effort ? ` · ${effort}` : ''}
     </div>
   );
 }
 
-function AssistantMessage({ msg }: { msg: ThreadMessage }) {
+function AssistantMessage({
+  msg,
+  modelLabel,
+}: {
+  msg: ThreadMessage;
+  modelLabel: (id: string | null | undefined) => string;
+}) {
   const reduced = useReducedMotion();
   const [openSources, setOpenSources] = useState<ReadonlySet<number>>(new Set());
   const refs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -337,10 +358,16 @@ function AssistantMessage({ msg }: { msg: ThreadMessage }) {
         <AnswerBody text={msg.content} reveal={msg.reveal} onCite={onCite} />
       </div>
 
-      {(msg.fallbackUsed || msg.sources.length === 0) && (
+      {(msg.model || msg.sources.length === 0) && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           {msg.sources.length === 0 && <GroundingChip />}
-          {msg.fallbackUsed && msg.model && <FallbackBanner model={msg.model} />}
+          {msg.model && (
+            <AnsweredBy
+              label={modelLabel(msg.model)}
+              effort={msg.effortUsed}
+              fallback={msg.fallbackUsed}
+            />
+          )}
         </div>
       )}
 
@@ -510,6 +537,11 @@ export function ChatScreen() {
   const selectedModel = model ?? models?.default ?? '';
   const allPlanes = planesQuery.data ? [...planesQuery.data.planes, planesQuery.data.inbox] : [];
 
+  // A model id (persisted `chat_messages.model` / live `model_used`) → its friendly display label
+  // from the catalog (e.g. `claude-max` → "Claude Opus 4.8"); falls back to the raw id if unknown.
+  const modelLabel = (id: string | null | undefined): string =>
+    (id ? models?.models.find((m) => m.id === id)?.label : undefined) ?? id ?? '';
+
   // Seed the thread once when a session is opened (click). The guard keeps optimistic turns from a
   // send — including a just-created session — from being wiped by the server refetch.
   useEffect(() => {
@@ -599,6 +631,7 @@ export function ChatScreen() {
           content: resp.answer,
           model: resp.model_used,
           fallbackUsed: resp.fallback_used,
+          effortUsed: resp.effort_used,
           sources: resp.sources,
           reveal: true,
         },
@@ -678,7 +711,7 @@ export function ChatScreen() {
             m.role === 'user' ? (
               <UserBubble key={m.key} content={m.content} />
             ) : (
-              <AssistantMessage key={m.key} msg={m} />
+              <AssistantMessage key={m.key} msg={m} modelLabel={modelLabel} />
             ),
           )
         )}
@@ -734,6 +767,7 @@ export function ChatScreen() {
             {(models?.models ?? []).map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}
+                {m.effort ? ` · ${m.effort}` : ''}
               </option>
             ))}
           </select>

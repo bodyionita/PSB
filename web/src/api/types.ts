@@ -147,14 +147,19 @@ export interface ChatResponse {
   answer: string;
   model_used: string;
   fallback_used: boolean;
+  // Reasoning effort applied to the answering model (null for effort-less models like Nebius);
+  // shown in the per-message "answered by … · effort" caption on a fresh turn (not persisted).
+  effort_used: string | null;
   sources: ChatSourceItem[];
 }
 
-// GET /chat/models — the composer's picker: registry chat ids + labels, `default` = the Chat
-// group's active model.
+// GET /chat/models — the composer's picker: registry chat ids + friendly labels, `default` = the
+// Chat group's active model. `effort` = the effort the Chat group applies to the model (null for
+// effort-less models or one with no configured Chat-group effort), shown as "label · effort".
 export interface ChatModelItem {
   id: string;
   label: string;
+  effort: string | null;
 }
 export interface ChatModelsResponse {
   models: ChatModelItem[];

@@ -55,8 +55,7 @@ class Retriever(Protocol):
         top_k: int | None = None,
         planes: list[str] | None = None,
         min_score: float | None = None,
-    ) -> list[SearchHit]:
-        ...
+    ) -> list[SearchHit]: ...
 
 
 class ChatError(Exception):
@@ -88,6 +87,7 @@ class ChatAnswer:
     answer: str
     model_used: str
     fallback_used: bool
+    effort_used: str | None = None
     sources: list[CitedSource] = field(default_factory=list)
 
 
@@ -155,6 +155,7 @@ class ChatService:
             answer=answer_text,
             model_used=result.model_used,
             fallback_used=result.fallback_used,
+            effort_used=result.effort_used,
             sources=sources,
         )
 

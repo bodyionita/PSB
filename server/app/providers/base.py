@@ -34,6 +34,9 @@ class ChatResult:
     # Registry-level fields, filled in by ProviderRegistry, not the leaf provider:
     model_used: str = ""
     fallback_used: bool = False
+    # The reasoning effort actually threaded to the winning provider (None for effort-less providers
+    # like Nebius). Surfaced by chat for the "answered by <model> · <effort>" caption (ADR-025 §4).
+    effort_used: str | None = None
 
 
 @dataclass(frozen=True)

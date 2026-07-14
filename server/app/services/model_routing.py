@@ -71,10 +71,13 @@ class RoutingDecision:
 @dataclass(frozen=True)
 class ChatCatalog:
     """The chat model picker payload (GET /chat/models, 03-api §Chat): every pickable chat model +
-    the ``default`` = the resolved active model of the ``chat`` group (saved-over-seed)."""
+    the ``default`` = the resolved active model of the ``chat`` group (saved-over-seed). ``efforts``
+    maps a model id -> the effort the ``chat`` group applies to it (only effort-capable configured
+    models appear), so the picker can show "<label> . <effort>" (ADR-025 §4)."""
 
     models: list[ChatModelOption]
     default: str
+    efforts: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -188,9 +191,7 @@ class ModelRoutingService:
         each carries the registry's pickable models (effort capability + levels, ADR-025 §6)."""
         models = self._registry.chat_models()
         saved = await self._saved()
-        return [
-            self._group_settings(g, saved.get(g) or self._seed(g), models) for g in GROUPS
-        ]
+        return [self._group_settings(g, saved.get(g) or self._seed(g), models) for g in GROUPS]
 
     async def save_group(
         self, group: str, *, active: str, fallback: str, effort_by_provider: dict[str, str]
@@ -234,7 +235,11 @@ class ModelRoutingService:
         the registry's config default if the resolved chain is somehow empty."""
         decision = await self.resolve("chat")
         default = decision.chain[0] if decision.chain else self._registry.default_chat_model()
-        return ChatCatalog(models=self._registry.chat_models(), default=default)
+        return ChatCatalog(
+            models=self._registry.chat_models(),
+            default=default,
+            efforts=dict(decision.effort_by_provider),
+        )
 
     async def resolve(self, group: str) -> RoutingDecision:
         """Resolve a group to a chain + per-provider effort (saved over seed; rule-7 safe)."""

@@ -17,6 +17,7 @@ import shutil
 import subprocess
 
 from .base import ChatMessage, ChatProvider, ProviderUnavailable
+from .labels import friendly_model_label
 
 
 def _render_prompt(messages: list[ChatMessage]) -> str:
@@ -47,7 +48,9 @@ class ClaudeMaxProvider(ChatProvider):
         cli_path: str = "claude",
     ) -> None:
         self.id = id
-        self.label = model  # the configured model is the picker label (base.ChatProvider.label)
+        # Friendly display name derived from the configured model (labels.py) — e.g.
+        # "claude-opus-4-8" -> "Claude Opus 4.8" (base.ChatProvider.label; 03-api §Chat/§Settings).
+        self.label = friendly_model_label(model)
         self._model = model
         self._effort = effort
         self._cli_name = cli_path

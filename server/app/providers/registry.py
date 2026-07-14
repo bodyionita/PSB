@@ -128,7 +128,12 @@ class ProviderRegistry:
                 logger.warning("chat provider %s unavailable: %s", provider_id, exc)
                 errors.append(str(exc))
                 continue
-            return ChatResult(text=text, model_used=provider_id, fallback_used=index > 0)
+            return ChatResult(
+                text=text,
+                model_used=provider_id,
+                fallback_used=index > 0,
+                effort_used=efforts.get(provider_id),
+            )
         raise RegistryExhausted("all chat providers unavailable: " + "; ".join(errors))
 
     async def run_chain(
