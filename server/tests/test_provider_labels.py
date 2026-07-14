@@ -13,6 +13,7 @@ from app.providers.labels import friendly_model_label
         ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
         ("claude-haiku-3-5", "Claude Haiku 3.5"),
         ("claude-opus-4-8-20260101", "Claude Opus 4.8"),  # trailing date segment tolerated
+        ("Claude-OPUS-4-8", "Claude Opus 4.8"),  # case-insensitive; family normalised
         # Nebius / Llama — vendor prefix + -Instruct suffix stripped, size upper-cased.
         ("meta-llama/Llama-3.3-70B-Instruct", "Llama 3.3 70B"),
         ("meta-llama/Meta-Llama-3.1-70B-Instruct", "Llama 3.1 70B"),  # old id still folds cleanly

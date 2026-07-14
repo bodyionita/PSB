@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-_CLAUDE = re.compile(r"claude-([a-z]+)-(\d+)-(\d+)(?:-.*)?$")
+_CLAUDE = re.compile(r"claude-([a-z]+)-(\d+)-(\d+)(?:-.*)?$", re.IGNORECASE)
 _LLAMA = re.compile(r"(?:meta-)?llama-([\d.]+)-(\d+b)(?:-.*)?$", re.IGNORECASE)
 
 
