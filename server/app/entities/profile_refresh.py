@@ -97,22 +97,28 @@ class ProfileRefreshService:
         # Effective entity-like types (seeds ∪ approved additions — ADR-027/035); None ⇒ seeds.
         self._vocab = vocab
 
-    async def run_scheduled(self) -> None:
-        """The scheduler/CLI entry point. Opens the run, refreshes, closes it; never raises."""
+    async def run_scheduled(self) -> ProfileRefreshOutcome | None:
+        """The scheduler/CLI entry point. Opens the run, refreshes, closes it; never raises.
+
+        Returns the outcome on success (so a caller like ``reprocess-all`` can fold the profile
+        counts into its own run detail) or ``None`` when the run couldn't be opened/failed — the
+        scheduler ignores the return, keeping this a drop-in for the nightly job."""
         try:
             run_id = await self._runs.start(AGENT)
         except Exception:  # noqa: BLE001 — DB down at row-open: log, never crash the job
             logger.exception("could not open agent_runs row for profile refresh; skipped")
-            return
+            return None
         try:
             outcome = await self._refresh_all()
             logger.info("%s", outcome.summary())
             await self._runs.finish(
                 run_id, status=SUCCEEDED, summary=outcome.summary(), details=outcome.as_dict()
             )
+            return outcome
         except Exception as exc:  # noqa: BLE001 — end the run failed with context, never crash
             logger.exception("profile refresh failed")
             await self._safe_finish(run_id, exc)
+            return None
 
     async def _refresh_all(self) -> ProfileRefreshOutcome:
         entity_like = (await effective_vocabulary(self._vocab, self._settings)).entity_like_types

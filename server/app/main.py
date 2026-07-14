@@ -246,6 +246,9 @@ async def lifespan(app: FastAPI):
         store_backup=store_backup,
         run_store=run_store,
         graph=graph,
+        # Rebuild the derived profiles the reset truncates, so the profile search leg (ADR-037) is
+        # live right after a reprocess instead of empty until the nightly job.
+        profile_refresh=profile_refresh_service,
     )
     app.state.reprocess_service = reprocess_service
 

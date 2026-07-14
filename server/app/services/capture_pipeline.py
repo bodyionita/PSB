@@ -137,6 +137,8 @@ class ReprocessOne:
     ok: bool
     node_count: int = 0
     used_inbox_fallback: bool = False
+    coerced: int = 0  # entity-typed content nodes coerced → memory (ADR-039)
+    accreted: int = 0  # newly-met surface forms recorded on matched hubs (ADR-040 §4)
     error: str | None = None
 
 
@@ -276,11 +278,18 @@ class CapturePipeline:
             await self._index_nodes(paths)
             await self._store.mark_status(capture_id, INDEXED)
             await self._backup.request_commit(f"reprocess {capture_id}")
+            # Per-capture heal detail (ADR-042 auditability): coercions (ADR-039) come off the
+            # organize result; accretions (ADR-040 §4) were recorded on `inter.entities` by
+            # `_resolve_and_write` (always a dict on this ok path — empty `accreted` on the
+            # entity-less inbox fallback; `or {}` is a defensive guard).
+            accreted = len((inter.entities or {}).get("accreted", []))
             return ReprocessOne(
                 capture_id=capture_id,
                 ok=True,
                 node_count=len(paths),
                 used_inbox_fallback=organize.used_fallback,
+                coerced=len(organize.coerced_entity_types),
+                accreted=accreted,
             )
         except Exception as exc:  # noqa: BLE001 — one bad capture must not abort the reprocess
             logger.exception("reprocess of capture %s failed", capture_id)

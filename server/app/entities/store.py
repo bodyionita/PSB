@@ -87,6 +87,11 @@ class PgAliasStore:
         # so the comparison is diacritic-insensitive without extra work here (ADR-041).
         toks = list(tokens or [])
         lim = limit if limit is not None else 100
+        # The exact leg mirrors ``normalize_alias`` exactly: lower-case **and** collapse internal
+        # whitespace runs + trim (``btrim(regexp_replace(..., '\s+', ' ', 'g'))``), so a stored form
+        # with doubled/odd spacing still exact-matches ``$1`` (already collapsed). Diacritics are
+        # folded on write, so no folding is needed here (ADR-041). Not sargable, but candidate
+        # lookup is small + cold, not a hot path.
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 r"""
@@ -95,8 +100,9 @@ class PgAliasStore:
                 WHERE type = ANY($2::text[])
                   AND merged_into IS NULL
                   AND (
-                        lower(title) = $1
-                     OR EXISTS (SELECT 1 FROM unnest(aliases) a WHERE lower(a) = $1)
+                        btrim(regexp_replace(lower(title), '\s+', ' ', 'g')) = $1
+                     OR EXISTS (SELECT 1 FROM unnest(aliases) a
+                                WHERE btrim(regexp_replace(lower(a), '\s+', ' ', 'g')) = $1)
                      OR (
                           cardinality($3::text[]) > 0
                           AND EXISTS (
@@ -110,8 +116,9 @@ class PgAliasStore:
                      )
                   )
                 ORDER BY
-                  (lower(title) = $1
-                   OR EXISTS (SELECT 1 FROM unnest(aliases) a WHERE lower(a) = $1)) DESC,
+                  (btrim(regexp_replace(lower(title), '\s+', ' ', 'g')) = $1
+                   OR EXISTS (SELECT 1 FROM unnest(aliases) a
+                              WHERE btrim(regexp_replace(lower(a), '\s+', ' ', 'g')) = $1)) DESC,
                   title
                 LIMIT $4
                 """,

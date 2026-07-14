@@ -53,6 +53,14 @@ class GraphRecomputer(Protocol):
     async def recompute(self) -> object: ...
 
 
+class ProfileRefresher(Protocol):
+    """The derived-profile rebuild surface (:class:`~app.entities.profile_refresh.
+    ProfileRefreshService`). Its ``run_scheduled`` opens its own feed-visible ``profile-refresh``
+    run and returns an outcome object (or ``None``) — never raises (rule 7)."""
+
+    async def run_scheduled(self) -> object | None: ...
+
+
 class ReprocessStore(Protocol):
     """The DB reset + capture-order reads the op relies on (plain SQL, ADR-011)."""
 
@@ -97,6 +105,7 @@ class ReprocessService:
         store_backup: StoreCommitter,
         run_store: AgentRunStore,
         graph: GraphRecomputer | None = None,
+        profile_refresh: ProfileRefresher | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -105,6 +114,7 @@ class ReprocessService:
         self._backup = store_backup
         self._runs = run_store
         self._graph = graph
+        self._profile_refresh = profile_refresh
         self._ignore = set(settings.store_ignore)
         self._running = False
         self._tasks: set[asyncio.Task] = set()
@@ -159,26 +169,34 @@ class ReprocessService:
             # 2. Replay every capture's raw through the current pipeline, oldest first, so entity
             #    accretion rebuilds deterministically (ADR-042 §1). Sequential (awaited).
             ids = await self._store.capture_ids_chronological()
-            ok = failed = nodes = inbox = 0
+            ok = failed = nodes = inbox = coerced = accreted = 0
             for capture_id in ids:
                 outcome = await self._reprocessor.reprocess_capture(capture_id)
                 if outcome.ok:
                     ok += 1
                     nodes += outcome.node_count
+                    coerced += outcome.coerced
+                    accreted += outcome.accreted
                     if outcome.used_inbox_fallback:
                         inbox += 1
                 else:
                     failed += 1
 
             # 3. Recompute derived `similar` edges over the rebuilt vectors (search parity), then
-            #    one force commit + push under the store lock (ADR-014).
+            #    rebuild the derived entity profiles the reset truncated (node_profiles) so the
+            #    profile search leg (ADR-037) is live immediately — not left empty until the nightly
+            #    job. Best-effort (rule 7): the refresh never raises + opens its own feed run.
             if self._graph is not None:
                 await self._graph.recompute()
+            profiles_refreshed = await self._refresh_profiles()
+            #    Then one force commit + push under the store lock (ADR-014). Profiles are DB-only
+            #    (never in the store), so their rebuild sits outside the git commit.
             backup = await self._backup.backup_now("reprocess-all-from-raw")
 
             summary = (
                 f"reprocess-all: {ok}/{len(ids)} captures re-ingested ({nodes} node(s), "
-                f"{inbox} inbox), {failed} failed; removed {removed} file(s); push={backup.pushed}"
+                f"{inbox} inbox, {coerced} coerced, {accreted} accreted), {failed} failed; "
+                f"removed {removed} file(s); {profiles_refreshed} profile(s); push={backup.pushed}"
             )
             if merges:
                 summary += f"; ⚠ {merges} standing merge(s) NOT re-applied (re-merge manually)"
@@ -197,6 +215,9 @@ class ReprocessService:
                     "failed": failed,
                     "inbox_fallback": inbox,
                     "nodes": nodes,
+                    "coerced": coerced,
+                    "accreted": accreted,
+                    "profiles_refreshed": profiles_refreshed,
                     "removed_files": removed,
                     "standing_merges_not_reapplied": merges,
                     "pushed": backup.pushed,
@@ -205,6 +226,15 @@ class ReprocessService:
         except Exception as exc:  # noqa: BLE001 — end the run failed with context, never crash
             logger.exception("reprocess-all failed")
             await self._safe_finish(run_id, exc)
+
+    async def _refresh_profiles(self) -> int:
+        """Rebuild the derived entity profiles the reset truncated. Returns how many were
+        regenerated (0 when no refresher is wired). Best-effort: ``run_scheduled`` never raises and
+        opens its own ``profile-refresh`` feed run; a ``None`` outcome (its DB open failed) → 0."""
+        if self._profile_refresh is None:
+            return 0
+        outcome = await self._profile_refresh.run_scheduled()
+        return int(getattr(outcome, "refreshed", 0) or 0)
 
     async def _safe_finish(self, run_id: str, exc: Exception) -> None:
         try:
@@ -262,6 +292,7 @@ def build_reprocess_service(
     entrypoint (``python -m app.cli reprocess-all``). Mirrors the ``main.py`` wiring but assembles
     only what the op needs, so a fresh process can drive the pass without the HTTP app."""
     # Imported here (not at module top) so the CLI's minimal context builds these lazily.
+    from ..entities.profile_refresh import build_profile_refresh_service
     from ..entities.resolver import EntityResolver
     from ..entities.store import PgAliasStore
     from ..graph.service import DerivedEdgeGraph
@@ -319,4 +350,5 @@ def build_reprocess_service(
         store_backup=store_backup,
         run_store=run_store,
         graph=graph,
+        profile_refresh=build_profile_refresh_service(settings, db),
     )

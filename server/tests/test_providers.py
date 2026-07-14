@@ -8,6 +8,7 @@ Authorization header. Keyed providers (OpenAI/Nebius/Groq) keep the old behavior
 from __future__ import annotations
 
 import subprocess
+import sys
 
 import pytest
 
@@ -108,3 +109,34 @@ async def test_claude_max_empty_output_degrades_to_unavailable(monkeypatch):
     )
     with pytest.raises(ProviderUnavailable):
         await provider.complete([ChatMessage(role="user", content="hi")])
+
+
+async def test_claude_max_invalid_utf8_byte_decodes_to_replacement_end_to_end(monkeypatch):
+    """End-to-end decode (not just the kwargs boundary): a stray invalid byte from the CLI is
+    decoded via the pinned ``errors='replace'`` → U+FFFD and ``complete()`` returns the cleaned
+    text, degrading instead of raising a ``UnicodeDecodeError`` past its narrow ``except`` (rule 7).
+    Drives a REAL subprocess emitting a real ``0xFF`` byte, honouring the provider's actual
+    encoding/errors kwargs — so a regression that dropped ``errors='replace'`` would raise here."""
+    real_run = subprocess.run
+
+    def _run_real_invalid_bytes(args, **kwargs):
+        # The provider must pin utf-8 + replace; forward those exact kwargs onto a real subprocess
+        # that writes an invalid byte, so the genuine stdio decode path turns it into U+FFFD.
+        assert kwargs.get("encoding") == "utf-8"
+        assert kwargs.get("errors") == "replace"
+        emitter = [sys.executable, "-c", r"import sys; sys.stdout.buffer.write(b'Hi \xff there')"]
+        return real_run(
+            emitter,
+            capture_output=kwargs.get("capture_output", True),
+            text=kwargs.get("text", True),
+            encoding=kwargs["encoding"],
+            errors=kwargs["errors"],
+            timeout=kwargs.get("timeout", 30),
+        )
+
+    provider = ClaudeMaxProvider(model="m")
+    monkeypatch.setattr(provider, "_resolve_cli", lambda: "claude")
+    monkeypatch.setattr("app.providers.claude_max.subprocess.run", _run_real_invalid_bytes)
+    out = await provider.complete([ChatMessage(role="user", content="hi")])
+    assert "�" in out  # the 0xFF became the replacement char — decoded, not crashed
+    assert out.startswith("Hi") and out.endswith("there")
