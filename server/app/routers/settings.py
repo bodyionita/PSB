@@ -1,24 +1,80 @@
 """Settings router (03-api.md §Settings). Session-gated, no LLM.
 
-``PUT /settings/vocabulary`` (M3 task 7, ADR-027 / ADR-035) approves or rejects a pending
-node/edge type proposal from the Settings → Vocabulary panel. It is a thin peer of
-``POST /review/{id}`` over the one governance choke point (:class:`VocabularyService`): approve
-writes the type to the live vocabulary + opens the ``vocab-consolidation`` job, reject discards.
+``GET /settings`` + ``PUT /settings/models`` (model routing, ADR-025 / ADR-043, M4 task 5) expose
+the 3 routing groups (chat/conspect/quick) for the Settings → Models panel: the effective routing
+per group (saved-over-seed) plus the registry's pickable models and their effort capability/levels
+(registry-sourced — no hardcoded lists in the web). ``PUT`` saves one group and busts the routing
+cache (forward-live); an unknown model id / bad effort level is a ``422``.
 
-``GET /settings`` + ``PUT /settings/models`` (model routing, ADR-025) arrive with M4 chat; this
-router holds only the vocabulary seam for now.
+``PUT /settings/vocabulary`` (M3 task 7, ADR-027 / ADR-035) approves or rejects a pending node/edge
+type proposal from the Settings → Vocabulary panel. It is a thin peer of ``POST /review/{id}`` over
+the one governance choke point (:class:`VocabularyService`): approve writes the type to the live
+vocabulary + opens the ``vocab-consolidation`` job, reject discards.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..dependencies import get_vocabulary_service, require_session
-from ..models import ReviewItemResponse, VocabularyResolveRequest
+from ..dependencies import get_model_routing, get_vocabulary_service, require_session
+from ..models import (
+    GroupRoutingModel,
+    ModelRoutingUpdate,
+    ReviewItemResponse,
+    RoutingModelItem,
+    SettingsResponse,
+    VocabularyResolveRequest,
+)
+from ..services.model_routing import GroupSettings, ModelRoutingService, UnknownModel
 from ..services.review_queue import BadResolution, ReviewNotFound, ReviewNotPending
 from ..vocab.service import VocabularyService
 
 router = APIRouter(prefix="/settings", tags=["settings"], dependencies=[Depends(require_session)])
+
+
+@router.get("", response_model=SettingsResponse)
+async def get_settings(
+    routing: ModelRoutingService = Depends(get_model_routing),
+) -> SettingsResponse:
+    groups = await routing.all_settings()
+    return SettingsResponse(groups=[_group_model(g) for g in groups])
+
+
+@router.put("/models", response_model=GroupRoutingModel)
+async def save_models(
+    payload: ModelRoutingUpdate,
+    routing: ModelRoutingService = Depends(get_model_routing),
+) -> GroupRoutingModel:
+    try:
+        updated = await routing.save_group(
+            payload.group,
+            active=payload.active,
+            fallback=payload.fallback,
+            effort_by_provider=payload.effort_by_provider,
+        )
+    except UnknownModel as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    return _group_model(updated)
+
+
+def _group_model(g: GroupSettings) -> GroupRoutingModel:
+    return GroupRoutingModel(
+        group=g.group,
+        active=g.active,
+        fallback=g.fallback,
+        effort_by_provider=g.effort_by_provider,
+        models=[
+            RoutingModelItem(
+                id=m.id,
+                label=m.label,
+                supports_effort=m.supports_effort,
+                effort_levels=m.effort_levels,
+            )
+            for m in g.models
+        ],
+    )
 
 
 @router.put("/vocabulary", response_model=ReviewItemResponse)

@@ -44,12 +44,22 @@ class FakeChatProvider(ChatProvider):
         responder: Callable[[list[ChatMessage]], str] | None = None,
         available: bool = True,
         supports_effort: bool = False,
+        effort_levels: tuple[str, ...] = (),
+        label: str = "",
+        can_chat: bool = True,
     ) -> None:
         self.id = id
+        self.label = label
+        self.can_chat = can_chat
         self._reply = reply if reply is not None else f"answer from {id}"
         self._responder = responder
         self._available = available
         self.supports_effort = supports_effort
+        # Default the effort scale to the Claude scale when effort-capable and none given, so a
+        # routing/settings test sees realistic levels without wiring them every time.
+        self.effort_levels = effort_levels or (
+            ("low", "medium", "high", "xhigh", "max") if supports_effort else ()
+        )
         self.calls = 0
         # The per-call efforts this provider was asked for, in order (None when unset) — lets a
         # routing test assert the group's effort reached the right provider (ADR-025 §4).

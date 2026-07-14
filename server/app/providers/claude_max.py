@@ -35,6 +35,8 @@ def _render_prompt(messages: list[ChatMessage]) -> str:
 class ClaudeMaxProvider(ChatProvider):
     # The CLI takes ``--effort`` natively, so a per-call effort (ADR-025 §4) is honored.
     supports_effort = True
+    # The CLI's ``--effort`` scale (ADR-025 §6, config comment on ``claude_max_effort``).
+    effort_levels = ("low", "medium", "high", "xhigh", "max")
 
     def __init__(
         self,

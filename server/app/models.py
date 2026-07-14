@@ -6,7 +6,7 @@ These are the wire contract only; they are not DB models (there is no ORM).
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -224,6 +224,45 @@ class ChatSessionDetail(BaseModel):
     id: str
     title: str | None = None
     messages: list[ChatMessageItem] = Field(default_factory=list)
+
+
+# --- Settings: model routing (03-api.md §Settings, ADR-025 / ADR-043) ---
+class RoutingModelItem(BaseModel):
+    """A pickable chat model for a routing group's dropdowns (GET /settings). ``effort_levels`` is
+    empty unless ``supports_effort`` — the web renders the effort selector only where it applies,
+    from these registry-sourced levels (no hardcoded enums)."""
+
+    id: str
+    label: str
+    supports_effort: bool = False
+    effort_levels: list[str] = Field(default_factory=list)
+
+
+class GroupRoutingModel(BaseModel):
+    """One routing group's editable state (GET /settings): the effective active/fallback + per-
+    provider effort (saved-over-seed) and the models the dropdowns choose from."""
+
+    group: str
+    active: str
+    fallback: str
+    effort_by_provider: dict[str, str] = Field(default_factory=dict)
+    models: list[RoutingModelItem] = Field(default_factory=list)
+
+
+class SettingsResponse(BaseModel):
+    """Model routing for all 3 groups (GET /settings, ADR-025 + ADR-043)."""
+
+    groups: list[GroupRoutingModel] = Field(default_factory=list)
+
+
+class ModelRoutingUpdate(BaseModel):
+    """Save one group's routing (PUT /settings/models). ``group`` is constrained to the 3 known
+    groups (422 otherwise); unknown model ids / bad effort levels are a 422 from the service."""
+
+    group: Literal["chat", "conspect", "quick"]
+    active: str = Field(min_length=1)
+    fallback: str = ""
+    effort_by_provider: dict[str, str] = Field(default_factory=dict)
 
 
 # --- Meta (03-api.md §Meta) ---

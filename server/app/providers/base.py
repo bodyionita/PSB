@@ -74,6 +74,11 @@ class ChatProvider(Provider):
     # the effort control only where it applies. Providers without one ignore the arg.
     supports_effort: bool = False
 
+    # The valid ``effort`` values for this provider, most→least or the provider's own order — the
+    # source for the Settings effort selector (ADR-025 §6: no hardcoded effort enums in the web).
+    # Empty when ``supports_effort`` is False.
+    effort_levels: tuple[str, ...] = ()
+
     # Human-readable display name for the model picker (GET /chat/models, GET /settings — 03-api
     # §Chat/§Settings). Provider-sourced (like ``supports_effort``) so no router hardcodes a label;
     # concrete providers set it to their configured model in ``__init__``. Empty ⇒ fall back to id.

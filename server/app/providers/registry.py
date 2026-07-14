@@ -9,7 +9,7 @@ is never swallowed (CLAUDE.md rule 3).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..config import Settings
 from .base import (
@@ -35,10 +35,16 @@ class RegistryExhausted(ProviderUnavailable):
 
 @dataclass(frozen=True)
 class ChatModelOption:
-    """A pickable chat model for the composer/settings picker (03-api §Chat, GET /chat/models)."""
+    """A pickable chat model for the composer/settings pickers (03-api §Chat/§Settings).
+
+    ``GET /chat/models`` uses ``id``/``label``; ``GET /settings`` also renders ``supports_effort``
+    and ``effort_levels`` so the effort selector appears only where it applies, with the levels
+    registry-sourced (ADR-025 §6, no hardcoded enums in the web)."""
 
     id: str
     label: str
+    supports_effort: bool = False
+    effort_levels: list[str] = field(default_factory=list)
 
 
 class ProviderRegistry:
@@ -65,7 +71,12 @@ class ProviderRegistry:
         STT/embedding instances are excluded. The label is provider-sourced (its configured model),
         falling back to the id."""
         return [
-            ChatModelOption(id=pid, label=provider.label or pid)
+            ChatModelOption(
+                id=pid,
+                label=provider.label or pid,
+                supports_effort=provider.supports_effort,
+                effort_levels=list(provider.effort_levels),
+            )
             for pid, provider in self._providers.items()
             if isinstance(provider, ChatProvider) and provider.can_chat
         ]

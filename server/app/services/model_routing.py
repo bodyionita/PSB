@@ -77,6 +77,23 @@ class ChatCatalog:
     default: str
 
 
+@dataclass(frozen=True)
+class GroupSettings:
+    """One routing group's editable state for Settings (GET /settings, 03-api §Settings): the
+    effective ``{active, fallback, effort_by_provider}`` (saved-over-seed) + the registry's pickable
+    ``models`` (each carrying ``supports_effort``/``effort_levels``, ADR-025 §6)."""
+
+    group: str
+    active: str
+    fallback: str
+    effort_by_provider: dict[str, str]
+    models: list[ChatModelOption]
+
+
+class UnknownModel(ValueError):
+    """A PUT /settings/models referenced an id/effort the registry doesn't know (→ 422)."""
+
+
 class ModelRoutingStore(Protocol):
     """Read/write the saved per-group routing overrides (the mutable half; seeds are config)."""
 
@@ -165,6 +182,51 @@ class ModelRoutingService:
             if pid and self._registry.supports_effort(pid)
         }
         return GroupRouting(active=active, fallback=fallback, effort_by_provider=ebp)
+
+    async def all_settings(self) -> list[GroupSettings]:
+        """Every group's editable routing for GET /settings, in ``GROUPS`` order (saved-over-seed);
+        each carries the registry's pickable models (effort capability + levels, ADR-025 §6)."""
+        models = self._registry.chat_models()
+        saved = await self._saved()
+        return [
+            self._group_settings(g, saved.get(g) or self._seed(g), models) for g in GROUPS
+        ]
+
+    async def save_group(
+        self, group: str, *, active: str, fallback: str, effort_by_provider: dict[str, str]
+    ) -> GroupSettings:
+        """Validate + persist one group's routing (PUT /settings/models), busting the cache so it's
+        forward-live (ADR-025 §3). ``active``/``fallback`` must be pickable chat models and every
+        effort entry a supported ``(model, level)`` — otherwise :class:`UnknownModel` (→ 422)."""
+        if group not in GROUPS:
+            raise UnknownModel(f"unknown routing group: {group!r}")
+        options = {m.id: m for m in self._registry.chat_models()}
+        if active not in options:
+            raise UnknownModel(f"unknown active model: {active!r}")
+        if fallback and fallback not in options:
+            raise UnknownModel(f"unknown fallback model: {fallback!r}")
+        for pid, level in effort_by_provider.items():
+            opt = options.get(pid)
+            if opt is None or not opt.supports_effort:
+                raise UnknownModel(f"model does not support effort: {pid!r}")
+            if level not in opt.effort_levels:
+                raise UnknownModel(f"invalid effort {level!r} for model {pid!r}")
+        routing = GroupRouting(
+            active=active, fallback=fallback, effort_by_provider=dict(effort_by_provider)
+        )
+        await self.save(group, routing)  # persist + invalidate (forward-live)
+        return self._group_settings(group, routing, list(options.values()))
+
+    def _group_settings(
+        self, group: str, routing: GroupRouting, models: list[ChatModelOption]
+    ) -> GroupSettings:
+        return GroupSettings(
+            group=group,
+            active=routing.active,
+            fallback=routing.fallback,
+            effort_by_provider=dict(routing.effort_by_provider),
+            models=list(models),
+        )
 
     async def chat_catalog(self) -> ChatCatalog:
         """The chat picker payload (GET /chat/models): all pickable chat models + the ``chat``
