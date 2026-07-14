@@ -196,7 +196,7 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     nebius_api_key: str = ""
     nebius_base_url: str = "https://api.studio.nebius.ai/v1"
-    nebius_chat_model: str = "meta-llama/Meta-Llama-3.1-70B-Instruct"
+    nebius_chat_model: str = "meta-llama/Llama-3.3-70B-Instruct"
     # Groq — STT primary (ADR-020). OpenAI-compatible /audio/transcriptions endpoint, so it
     # reuses OpenAICompatibleProvider; generous free tier + whisper-large-v3 quality.
     groq_api_key: str = ""
