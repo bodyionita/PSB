@@ -89,6 +89,7 @@ def test_vocabulary_guards_reject_bad_config():
         Settings(node_types="memory,person", entity_like_types="person,ghost")
 
 
-def test_compute_head_is_migration_006():
-    # M3 task 6 adds revision 006 (node_profiles, ADR-030 §4/ADR-034); head advances to it.
-    assert compute_head() == "006"
+def test_compute_head_is_migration_007():
+    # M3 task 10 adds revision 007 (node_profiles HNSW index, ADR-037 profile-embedding-in-search);
+    # head advances to it from 006 (node_profiles, task 6).
+    assert compute_head() == "007"

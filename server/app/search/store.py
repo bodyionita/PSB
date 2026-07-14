@@ -110,32 +110,59 @@ class PgSearchStore:
         types: list[str] | None,
         min_score: float,
     ) -> list[SearchHit]:
-        # Best chunk per node via DISTINCT ON (node, ascending cosine distance), then re-rank the
-        # per-node winners by score and take top_k. `planes && $2` is array-overlap membership
-        # (ADR-005 — never folder); `n.type = ANY($3)` filters node type; `$2/$3 IS NULL` skips the
-        # filter. Tombstones excluded. score = 1 - cosine distance.
+        # Two retrieval legs unioned, then best-per-node (ADR-037): the per-chunk vector scan over
+        # `chunks` ⊍ a per-profile scan over `node_profiles.embedding` (the derived entity summary,
+        # same `search_document:` space, all tiers). `DISTINCT ON (node_id) ORDER BY node_id, dist`
+        # collapses to the single nearest row per node across both legs — free dedup when a node
+        # matches on both a chunk and its profile — then re-rank winners by score and take top_k.
+        # `planes && $2` is array-overlap membership (ADR-005 — never folder); `n.type = ANY($3)`
+        # filters node type; `$2/$3 IS NULL` skips the filter. Tombstones + null embeddings excluded
+        # in both legs. score = 1 - cosine distance; raw union, no leg weighting (RRF is M4).
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT node_id, store_path, type, title, plane, planes, tags, snippet, score
                 FROM (
-                    SELECT DISTINCT ON (n.id)
-                        n.id          AS node_id,
-                        n.store_path  AS store_path,
-                        n.type        AS type,
-                        n.title       AS title,
-                        n.plane       AS plane,
-                        n.planes      AS planes,
-                        n.tags        AS tags,
-                        c.content     AS snippet,
-                        1 - (c.embedding <=> $1) AS score
-                    FROM chunks c
-                    JOIN nodes n ON n.id = c.node_id
-                    WHERE c.embedding IS NOT NULL
-                      AND n.merged_into IS NULL
-                      AND ($2::text[] IS NULL OR n.planes && $2::text[])
-                      AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
-                    ORDER BY n.id, c.embedding <=> $1
+                    SELECT DISTINCT ON (node_id)
+                        node_id, store_path, type, title, plane, planes, tags, snippet, score
+                    FROM (
+                        SELECT
+                            n.id          AS node_id,
+                            n.store_path  AS store_path,
+                            n.type        AS type,
+                            n.title       AS title,
+                            n.plane       AS plane,
+                            n.planes      AS planes,
+                            n.tags        AS tags,
+                            c.content     AS snippet,
+                            c.embedding <=> $1       AS dist,
+                            1 - (c.embedding <=> $1) AS score
+                        FROM chunks c
+                        JOIN nodes n ON n.id = c.node_id
+                        WHERE c.embedding IS NOT NULL
+                          AND n.merged_into IS NULL
+                          AND ($2::text[] IS NULL OR n.planes && $2::text[])
+                          AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
+                        UNION ALL
+                        SELECT
+                            n.id          AS node_id,
+                            n.store_path  AS store_path,
+                            n.type        AS type,
+                            n.title       AS title,
+                            n.plane       AS plane,
+                            n.planes      AS planes,
+                            n.tags        AS tags,
+                            np.profile    AS snippet,
+                            np.embedding <=> $1       AS dist,
+                            1 - (np.embedding <=> $1) AS score
+                        FROM node_profiles np
+                        JOIN nodes n ON n.id = np.node_id
+                        WHERE np.embedding IS NOT NULL
+                          AND n.merged_into IS NULL
+                          AND ($2::text[] IS NULL OR n.planes && $2::text[])
+                          AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
+                    ) legs
+                    ORDER BY node_id, dist
                 ) best
                 WHERE score >= $4
                 ORDER BY score DESC
