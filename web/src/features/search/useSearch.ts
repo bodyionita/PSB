@@ -40,10 +40,5 @@ export function useSearch(submitted: Submitted | null) {
   });
 }
 
-export function useNode(nodeId: string | null) {
-  return useQuery({
-    queryKey: ['node', nodeId],
-    queryFn: () => api.getNode(nodeId!),
-    enabled: nodeId != null,
-  });
-}
+// `useNode` (the node-detail read behind an expanded card) moved to the shared ui/NodePreview
+// primitive, colocated with its only consumer.

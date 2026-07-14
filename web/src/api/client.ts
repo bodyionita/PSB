@@ -6,6 +6,11 @@ import type {
   BackupResponse,
   CaptureAcceptedResponse,
   CaptureView,
+  ChatModelsResponse,
+  ChatRequest,
+  ChatResponse,
+  ChatSessionDetail,
+  ChatSessionItem,
   HealthResponse,
   LoginResponse,
   MeResponse,
@@ -105,6 +110,14 @@ export const api = {
     }),
   getNode: (id: string) =>
     request<NodeDetailResponse>(`/nodes/${encodeURIComponent(id)}`),
+
+  // --- Chat (03-api.md §Chat, M4 / ADR-025) ---
+  chat: (body: ChatRequest) =>
+    request<ChatResponse>('/chat', { method: 'POST', body: JSON.stringify(body) }),
+  chatModels: () => request<ChatModelsResponse>('/chat/models'),
+  listChatSessions: () => request<ChatSessionItem[]>('/chat/sessions'),
+  getChatSession: (id: string) =>
+    request<ChatSessionDetail>(`/chat/sessions/${encodeURIComponent(id)}`),
 
   // --- Review queue (03-api.md §Review queue, M3) ---
   listReview: (status = 'pending', kind?: string) =>

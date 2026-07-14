@@ -116,6 +116,79 @@ export interface NodeDetailResponse {
   edges: NodeEdgeItem[];
 }
 
+// --- Chat (03-api.md §Chat, M4 / ADR-025 / ADR-043) ---
+// One cited node backing a chat answer — cited-only, renumbered `[1..m]` to match the answer's
+// inline markers. Shape mirrors the persisted source jsonb (GET /chat/sessions/{id}) and the live
+// POST /chat response. No `plane` singular field — planes[] carries membership (like search).
+export interface ChatSourceItem {
+  node_id: string;
+  store_path: string;
+  type: string;
+  title: string | null;
+  snippet: string;
+  score: number;
+  planes: string[];
+}
+
+// POST /chat request. `session_id` omitted ⇒ implicit session creation; `model` = the composer's
+// per-conversation picker override of the Chat group's active model; `planes` scopes retrieval.
+export interface ChatRequest {
+  message: string;
+  session_id?: string;
+  model?: string;
+  planes?: string[];
+  top_k?: number;
+}
+
+// POST /chat response. `sources` is empty for general-knowledge / "not in your memories" answers;
+// `fallback_used` flags that a non-primary model answered (ADR-025 transparency banner).
+export interface ChatResponse {
+  session_id: string;
+  answer: string;
+  model_used: string;
+  fallback_used: boolean;
+  sources: ChatSourceItem[];
+}
+
+// GET /chat/models — the composer's picker: registry chat ids + labels, `default` = the Chat
+// group's active model.
+export interface ChatModelItem {
+  id: string;
+  label: string;
+}
+export interface ChatModelsResponse {
+  models: ChatModelItem[];
+  default: string;
+}
+
+// GET /chat/sessions — one thread in the list (newest-first). `title` is null until the best-effort
+// `quick`-tier titling lands after the first exchange (ADR-043); the list falls back to the first
+// message meanwhile.
+export interface ChatSessionItem {
+  id: string;
+  title: string | null;
+  created_at: string | null;
+  last_model: string | null;
+}
+
+// One persisted turn (GET /chat/sessions/{id}). `sources` carries cited nodes for assistant turns
+// (empty otherwise); `model` is the answering model (no persisted `fallback_used` — the banner is a
+// live-response transparency signal only).
+export interface ChatMessageItem {
+  role: 'user' | 'assistant';
+  content: string;
+  model: string | null;
+  sources: ChatSourceItem[];
+  created_at: string | null;
+}
+
+// GET /chat/sessions/{id} — a session with its full message history.
+export interface ChatSessionDetail {
+  id: string;
+  title: string | null;
+  messages: ChatMessageItem[];
+}
+
 // --- Types / vocabulary (03-api.md §Search & graph, §Settings, M3 / ADR-027) ---
 // A pending `vocab-proposal` the organizer filed; resolve it by its review-item `id`.
 export interface VocabProposalItem {
