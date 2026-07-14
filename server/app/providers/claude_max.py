@@ -67,6 +67,7 @@ class ClaudeMaxProvider(ChatProvider):
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
         except (OSError, subprocess.SubprocessError):
@@ -102,10 +103,15 @@ class ClaudeMaxProvider(ChatProvider):
         # decodes with the host locale (cp1252 on a Windows dev box), which mojibakes any non-ASCII
         # organizer output (e.g. Romanian diacritics) before it reaches the writer. On the Linux
         # container the locale is already UTF-8, so this is a no-op there — pure host-robustness.
+        # ``errors="replace"`` keeps a stray invalid byte from raising a ``UnicodeDecodeError`` (a
+        # ``ValueError`` that would escape ``complete``'s ``except (OSError, SubprocessError)`` and
+        # crash instead of degrading to the fallback chain — rule 7): it degrades to U+FFFD, which
+        # folds/slugs away harmlessly downstream.
         return subprocess.run(
             [cli, "--print", "--model", model, "--effort", effort, prompt],
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             timeout=300,
         )
