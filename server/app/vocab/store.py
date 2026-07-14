@@ -89,6 +89,9 @@ class PgVocabularyStore:
         }
         # Read-modify-write in one transaction (single-user; app_settings is low-contention). The
         # row may not exist yet, so upsert with ON CONFLICT after computing the merged value.
+        # NOTE: on the very first approval the row is absent, so ``FOR UPDATE`` locks nothing and
+        # two concurrent first-approvals could each merge from empty (a lost update). Harmless for a
+        # single user approving one at a time; once the row exists ``FOR UPDATE`` serializes writes.
         async with self._db.transaction() as conn:
             current = _decode(
                 await conn.fetchval(

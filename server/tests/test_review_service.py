@@ -175,6 +175,39 @@ async def test_pick_new_mints_entity_then_links(tmp_path: Path):
     assert indexer.calls[0][-1] == src_path and len(indexer.calls[0]) == 2
 
 
+async def test_mint_accepts_a_freshly_approved_entity_type(tmp_path: Path):
+    """Forward-live governance across services: approving a new ``entity_type`` (via the delegated
+    vocab branch) makes minting a ``new`` entity of that type succeed — the mint reads the effective
+    entity-like types, not the seeds (ADR-027/035, review_service._mint_entity)."""
+    service, review, index, _, _, _, writer, _ = _build(tmp_path)
+    _seed_source_node(writer, index)
+
+    # A 'pet' entity of that type does not exist in the seeds → mint would reject...
+    pet_item = ReviewItem(
+        kind=KIND_ENTITY_AMBIGUITY,
+        payload={
+            "mention": {"name": "Rex", "type": "pet", "rel": "involves"},
+            "candidates": [],
+            "pending_edges": [{"src": SRC_ID, "rel": "involves", "since": "2026-07-12"}],
+        },
+    )
+    reject_rid = await review.enqueue(pet_item)
+    with pytest.raises(BadResolution):
+        await service.resolve(reject_rid, choice="new")
+
+    # ...until 'pet' is approved as an entity type through the shared VocabularyService.
+    vocab_rid = await review.enqueue(
+        ReviewItem(kind=KIND_VOCAB_PROPOSAL, payload={"vocab": "entity_type", "value": "pet"})
+    )
+    await service.resolve(vocab_rid, verdict="approve")
+
+    rid = await review.enqueue(pet_item)
+    record = await service.resolve(rid, choice="new")
+
+    assert record.status == "resolved"
+    assert list((tmp_path / "store" / "pet").glob("*.md"))  # minted under the new type's folder
+
+
 async def test_maybe_defers_without_materializing(tmp_path: Path):
     service, review, index, indexer, backup, _, writer, settings = _build(tmp_path)
     src_path = _seed_source_node(writer, index)
