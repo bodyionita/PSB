@@ -292,6 +292,20 @@ class Settings(BaseSettings):
     # Bounded [0,1]: 1.0 disables the prior (every node at full recency), 0 lets it decay fully.
     search_recency_floor: float = Field(default=0.9, ge=0, le=1)
 
+    # --- Chat (M4 task 3, 04-pipelines §5, ADR-025). Interactive grounded chat over the graph. ---
+    # Turns condensed into a standalone English query on turn ≥2 (04 §5). Also bounds how much
+    # prior history is replayed into the answer prompt, so a long session can't bloat the context.
+    chat_condense_last_n: int = 15
+    # "Not in your memories" min_score floor for chat retrieval (04 §5, MINOR-1 from task 2). This
+    # floors the fused **RRF×recency** score, NOT a cosine score: one leg at rank 1 contributes
+    # 1/(k+1) ≈ 0.016 (k=60), both legs ≈ 0.033, recency-attenuated — so the chat floor lives on a
+    # ~0.03-max scale. 0.01 is a gentle backstop that only sheds the candidate-pool tail; the
+    # grounding prompt is the primary "not in your memories" judge (prompt-driven + floor, no
+    # classifier). A per-cosine value like 0.5 here would silently drop every hit — do not use one.
+    chat_retrieval_min_score: float = 0.01
+    # A generated session title is trimmed to this many chars (best-effort `quick`-tier titling).
+    chat_title_max_chars: int = 80
+
     # --- Connectors ---
     slack_user_token: str = ""
 

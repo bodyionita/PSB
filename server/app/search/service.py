@@ -70,13 +70,17 @@ class SearchService:
         since: date | None = None,
         until: date | None = None,
         as_of: date | None = None,
+        min_score: float | None = None,
     ) -> list[SearchHit]:
         """Hybrid (vector ⊍ FTS, RRF-fused) node-grouped search + recency prior (03-api §Search).
 
         The **same** query string drives both legs: the vector leg embeds it (``search_query:``
         prefix, ADR-022); the FTS leg passes it verbatim to ``websearch_to_tsquery`` in the store.
-        ``since``/``until``/``as_of`` are the M4 temporal filters. Raises ``ProviderUnavailable`` if
-        the query can't be embedded (single embedding provider, no hot fallback — ADR-022).
+        ``since``/``until``/``as_of`` are the M4 temporal filters. ``min_score`` overrides the
+        configured floor on the fused RRF×recency score — chat passes its own tuned floor for the
+        "not in your memories" cut (04 §5, MINOR-1); ``None`` uses ``search_min_score``. Raises
+        ``ProviderUnavailable`` if the query can't be embedded (single embedding provider, no hot
+        fallback — ADR-022).
         """
         limit = self._clamp_top_k(top_k)
         result = await self._registry.embed([f"{_QUERY_PREFIX} {query}"])
@@ -88,7 +92,9 @@ class SearchService:
             rrf_k=self._settings.search_rrf_k,
             recency_half_life_days=self._settings.search_recency_half_life_days,
             recency_floor=self._settings.search_recency_floor,
-            min_score=self._settings.search_min_score,
+            min_score=(
+                min_score if min_score is not None else self._settings.search_min_score
+            ),
             planes=planes or None,  # an empty filter list means "no filter"
             types=types or None,
             since=since,

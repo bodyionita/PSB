@@ -16,6 +16,7 @@ import asyncio
 import sys
 from datetime import UTC, date, datetime, timedelta
 
+from app.chat.store import PgChatStore
 from app.config import Settings
 from app.db import Database
 from app.entities.entity_store import PgEntityStore
@@ -142,6 +143,8 @@ async def cleanup(db: Database) -> None:
         await c.execute(
             "DELETE FROM app_settings WHERE key = $1 AND value::text LIKE '%smoke_rel%'", VOCAB_KEY
         )
+        # Chat smoke sessions (random uuids) are marked by a 'smoke::' title; messages cascade.
+        await c.execute("DELETE FROM chat_sessions WHERE title LIKE 'smoke::%'")
 
 
 async def main() -> int:
@@ -323,6 +326,40 @@ async def main() -> int:
         paths = await edges.store_paths_for([ALEX, GHOST, PLACE])
         check("store_paths_for resolves live, drops tombstone",
               paths.get(ALEX) == "smoke::person/alex.md" and GHOST not in paths, str(paths))
+
+        print("\n== PgChatStore (M4 task 3 — chat_sessions/chat_messages + sources jsonb) ==")
+        chat = PgChatStore(db)
+        sid = await chat.create_session()
+        check("create_session returns id", bool(sid))
+        await chat.add_message(sid, role="user", content="what did I decide about pricing?")
+        srcs = [
+            {"node_id": ALEX, "store_path": "smoke::person/alex.md", "type": "person",
+             "title": "Alex", "snippet": "met at the office", "score": 0.031, "planes": ["Work"]},
+        ]
+        await chat.add_message(
+            sid, role="assistant", content="You raised prices [1].", model="claude-max",
+            sources=srcs,
+        )
+        msgs = await chat.session_messages(sid)
+        check("session_messages returns both turns oldest-first",
+              [m.role for m in msgs] == ["user", "assistant"], str([m.role for m in msgs]))
+        check("assistant sources jsonb round-trips (list[dict], score float)",
+              msgs[1].sources == srcs, str(msgs[1].sources))
+        check("user turn has no model / empty sources",
+              msgs[0].model is None and msgs[0].sources == [], str(msgs[0]))
+        # limit window: newest-N, still oldest-first (the DESC-then-reorder subquery).
+        last_one = await chat.session_messages(sid, limit=1)
+        check("session_messages limit=1 keeps the newest turn",
+              [m.content for m in last_one] == ["You raised prices [1]."], str(last_one))
+        await chat.set_last_model(sid, "nebius")
+        await chat.set_title(sid, "smoke::Pricing decision")
+        sess = await chat.get_session(sid)
+        check("set_title / set_last_model persisted",
+              sess is not None and sess.title == "smoke::Pricing decision"
+              and sess.last_model == "nebius", str(sess))
+        listed = await chat.list_sessions(50)
+        check("list_sessions includes the session", sid in [s.id for s in listed])
+        await db.pool.execute("DELETE FROM chat_sessions WHERE id = $1", sid)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

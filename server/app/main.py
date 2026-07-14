@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .chat.service import build_chat_service
+from .chat.store import PgChatStore
 from .config import Settings, get_settings
 from .db import Database
 from .entities.backfill import BackfillService
@@ -117,6 +119,13 @@ async def lifespan(app: FastAPI):
     # Search (ADR-022/026): the read side — node-grouped cosine over chunks + node detail w/ edges.
     app.state.search_service = SearchService(
         settings=settings, store=PgSearchStore(db), registry=app.state.registry
+    )
+
+    # Chat (M4 task 3, ADR-025): grounded chat over the graph — condense → hybrid retrieval (via the
+    # search service) → fenced prompt → cited-only answer → persistence, with best-effort quick-tier
+    # titling. Wired here so it can be drained on shutdown; the routers land in task 4.
+    app.state.chat_service = build_chat_service(
+        settings, PgChatStore(db), app.state.model_routing, app.state.search_service
     )
 
     # Tags (ADR-024): the live tag vocabulary (organizer reuse) + the manual two-step consolidation
@@ -292,6 +301,7 @@ async def lifespan(app: FastAPI):
         await app.state.tag_consolidation_service.drain()
         await app.state.edge_consolidation_service.drain()
         await app.state.merge_service.drain()
+        await app.state.chat_service.drain()
         await pipeline.drain()
         await store_backup.flush()
         await db.disconnect()

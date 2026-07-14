@@ -53,6 +53,8 @@ class FakeChatProvider(ChatProvider):
         # The per-call efforts this provider was asked for, in order (None when unset) — lets a
         # routing test assert the group's effort reached the right provider (ADR-025 §4).
         self.efforts: list[str | None] = []
+        # The messages of the most recent call (lets a test assert prompt/fencing content).
+        self.last_messages: list[ChatMessage] = []
 
     async def health(self) -> bool:
         return self._available
@@ -62,6 +64,7 @@ class FakeChatProvider(ChatProvider):
     ) -> str:
         self.calls += 1
         self.efforts.append(effort)
+        self.last_messages = list(messages)
         if not self._available:
             raise ProviderUnavailable(f"{self.id} is down")
         if self._responder is not None:
@@ -644,6 +647,96 @@ class FakeGitRepo:
 
         Path(path).write_bytes(b"FAKE-BUNDLE")  # noqa: ASYNC240 — trivial test fake, not prod IO
         self.bundles.append(path)
+
+
+class FakeChatStore:
+    """In-memory ChatStore for chat-service tests — no live DB (08 testing policy).
+
+    Sessions + messages live in dicts; ``add_message`` records the exact rows (so a test can assert
+    the user turn was persisted before the model call, and that the assistant sources landed)."""
+
+    def __init__(self) -> None:
+        from app.chat.store import ChatMessageRecord, ChatSessionRecord
+
+        self._ChatSessionRecord = ChatSessionRecord
+        self._ChatMessageRecord = ChatMessageRecord
+        self.sessions: dict[str, ChatSessionRecord] = {}
+        self.messages: dict[str, list[ChatMessageRecord]] = {}
+        self._seq = 0
+
+    def _next(self, prefix: str) -> str:
+        self._seq += 1
+        return f"{prefix}-{self._seq}"
+
+    async def create_session(self, *, title: str | None = None) -> str:
+        sid = self._next("session")
+        self.sessions[sid] = self._ChatSessionRecord(
+            id=sid, title=title, created_at=datetime.now(UTC), last_model=None
+        )
+        self.messages[sid] = []
+        return sid
+
+    async def get_session(self, session_id: str):
+        return self.sessions.get(session_id)
+
+    async def list_sessions(self, limit: int):
+        ordered = sorted(
+            self.sessions.values(),
+            key=lambda s: s.created_at or datetime.now(UTC),
+            reverse=True,
+        )
+        return ordered[:limit]
+
+    async def session_messages(self, session_id: str, *, limit: int | None = None):
+        msgs = list(self.messages.get(session_id, []))
+        return msgs[-limit:] if limit is not None else msgs
+
+    async def add_message(
+        self, session_id, *, role, content, model=None, sources=None
+    ) -> str:
+        mid = self._next("msg")
+        self.messages.setdefault(session_id, []).append(
+            self._ChatMessageRecord(
+                id=mid,
+                role=role,
+                content=content,
+                model=model,
+                sources=list(sources or []),
+                created_at=datetime.now(UTC),
+            )
+        )
+        return mid
+
+    async def set_title(self, session_id: str, title: str) -> None:
+        from dataclasses import replace
+
+        self.sessions[session_id] = replace(self.sessions[session_id], title=title)
+
+    async def set_last_model(self, session_id: str, model: str) -> None:
+        from dataclasses import replace
+
+        self.sessions[session_id] = replace(self.sessions[session_id], last_model=model)
+
+
+class FakeRetriever:
+    """In-memory Retriever for chat-service tests. Returns preset hits and records the exact search
+    arguments (query, top_k, planes, min_score) so a test can assert the chat floor + condensed
+    query reached retrieval. ``down=True`` raises ProviderUnavailable (embedder-down path)."""
+
+    def __init__(self, *, hits: list[SearchHit] | None = None, down: bool = False) -> None:
+        self._hits = hits or []
+        self._down = down
+        self.calls: list[dict] = []
+
+    async def search(
+        self, query, *, top_k=None, planes=None, min_score=None
+    ) -> list[SearchHit]:
+        self.calls.append(
+            {"query": query, "top_k": top_k, "planes": planes, "min_score": min_score}
+        )
+        if self._down:
+            raise ProviderUnavailable("embedder down")
+        return list(self._hits)
 
 
 class FakeObjectStore:
