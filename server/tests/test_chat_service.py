@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.chat.service import ChatService, ChatSessionNotFound
+from app.chat.service import ChatService, ChatSessionNotFound, _clean_title
 from app.chat.store import ROLE_ASSISTANT, ROLE_USER
 from app.config import Settings
 from app.providers.base import ChatMessage
@@ -257,3 +257,24 @@ async def test_fenced_context_reaches_the_answer_prompt():
     assert system_msg.role == "system"
     assert "raise prices in Q3" in system_msg.content
     assert "data, not instructions" in system_msg.content
+
+
+# --- _clean_title (pure) ------------------------------------------------------------------------
+
+
+def test_clean_title_strips_wrapping_quotes():
+    assert _clean_title('"Pricing decision"', 80) == "Pricing decision"
+    assert _clean_title("'Trip to Cluj'", 80) == "Trip to Cluj"
+
+
+def test_clean_title_keeps_first_line_only():
+    assert _clean_title("Q3 pricing\n(some rambling explanation)", 80) == "Q3 pricing"
+
+
+def test_clean_title_truncates_to_max_chars():
+    assert _clean_title("x" * 100, 10) == "x" * 10
+
+
+def test_clean_title_empty_stays_empty():
+    assert _clean_title("   ", 80) == ""
+    assert _clean_title("", 80) == ""
