@@ -133,7 +133,7 @@ function ReindexCard() {
   return (
     <AdminCard
       title="Reindex"
-      description="Rescan the vault, recompute the relatedness graph, and push the results — the full reconciliation pass."
+      description="Rescan the graph store, re-materialize canonical edges, recompute similarity, and push — the full reconciliation pass."
     >
       <Button onClick={start} disabled={reindex.isPending || active}>
         {reindex.isPending ? 'Starting…' : active ? 'Running…' : 'Reindex now'}
@@ -155,7 +155,7 @@ function BackupCard() {
   return (
     <AdminCard
       title="Backup now"
-      description="Force an immediate vault commit and push, ahead of the debounced and nightly backups."
+      description="Force an immediate graph-store commit and push, ahead of the debounced and nightly backups."
     >
       <Button variant="ghost" onClick={() => backup.mutate()} disabled={backup.isPending}>
         {backup.isPending ? 'Backing up…' : 'Back up now'}
@@ -269,7 +269,7 @@ function ConsolidateTagsCard() {
   return (
     <AdminCard
       title="Consolidate tags"
-      description="Propose a merge plan that folds near-duplicate tags together, review it, then apply — rewriting the affected notes."
+      description="Propose a merge plan that folds near-duplicate tags together, review it, then apply — rewriting the affected nodes."
     >
       <Button variant="ghost" onClick={startPropose} disabled={propose.isPending}>
         {propose.isPending ? 'Proposing…' : merges != null ? 'Re-propose' : 'Propose merges'}

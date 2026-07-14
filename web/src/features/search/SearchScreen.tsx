@@ -1,12 +1,14 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useState, type FormEvent } from 'react';
 import { ApiError } from '../../api/client';
-import type { RelatedNoteItem, SearchResultItem } from '../../api/types';
+import type { NodeEdgeItem, SearchResultItem } from '../../api/types';
 import { Surface } from '../../ui/Surface';
-import { useNote, usePlanes, useSearch, type Submitted } from './useSearch';
+import { edgeLabel, typeIcon, typeLabel } from '../../ui/nodeTypes';
+import { useNode, usePlanes, useSearch, useTypes, type Submitted } from './useSearch';
 
-// Search tab (06 §5): semantic search over the whole vault — no LLM. Query box + plane-filter
-// chips (scope on notes.planes membership), note cards, and a read-only preview on expand.
+// Search tab (06 §5): semantic search over the whole graph — no LLM. Query box + plane/type filter
+// chips, node cards (type icon + plane badge + snippet), and a read-only node preview on expand
+// (body + derived entity profile + canonical/derived edges).
 
 const FAIL_COLOR = '#ff6b6b';
 
@@ -70,19 +72,93 @@ function TagRow({ tags }: { tags: string[] }) {
   );
 }
 
-// The read-only preview shown when a card is expanded (GET /notes/{id}): body read live from the
-// vault + the note's semantic neighbours from the relatedness graph (ADR-023).
-function NotePreview({ noteId }: { noteId: string }) {
-  const { data, isLoading, isError } = useNote(noteId);
+function SectionLabel({ children }: { children: string }) {
+  return (
+    <p
+      style={{
+        margin: '0 0 8px',
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: 0.6,
+        textTransform: 'uppercase',
+        color: 'var(--muted)',
+      }}
+    >
+      {children}
+    </p>
+  );
+}
+
+// One edge rendered as a jump-off chip (the Map makes these navigable at M7). Canonical edges are
+// solid + labelled by their `rel`; derived similarity edges are faint.
+function EdgeChip({ edge }: { edge: NodeEdgeItem }) {
+  const derived = edge.origin === 'derived';
+  const arrow = edge.dir === 'in' ? '←' : '→';
+  return (
+    <span
+      title={`${edge.dir === 'in' ? 'from' : 'to'} ${edge.title ?? edge.node_id}${
+        edge.since ? ` · since ${edge.since}` : ''
+      }`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        fontSize: 12,
+        color: derived ? 'var(--muted)' : 'var(--text)',
+        background: 'var(--surface)',
+        border: derived ? '1px dashed var(--surface-border)' : '1px solid var(--surface-border)',
+        borderRadius: 999,
+        padding: '4px 10px',
+        maxWidth: '100%',
+        opacity: derived ? 0.75 : 1,
+      }}
+    >
+      <span aria-hidden style={{ fontSize: 10, color: 'var(--muted)' }}>
+        {arrow}
+      </span>
+      <span
+        style={{
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: 0.4,
+          textTransform: 'uppercase',
+          color: 'var(--accent)',
+        }}
+      >
+        {edgeLabel(edge.rel, edge.origin)}
+      </span>
+      <span aria-hidden>{typeIcon(edge.type)}</span>
+      <span
+        style={{
+          minWidth: 0,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {edge.title ?? baseName(edge.node_id)}
+      </span>
+    </span>
+  );
+}
+
+// The read-only preview shown when a card is expanded (GET /nodes/{id}): body read live from the
+// graph store, the derived entity profile (entity nodes only), and the node's edges — canonical
+// (typed) + derived (similarity), both directions.
+function NodePreview({ nodeId }: { nodeId: string }) {
+  const { data, isLoading, isError } = useNode(nodeId);
 
   if (isLoading) {
-    return <p style={{ margin: '12px 0 0', fontSize: 13, color: 'var(--muted)' }}>Loading note…</p>;
+    return <p style={{ margin: '12px 0 0', fontSize: 13, color: 'var(--muted)' }}>Loading node…</p>;
   }
   if (isError || !data) {
     return (
-      <p style={{ margin: '12px 0 0', fontSize: 13, color: FAIL_COLOR }}>Couldn’t load this note.</p>
+      <p style={{ margin: '12px 0 0', fontSize: 13, color: FAIL_COLOR }}>Couldn’t load this node.</p>
     );
   }
+
+  const canonical = data.edges.filter((e) => e.origin === 'canonical');
+  const derived = data.edges.filter((e) => e.origin === 'derived');
 
   return (
     <motion.div
@@ -93,6 +169,35 @@ function NotePreview({ noteId }: { noteId: string }) {
       style={{ overflow: 'hidden' }}
     >
       <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--surface-border)' }}>
+        {/* Entity identity line — disambiguator + known aliases (entity nodes only, ADR-030). */}
+        {(data.disambig || data.aliases.length > 0) && (
+          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
+            {data.disambig && <span>{data.disambig}</span>}
+            {data.disambig && data.aliases.length > 0 && <span> · </span>}
+            {data.aliases.length > 0 && <span>also known as {data.aliases.join(', ')}</span>}
+          </p>
+        )}
+
+        {/* Derived entity profile (ADR-030) — categorized observation lines, entity nodes only. */}
+        {data.profile && (
+          <div style={{ marginBottom: 14 }}>
+            <SectionLabel>Profile</SectionLabel>
+            <pre
+              style={{
+                margin: 0,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                fontFamily: 'inherit',
+                fontSize: 13,
+                lineHeight: 1.6,
+                color: 'var(--text)',
+              }}
+            >
+              {data.profile.trim()}
+            </pre>
+          </div>
+        )}
+
         <pre
           style={{
             margin: 0,
@@ -106,43 +211,26 @@ function NotePreview({ noteId }: { noteId: string }) {
             color: 'var(--text)',
           }}
         >
-          {data.body.trim() || '(empty note)'}
+          {data.body.trim() || '(no body)'}
         </pre>
 
-        {data.related.length > 0 && (
+        {canonical.length > 0 && (
           <div style={{ marginTop: 14 }}>
-            <p
-              style={{
-                margin: '0 0 8px',
-                fontSize: 11,
-                fontWeight: 700,
-                letterSpacing: 0.6,
-                textTransform: 'uppercase',
-                color: 'var(--muted)',
-              }}
-            >
-              Related notes
-            </p>
+            <SectionLabel>Connections</SectionLabel>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {data.related.map((r: RelatedNoteItem) => (
-                <span
-                  key={r.note_id}
-                  title={`${r.vault_path} · ${r.score.toFixed(3)}`}
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--accent)',
-                    background: 'var(--surface)',
-                    border: '1px solid var(--surface-border)',
-                    borderRadius: 999,
-                    padding: '4px 10px',
-                    maxWidth: '100%',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {r.title ?? baseName(r.vault_path)}
-                </span>
+              {canonical.map((e) => (
+                <EdgeChip key={`${e.dir}:${e.rel}:${e.node_id}`} edge={e} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {derived.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <SectionLabel>Similar</SectionLabel>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {derived.map((e) => (
+                <EdgeChip key={`${e.dir}:sim:${e.node_id}`} edge={e} />
               ))}
             </div>
           </div>
@@ -152,9 +240,9 @@ function NotePreview({ noteId }: { noteId: string }) {
   );
 }
 
-function NoteCard({ hit }: { hit: SearchResultItem }) {
+function NodeCard({ hit }: { hit: SearchResultItem }) {
   const [open, setOpen] = useState(false);
-  const title = hit.title ?? baseName(hit.vault_path);
+  const title = hit.title ?? baseName(hit.store_path);
 
   return (
     <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
@@ -180,8 +268,23 @@ function NoteCard({ hit }: { hit: SearchResultItem }) {
               gap: 10,
             }}
           >
-            <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: -0.2, minWidth: 0 }}>
-              {title}
+            <span
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                minWidth: 0,
+                fontSize: 16,
+                fontWeight: 700,
+                letterSpacing: -0.2,
+              }}
+            >
+              <span aria-hidden title={typeLabel(hit.type)} style={{ flexShrink: 0 }}>
+                {typeIcon(hit.type)}
+              </span>
+              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {title}
+              </span>
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
               <PlaneBadge plane={hit.plane} />
@@ -208,30 +311,36 @@ function NoteCard({ hit }: { hit: SearchResultItem }) {
         </button>
 
         <AnimatePresence initial={false}>
-          {open && <NotePreview noteId={hit.note_id} />}
+          {open && <NodePreview nodeId={hit.node_id} />}
         </AnimatePresence>
       </Surface>
     </motion.div>
   );
 }
 
-function PlaneChips({
-  planes,
+function FilterChips({
+  values,
   selected,
   onToggle,
+  label,
 }: {
-  planes: string[];
+  values: string[];
   selected: ReadonlySet<string>;
-  onToggle: (plane: string) => void;
+  onToggle: (value: string) => void;
+  label: string;
 }) {
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-      {planes.map((p) => {
-        const on = selected.has(p);
+    <div
+      role="group"
+      aria-label={label}
+      style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}
+    >
+      {values.map((v) => {
+        const on = selected.has(v);
         return (
           <motion.button
-            key={p}
-            onClick={() => onToggle(p)}
+            key={v}
+            onClick={() => onToggle(v)}
             whileTap={{ scale: 0.94 }}
             aria-pressed={on}
             style={{
@@ -244,7 +353,7 @@ function PlaneChips({
               color: on ? 'var(--on-accent)' : 'var(--muted)',
             }}
           >
-            {p}
+            {v}
           </motion.button>
         );
       })}
@@ -254,40 +363,54 @@ function PlaneChips({
 
 export function SearchScreen() {
   const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [planes, setPlanes] = useState<ReadonlySet<string>>(new Set());
+  const [types, setTypes] = useState<ReadonlySet<string>>(new Set());
   const [submitted, setSubmitted] = useState<Submitted | null>(null);
 
   const planesQuery = usePlanes();
+  const typesQuery = useTypes();
   const results = useSearch(submitted);
 
   const allPlanes = planesQuery.data
     ? [...planesQuery.data.planes, planesQuery.data.inbox]
     : [];
+  const allTypes = typesQuery.data?.node_types ?? [];
 
-  const run = (planeSet: ReadonlySet<string>) => {
+  const runWith = (planeSet: ReadonlySet<string>, typeSet: ReadonlySet<string>) => {
     const q = query.trim();
     if (q === '') return;
-    setSubmitted({ query: q, planes: [...planeSet].sort() });
+    setSubmitted({ query: q, planes: [...planeSet].sort(), types: [...typeSet].sort() });
   };
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    run(selected);
+    runWith(planes, types);
   };
 
   // Toggling a chip re-runs the current search immediately (once one has been run), so the filter
   // feels live; before the first search it just stages the selection.
-  const togglePlane = (plane: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(plane)) next.delete(plane);
-      else next.add(plane);
-      if (submitted) setSubmitted({ query: submitted.query, planes: [...next].sort() });
-      return next;
-    });
+  const toggle = (
+    value: string,
+    set: ReadonlySet<string>,
+    setState: (s: ReadonlySet<string>) => void,
+    other: ReadonlySet<string>,
+    isPlane: boolean,
+  ) => {
+    const next = new Set(set);
+    if (next.has(value)) next.delete(value);
+    else next.add(value);
+    setState(next);
+    if (submitted) {
+      setSubmitted({
+        query: submitted.query,
+        planes: [...(isPlane ? next : other)].sort(),
+        types: [...(isPlane ? other : next)].sort(),
+      });
+    }
   };
 
   const embedDown = results.error instanceof ApiError && results.error.status === 503;
+  const filtered = planes.size > 0 || types.size > 0;
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
@@ -330,7 +453,20 @@ export function SearchScreen() {
       </form>
 
       {allPlanes.length > 0 && (
-        <PlaneChips planes={allPlanes} selected={selected} onToggle={togglePlane} />
+        <FilterChips
+          label="Filter by plane"
+          values={allPlanes}
+          selected={planes}
+          onToggle={(p) => toggle(p, planes, setPlanes, types, true)}
+        />
+      )}
+      {allTypes.length > 0 && (
+        <FilterChips
+          label="Filter by type"
+          values={allTypes}
+          selected={types}
+          onToggle={(t) => toggle(t, types, setTypes, planes, false)}
+        />
       )}
 
       {submitted && (
@@ -345,12 +481,12 @@ export function SearchScreen() {
             <p style={{ margin: 0, fontSize: 14, color: FAIL_COLOR }}>Search failed — try again.</p>
           ) : !results.data || results.data.length === 0 ? (
             <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>
-              No matches. Try different words{selected.size > 0 ? ' or clear the plane filter' : ''}.
+              No matches. Try different words{filtered ? ' or clear the filters' : ''}.
             </p>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {results.data.map((hit) => (
-                <NoteCard key={hit.note_id} hit={hit} />
+                <NodeCard key={hit.node_id} hit={hit} />
               ))}
             </div>
           )}

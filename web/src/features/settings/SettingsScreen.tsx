@@ -5,6 +5,7 @@ import { Surface } from '../../ui/Surface';
 import { useTheme } from '../../theme/theme-context';
 import { THEME_ORDER, THEMES } from '../../theme/themes';
 import { useLogout, useMe } from '../auth/useAuth';
+import { VocabularyPanel } from './VocabularyPanel';
 
 function ThemeSwitcher() {
   const { themeId, setTheme } = useTheme();
@@ -71,13 +72,15 @@ export function SettingsScreen() {
         </p>
       </Surface>
 
+      <VocabularyPanel />
+
       <Surface>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 16 }}>Agents</h2>
+          <h2 style={{ margin: 0, fontSize: 16 }}>Models</h2>
           <ComingSoon milestone="M4" />
         </div>
         <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)', lineHeight: 1.6 }}>
-          Choose the distillation model and its fallback, and run connectors on demand.
+          Choose the chat and conspect models with their fallbacks and effort levels.
         </p>
       </Surface>
 

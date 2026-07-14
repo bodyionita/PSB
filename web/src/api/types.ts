@@ -13,8 +13,9 @@ export interface LoginResponse {
 export interface HealthResponse {
   status: 'ok' | 'degraded';
   db: boolean;
-  vault: boolean;
+  store: boolean;
   git_remote: boolean;
+  backups: boolean;
 }
 
 // --- Capture (03-api.md §Capture, M1 / ADR-019) ---
@@ -35,7 +36,7 @@ export interface CaptureView {
   kind: CaptureKind;
   status: CaptureStatus;
   raw_text: string | null;
-  note_paths: string[];
+  node_paths: string[];
   follow_up_question: string | null;
   follow_up_answer: string | null;
   error: string | null;
@@ -57,18 +58,22 @@ export interface PlanesResponse {
   inbox: string;
 }
 
-// --- Search & notes (03-api.md §Search & notes, M2 / ADR-022/023) ---
+// --- Search & graph (03-api.md §Search & graph, M3 / ADR-026/030) ---
 export interface SearchRequest {
   query: string;
   top_k?: number;
-  // Filters on `notes.planes` membership (array overlap, not folder — ADR-005). Omit/[] = no filter.
+  // Filters on `nodes.planes` membership (array overlap, not folder — ADR-005). Omit/[] = no filter.
   planes?: string[];
+  // Filters on `nodes.type` (M3). Omit/[] = no filter.
+  types?: string[];
 }
 
-// One note-grouped hit; the best-matching chunk is the snippet, ranked by score.
+// One node-grouped hit; the best-matching chunk is the snippet, ranked by score. `type` is the
+// node's type (memory/person/idea/… — the search card's type icon).
 export interface SearchResultItem {
-  note_id: string;
-  vault_path: string;
+  node_id: string;
+  store_path: string;
+  type: string;
   title: string | null;
   plane: string | null;
   planes: string[];
@@ -77,24 +82,83 @@ export interface SearchResultItem {
   score: number;
 }
 
-// A semantic neighbour from the `note_links` relatedness graph (ADR-023).
-export interface RelatedNoteItem {
-  note_id: string;
-  vault_path: string;
+// One edge of a node (GET /nodes/{id}): the *other* endpoint + edge metadata. `dir` = out (this
+// node → other) | in; `origin` = canonical (typed, labelled by `rel`) | derived (similarity);
+// `score` = confidence (canonical) or cosine (derived).
+export interface NodeEdgeItem {
+  rel: string;
+  dir: 'out' | 'in';
+  node_id: string;
+  type: string | null;
   title: string | null;
-  score: number;
+  origin: 'canonical' | 'derived';
+  score: number | null;
+  since: string | null;
+  until: string | null;
 }
 
-// Read-only note preview (GET /notes/{id}) — body read live from the vault file + neighbours.
-export interface NotePreviewResponse {
-  note_id: string;
-  vault_path: string;
+// Read-only node detail (GET /nodes/{id}) — body read live from the graph store, plus the derived
+// entity `profile` (null for content nodes) and canonical + derived edges (both directions).
+export interface NodeDetailResponse {
+  node_id: string;
+  store_path: string;
+  type: string;
   title: string | null;
   plane: string | null;
   planes: string[];
   tags: string[];
+  aliases: string[];
+  disambig: string | null;
+  occurred: string | null;
+  occurred_end: string | null;
   body: string;
-  related: RelatedNoteItem[];
+  profile: string | null;
+  edges: NodeEdgeItem[];
+}
+
+// --- Types / vocabulary (03-api.md §Search & graph, §Settings, M3 / ADR-027) ---
+// A pending `vocab-proposal` the organizer filed; resolve it by its review-item `id`.
+export interface VocabProposalItem {
+  id: string;
+  vocab: string | null; // axis: node_type | entity_type | edge_rel
+  value: string | null;
+  excerpt: string | null;
+  created_at: string;
+}
+
+// GET /types — effective vocabulary (config seeds ∪ approved additions) + still-pending proposals.
+export interface TypesResponse {
+  node_types: string[];
+  edge_rels: string[];
+  entity_like_types: string[];
+  proposals: VocabProposalItem[];
+}
+
+// --- Review queue (03-api.md §Review queue, M3 / ADR-030 §3) ---
+export type ReviewVerdict = 'approve' | 'reject';
+// entity-ambiguity: a candidate node id | "new" | "maybe". vocab-proposal: approve | reject.
+export type ReviewChoice = string;
+
+// One review_queue row. `payload` carries kind-specific data decidable in place —
+// entity-ambiguity candidates (`{id,name,disambig,aliases}`) or a proposal's `{vocab,value}`.
+export interface ReviewItemResponse {
+  id: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  excerpt: string | null;
+  source: string | null;
+  source_ref: string | null;
+  status: string;
+  resolution: Record<string, unknown> | null;
+  created_at: string;
+}
+
+// One entity candidate inside an `entity-ambiguity` item's payload.
+export interface EntityCandidate {
+  id: string;
+  name: string | null;
+  disambig: string | null;
+  aliases: string[];
 }
 
 // --- Activity (03-api.md §Activity feed, M2 pull-forward) ---

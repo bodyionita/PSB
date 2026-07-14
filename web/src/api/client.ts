@@ -9,12 +9,16 @@ import type {
   HealthResponse,
   LoginResponse,
   MeResponse,
-  NotePreviewResponse,
+  NodeDetailResponse,
   PlanesResponse,
+  ReviewChoice,
+  ReviewItemResponse,
+  ReviewVerdict,
   RunAcceptedResponse,
   SearchResultItem,
   TagConsolidateProposeResponse,
   TagMergeItem,
+  TypesResponse,
 } from './types';
 
 export class ApiError extends Error {
@@ -86,19 +90,39 @@ export const api = {
       body: JSON.stringify({ answer }),
     }),
 
-  // --- Meta / Search & notes (03-api.md §Meta, §Search & notes) ---
+  // --- Meta / Search & graph (03-api.md §Meta, §Search & graph) ---
   planes: () => request<PlanesResponse>('/planes'),
-  search: (query: string, planes?: string[], topK?: number) =>
+  types: () => request<TypesResponse>('/types'),
+  search: (query: string, planes?: string[], types?: string[], topK?: number) =>
     request<SearchResultItem[]>('/search', {
       method: 'POST',
       body: JSON.stringify({
         query,
         ...(planes && planes.length ? { planes } : {}),
+        ...(types && types.length ? { types } : {}),
         ...(topK != null ? { top_k: topK } : {}),
       }),
     }),
-  getNote: (id: string) =>
-    request<NotePreviewResponse>(`/notes/${encodeURIComponent(id)}`),
+  getNode: (id: string) =>
+    request<NodeDetailResponse>(`/nodes/${encodeURIComponent(id)}`),
+
+  // --- Review queue (03-api.md §Review queue, M3) ---
+  listReview: (status = 'pending', kind?: string) =>
+    request<ReviewItemResponse[]>(
+      `/review?status=${encodeURIComponent(status)}${kind ? `&kind=${encodeURIComponent(kind)}` : ''}`,
+    ),
+  resolveReview: (id: string, body: { choice?: ReviewChoice; verdict?: ReviewVerdict }) =>
+    request<ReviewItemResponse>(`/review/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // --- Settings → Vocabulary (03-api.md §Settings, M3 / ADR-027) ---
+  resolveVocabulary: (reviewId: string, verdict: ReviewVerdict) =>
+    request<ReviewItemResponse>('/settings/vocabulary', {
+      method: 'PUT',
+      body: JSON.stringify({ review_id: reviewId, verdict }),
+    }),
 
   // --- Activity (03-api.md §Activity feed — run-status poll for the Admin tab) ---
   getRun: (id: string) =>

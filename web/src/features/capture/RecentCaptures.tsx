@@ -2,6 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useState, type FormEvent } from 'react';
 import type { CaptureStatus, CaptureView } from '../../api/types';
 import { Surface } from '../../ui/Surface';
+import { typeIcon } from '../../ui/nodeTypes';
 import { useCaptures, useRetryCapture, useSubmitFollowUp } from './useCaptures';
 
 // Recent captures strip with live pipeline status (06 §Capture). Polling lives in useCaptures.
@@ -12,7 +13,7 @@ const STATUS_META: Record<CaptureStatus, { label: string; tone: Tone }> = {
   received: { label: 'Received', tone: 'progress' },
   transcribing: { label: 'Transcribing', tone: 'progress' },
   organizing: { label: 'Organizing', tone: 'progress' },
-  written: { label: 'Writing notes', tone: 'progress' },
+  written: { label: 'Writing nodes', tone: 'progress' },
   indexed: { label: 'Saved', tone: 'done' },
   failed: { label: 'Failed', tone: 'fail' },
 };
@@ -35,9 +36,16 @@ function relativeTime(iso: string | null): string {
   return `${Math.round(h / 24)}d ago`;
 }
 
-function baseName(path: string): string {
+// A store path is `<type>/<slug>--<shortid>.md` (an inbox-fallback node lives under `inbox/`).
+// The folder is the node type (for its icon); the display name is the slug without the short-id.
+function pathType(path: string): string {
+  return path.split('/')[0] ?? '';
+}
+
+function nodeName(path: string): string {
   const parts = path.split('/');
-  return (parts[parts.length - 1] ?? path).replace(/\.md$/, '');
+  const file = (parts[parts.length - 1] ?? path).replace(/\.md$/, '');
+  return file.replace(/--[0-9a-f]+$/i, '');
 }
 
 function StatusPill({ status }: { status: CaptureStatus }) {
@@ -193,13 +201,16 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
           {snippet}
         </p>
 
-        {capture.note_paths.length > 0 && (
+        {capture.node_paths.length > 0 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-            {capture.note_paths.map((p) => (
+            {capture.node_paths.map((p) => (
               <span
                 key={p}
                 title={p}
                 style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 5,
                   fontSize: 11,
                   color: 'var(--accent)',
                   background: 'var(--surface)',
@@ -212,7 +223,8 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
                   whiteSpace: 'nowrap',
                 }}
               >
-                {baseName(p)}
+                <span aria-hidden>{typeIcon(pathType(p))}</span>
+                {nodeName(p)}
               </span>
             ))}
           </div>
