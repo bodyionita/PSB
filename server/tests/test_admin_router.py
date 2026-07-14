@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.dependencies import (
+    get_edge_consolidation_service,
     get_merge_service,
     get_reindex_service,
     get_store_backup,
@@ -19,6 +20,11 @@ from app.routers import admin
 from app.services.store_backup import BackupResult
 from app.tags.consolidation import TagMerge
 from app.tags.service import ConsolidationProposal
+from app.vocab.edge_consolidation import (
+    BadConsolidation,
+    EdgeConsolidationProposal,
+    EdgeRetype,
+)
 
 PREFIX = "/api/v1"
 
@@ -154,6 +160,107 @@ def test_tags_consolidate_apply_without_plan_is_400():
     fake = FakeTagConsolidation()
     client = _tags_client(fake)
     resp = client.post(f"{PREFIX}/admin/tags/consolidate", json={"apply": True})
+    assert resp.status_code == 400
+    assert fake.applied is None
+
+
+class FakeEdgeConsolidation:
+    """propose returns a preset proposal (or raises); apply returns a run_id, recording the plan."""
+
+    def __init__(
+        self,
+        *,
+        proposal: EdgeConsolidationProposal | None = None,
+        propose_error: Exception | None = None,
+        apply_error: Exception | None = None,
+    ) -> None:
+        self._proposal = proposal
+        self._propose_error = propose_error
+        self._apply_error = apply_error
+        self.applied: tuple[str, list[EdgeRetype]] | None = None
+
+    async def propose(self, rel: str) -> EdgeConsolidationProposal:
+        if self._propose_error is not None:
+            raise self._propose_error
+        return self._proposal
+
+    async def apply(self, rel: str, plan: list[EdgeRetype]) -> str:
+        if self._apply_error is not None:
+            raise self._apply_error
+        self.applied = (rel, plan)
+        return "run-vocab-1"
+
+
+def _vocab_client(fake: FakeEdgeConsolidation) -> TestClient:
+    app = FastAPI()
+    app.include_router(admin.router, prefix=PREFIX)
+    app.dependency_overrides[get_edge_consolidation_service] = lambda: fake
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def test_vocab_consolidate_propose_returns_plan():
+    proposal = EdgeConsolidationProposal(
+        plan_id="plan-e1",
+        rel="mentors",
+        retypings=[EdgeRetype(src_id="s1", to="d1", from_rel="involves", to_rel="mentors")],
+    )
+    client = _vocab_client(FakeEdgeConsolidation(proposal=proposal))
+    resp = client.post(f"{PREFIX}/admin/vocab/consolidate", json={"rel": "mentors"})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "plan_id": "plan-e1",
+        "rel": "mentors",
+        "retypings": [
+            {"src_id": "s1", "to": "d1", "from_rel": "involves", "to_rel": "mentors"}
+        ],
+    }
+
+
+def test_vocab_consolidate_propose_400_unknown_rel():
+    fake = FakeEdgeConsolidation(propose_error=BadConsolidation("unknown edge rel 'x'"))
+    client = _vocab_client(fake)
+    resp = client.post(f"{PREFIX}/admin/vocab/consolidate", json={"rel": "x"})
+    assert resp.status_code == 400
+
+
+def test_vocab_consolidate_propose_503_when_chain_down():
+    client = _vocab_client(FakeEdgeConsolidation(propose_error=ProviderUnavailable("distill down")))
+    resp = client.post(f"{PREFIX}/admin/vocab/consolidate", json={"rel": "mentors"})
+    assert resp.status_code == 503
+
+
+def test_vocab_consolidate_apply_returns_202_run_id():
+    fake = FakeEdgeConsolidation()
+    client = _vocab_client(fake)
+    resp = client.post(
+        f"{PREFIX}/admin/vocab/consolidate",
+        json={
+            "rel": "mentors",
+            "apply": True,
+            "plan": [{"src_id": "s1", "to": "d1", "from_rel": "involves", "to_rel": "mentors"}],
+        },
+    )
+    assert resp.status_code == 202
+    assert resp.json() == {"run_id": "run-vocab-1"}
+    assert fake.applied == (
+        "mentors",
+        [EdgeRetype(src_id="s1", to="d1", from_rel="involves", to_rel="mentors")],
+    )
+
+
+def test_vocab_consolidate_empty_rel_is_400_not_422():
+    # No schema min_length: an empty rel reaches the service, which 400s (unknown rel) per 03-api.
+    fake = FakeEdgeConsolidation(propose_error=BadConsolidation("unknown edge rel ''"))
+    client = _vocab_client(fake)
+    resp = client.post(f"{PREFIX}/admin/vocab/consolidate", json={"rel": ""})
+    assert resp.status_code == 400
+
+
+def test_vocab_consolidate_apply_without_plan_is_400():
+    fake = FakeEdgeConsolidation()
+    client = _vocab_client(fake)
+    resp = client.post(f"{PREFIX}/admin/vocab/consolidate", json={"rel": "mentors", "apply": True})
     assert resp.status_code == 400
     assert fake.applied is None
 

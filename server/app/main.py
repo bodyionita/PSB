@@ -48,6 +48,8 @@ from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
 from .tags.store import PgTagStore
 from .vocab.consolidation import VocabConsolidation
+from .vocab.edge_consolidation import EdgeConsolidationService
+from .vocab.edge_store import PgEdgeConsolidationStore
 from .vocab.service import VocabularyService
 from .vocab.store import PgVocabularyStore
 
@@ -142,6 +144,20 @@ async def lifespan(app: FastAPI):
         consolidation=VocabConsolidation(run_store=run_store),
     )
     app.state.vocabulary_service = vocabulary_service
+
+    # Edge retro-consolidation (ADR-036, M3 task 7b): the on-demand two-step
+    # POST /admin/vocab/consolidate that re-types existing edges onto a newly approved rel. Reuses
+    # the node writer + indexer + store backup for the apply's rewrite-and-reindex (store is truth).
+    app.state.edge_consolidation_service = EdgeConsolidationService(
+        settings=settings,
+        store=PgEdgeConsolidationStore(db),
+        node_writer=node_writer,
+        registry=app.state.registry,
+        indexer=indexer,
+        store_backup=store_backup,
+        run_store=run_store,
+        vocab=vocabulary_service,
+    )
 
     entity_resolver = EntityResolver(
         settings=settings,
@@ -248,6 +264,7 @@ async def lifespan(app: FastAPI):
             scheduler.shutdown()
         await reindex_service.drain()
         await app.state.tag_consolidation_service.drain()
+        await app.state.edge_consolidation_service.drain()
         await app.state.merge_service.drain()
         await pipeline.drain()
         await store_backup.flush()

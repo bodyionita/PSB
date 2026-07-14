@@ -441,6 +441,33 @@ class FakeVocabularyStore:
         return await self.get_additions()
 
 
+class FakeEdgeConsolidationStore:
+    """In-memory EdgeConsolidationStore for edge-retro-consolidation tests — no live DB.
+
+    ``candidates`` seeds the bounded edge inventory; ``paths`` maps a node id → its store path
+    (apply resolves sources here). Records the ``exclude_rel``/``limit`` the propose passed so a
+    test can assert the cap + the target-rel filter."""
+
+    def __init__(
+        self,
+        *,
+        candidates: list | None = None,
+        paths: dict[str, str] | None = None,
+    ) -> None:
+        self._candidates = list(candidates or [])
+        self._paths = dict(paths or {})
+        self.inventory_args: dict | None = None
+        self.store_paths_calls: list[list[str]] = []
+
+    async def edge_inventory(self, *, exclude_rel: str, limit: int):
+        self.inventory_args = {"exclude_rel": exclude_rel, "limit": limit}
+        return [c for c in self._candidates if c.rel != exclude_rel][:limit]
+
+    async def store_paths_for(self, node_ids: list[str]) -> dict[str, str]:
+        self.store_paths_calls.append(list(node_ids))
+        return {nid: self._paths[nid] for nid in node_ids if nid in self._paths}
+
+
 class FakeGitRepo:
     """In-memory GitClient for StoreBackupService orchestration tests (no real git).
 

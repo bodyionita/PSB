@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from ..dependencies import (
     get_capture_pipeline,
+    get_edge_consolidation_service,
     get_merge_service,
     get_reindex_service,
     get_store_backup,
@@ -26,6 +27,7 @@ from ..entities.merge import BadMerge, MergeNodeNotFound, MergeService
 from ..models import (
     BackupResponse,
     CaptureAcceptedResponse,
+    EdgeRetypeItem,
     EntityMergeAcceptedResponse,
     EntityMergeProposeResponse,
     EntityMergeRequest,
@@ -36,6 +38,9 @@ from ..models import (
     TagConsolidateProposeResponse,
     TagConsolidateRequest,
     TagMergeItem,
+    VocabConsolidateAcceptedResponse,
+    VocabConsolidateProposeResponse,
+    VocabConsolidateRequest,
 )
 from ..providers.base import ProviderUnavailable
 from ..services.capture_pipeline import CaptureNotFound, CapturePipeline
@@ -43,6 +48,7 @@ from ..services.reindex import ReindexService
 from ..services.store_backup import StoreBackupService
 from ..tags.consolidation import TagMerge
 from ..tags.service import TagConsolidationService
+from ..vocab.edge_consolidation import BadConsolidation, EdgeConsolidationService, EdgeRetype
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_session)])
 
@@ -114,6 +120,52 @@ async def consolidate_tags(
         merges=[
             TagMergeItem(canonical=merge.canonical, variants=list(merge.variants))
             for merge in proposal.merges
+        ],
+    )
+
+
+@router.post("/vocab/consolidate", response_model=None)
+async def consolidate_vocab(
+    request: VocabConsolidateRequest,
+    response: Response,
+    service: EdgeConsolidationService = Depends(get_edge_consolidation_service),
+) -> VocabConsolidateProposeResponse | VocabConsolidateAcceptedResponse:
+    """Two-step edge retro-consolidation for an approved edge rel (ADR-036 / task 7b).
+
+    Propose (``apply=false``/default) → ``200 {plan_id, rel, retypings}``, no writes; a down distill
+    chain → 503. Apply (``apply=true`` + reviewed ``plan``) → ``202 {run_id}``, rewriting the chosen
+    edges' ``rel:`` frontmatter + reindexing them in the background (never-lose, git-revertible).
+    ``400`` for an unknown/empty rel or an empty apply plan.
+    """
+    try:
+        if request.apply:
+            if not request.plan:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="apply requires a non-empty plan",
+                )
+            plan = [
+                EdgeRetype(src_id=i.src_id, to=i.to, from_rel=i.from_rel, to_rel=i.to_rel)
+                for i in request.plan
+            ]
+            run_id = await service.apply(request.rel, plan)
+            response.status_code = status.HTTP_202_ACCEPTED
+            return VocabConsolidateAcceptedResponse(run_id=run_id)
+
+        proposal = await service.propose(request.rel)
+    except BadConsolidation as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except ProviderUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"vocab consolidation unavailable: {exc}",
+        ) from exc
+    return VocabConsolidateProposeResponse(
+        plan_id=proposal.plan_id,
+        rel=proposal.rel,
+        retypings=[
+            EdgeRetypeItem(src_id=r.src_id, to=r.to, from_rel=r.from_rel, to_rel=r.to_rel)
+            for r in proposal.retypings
         ],
     )
 

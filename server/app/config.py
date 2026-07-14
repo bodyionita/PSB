@@ -230,6 +230,11 @@ class Settings(BaseSettings):
     # variants; apply rewrites the affected nodes' frontmatter tags + reindexes them. ---
     tags_consolidate_max_vocabulary: int = 300
 
+    # --- Edge retro-consolidation (M3, ADR-036 / task 7b). The on-demand two-step
+    # POST /admin/vocab/consolidate for an approved edge rel: propose feeds up to this many existing
+    # canonical edges (a bounded inventory) to the distill chain to pick which should be re-typed
+    # onto the new rel; apply rewrites those edges' frontmatter `rel:` + reindexes. ---
+    vocab_consolidate_max_edges: int = 300
     # --- Search (M2, 03-api §Search, ADR-022). Node-grouped pgvector cosine over chunks. ---
     # Default result count when the request omits top_k; the request is clamped to this ceiling.
     search_top_k_default: int = 10

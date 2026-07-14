@@ -261,6 +261,70 @@ def retarget_edges(raw_text: str, *, old_to: str, new_to: str) -> tuple[str, int
     return f"---\n{chr(10).join(out)}\n---\n{body}", retargeted
 
 
+def retype_edge(
+    raw_text: str, *, to: str, from_rel: str, to_rel: str
+) -> tuple[str, int]:
+    """Rewrite every canonical edge ``{rel: from_rel, to: to}`` → ``rel: to_rel`` (edge
+    retro-consolidation, ADR-036 / M3 task 7b). Pure (no I/O) so it is unit-tested directly.
+
+    Used when an approved edge rel retro-consolidates the graph: an edge the organizer typed with an
+    older rel is re-typed onto the new one. Only the matching edge's ``rel:`` token is touched —
+    ``to``/``conf``/``since``/``until`` are preserved (a re-typing is not a re-dating). If the
+    retype produces an edge identical (same ``rel`` + ``to``) to one already on the node, the
+    duplicate item is dropped so the ``(src, dst, rel, origin)`` pk can't be violated on reindex.
+    Returns ``(new_text, retyped_count)``; a file with no matching edge is returned verbatim (no
+    newline churn). Only the ``edges:`` block is touched — every other byte is preserved.
+    """
+    inner, body = split_frontmatter(raw_text)
+    if inner is None:
+        return raw_text, 0
+    from_token = f"rel: {_yaml_scalar(from_rel)}"
+    to_rel_token = f"rel: {_yaml_scalar(to_rel)}"
+    dst_token = f"to: {_yaml_scalar(to)}"
+    lines = inner.rstrip("\n").split("\n")
+    out: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    in_edges = False
+    retyped = 0
+    for line in lines:
+        stripped = line.strip()
+        if not in_edges:
+            out.append(line)
+            if stripped == "edges:":
+                in_edges = True
+            continue
+        if line[:1] not in (" ", "\t"):
+            in_edges = False
+            out.append(line)
+            continue
+        if not stripped.startswith("-"):
+            out.append(line)
+            continue
+        if dst_token in line and _rel_field_at(line, from_token):
+            line = line.replace(from_token, to_rel_token, 1)
+            retyped += 1
+        key = _edge_identity(line)
+        if key is not None and key in seen:
+            continue  # duplicate after retype — drop it
+        if key is not None:
+            seen.add(key)
+        out.append(line)
+    if retyped == 0:
+        return raw_text, 0
+    return f"---\n{chr(10).join(out)}\n---\n{body}", retyped
+
+
+def _rel_field_at(line: str, rel_token: str) -> bool:
+    """True if ``rel_token`` (``rel: <value>``) sits on ``line`` as a *whole* field, not a prefix of
+    a longer rel. Guards ``retype_edge`` against ``rel: at`` matching inside ``rel: at_home`` (rels
+    are variable-length slugs, unlike the fixed-format uuids ``retarget_edges`` keys on): the token
+    must be followed by a field delimiter (``,`` / ``}``) or trailing whitespace."""
+    idx = line.find(rel_token)
+    if idx == -1:
+        return False
+    return line[idx + len(rel_token) : idx + len(rel_token) + 1] in ("", ",", "}", " ")
+
+
 def _edge_identity(edge_line: str) -> tuple[str, str] | None:
     """``(rel, to)`` of an ``- {rel: …, to: …}`` edge line, for dedup; ``None`` if unparseable."""
     item = edge_line.strip().lstrip("-").strip()
@@ -418,6 +482,18 @@ class NodeWriter:
         path = self._root / Path(*store_path.split("/"))
         raw_text = path.read_text(encoding="utf-8")
         rewritten, count = retarget_edges(raw_text, old_to=old_to, new_to=new_to)
+        if count:
+            self._atomic_write(path, rewritten)
+        return count
+
+    def retype_edge(self, store_path: str, *, to: str, from_rel: str, to_rel: str) -> int:
+        """Re-type a node file's edge ``{rel: from_rel, to: to}`` → ``to_rel`` (retro-consolidation,
+        ADR-036). Atomic; returns the number re-typed (0 ⇒ no write). A missing file raises
+        ``FileNotFoundError`` — the caller (edge consolidation) skips a vanished source, never
+        crashing (rule 7)."""
+        path = self._root / Path(*store_path.split("/"))
+        raw_text = path.read_text(encoding="utf-8")
+        rewritten, count = retype_edge(raw_text, to=to, from_rel=from_rel, to_rel=to_rel)
         if count:
             self._atomic_write(path, rewritten)
         return count

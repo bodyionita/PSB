@@ -320,6 +320,42 @@ class VocabularyResolveRequest(BaseModel):
     verdict: str  # "approve" | "reject"
 
 
+# --- Edge retro-consolidation (03-api §Admin, M3 task 7b / ADR-036) ---
+class EdgeRetypeItem(BaseModel):
+    """One edge re-typing: the edge ``{rel: from_rel, to}`` on node ``src_id`` becomes ``to_rel``.
+    Wire shape for both the propose response and the apply request body."""
+
+    src_id: str
+    to: str
+    from_rel: str
+    to_rel: str
+
+
+class VocabConsolidateRequest(BaseModel):
+    """POST /admin/vocab/consolidate body. ``apply=false`` (default) proposes edge re-typings for
+    the approved ``rel``; ``apply=true`` applies the reviewed ``plan`` (ADR-036)."""
+
+    # No min_length: an empty/whitespace rel is a 400 (``unknown edge rel``) from the service's
+    # ``_validated_rel``, matching 03-api §Admin + ADR-036 (not a 422 from schema validation).
+    rel: str
+    apply: bool = False
+    plan: list[EdgeRetypeItem] | None = None
+
+
+class VocabConsolidateProposeResponse(BaseModel):
+    """Propose result — a correlation id, target rel, and the re-typings to review (no writes)."""
+
+    plan_id: str
+    rel: str
+    retypings: list[EdgeRetypeItem] = Field(default_factory=list)
+
+
+class VocabConsolidateAcceptedResponse(BaseModel):
+    """202 body for the apply step — the ``agent_runs`` id of the background re-type+reindex run."""
+
+    run_id: str
+
+
 # --- Health ---
 class HealthResponse(BaseModel):
     status: str  # "ok" | "degraded"

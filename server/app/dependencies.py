@@ -21,6 +21,7 @@ from .services.reindex import ReindexService
 from .services.review_service import ReviewService
 from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
+from .vocab.edge_consolidation import EdgeConsolidationService
 from .vocab.service import VocabularyService
 
 
@@ -78,6 +79,10 @@ def get_merge_service(request: Request) -> MergeService:
 
 def get_vocabulary_service(request: Request) -> VocabularyService:
     return request.app.state.vocabulary_service
+
+
+def get_edge_consolidation_service(request: Request) -> EdgeConsolidationService:
+    return request.app.state.edge_consolidation_service
 
 
 async def require_session(

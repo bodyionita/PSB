@@ -6,7 +6,7 @@ mutation the review service uses to draw a resolved entity edge onto an existing
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from app.graph.node_writer import (
@@ -18,6 +18,7 @@ from app.graph.node_writer import (
     render_node,
     render_tombstone,
     retarget_edges,
+    retype_edge,
     upsert_frontmatter_list,
 )
 from app.indexing.frontmatter import parse_node_metadata
@@ -124,6 +125,84 @@ def test_retarget_edges_no_match_is_verbatim():
     out, count = retarget_edges(raw, old_to="loser-1", new_to="survivor-2")
     assert count == 0
     assert out == raw
+
+
+# --- retype_edge (ADR-036, M3 task 7b) ----------------------------------------------------------
+
+
+def test_retype_edge_changes_only_the_matching_edge_rel():
+    raw = render_node(
+        _memory_doc(
+            edges=(
+                NodeEdge(rel="involves", to="person-1", conf=0.9, since="2026-07-12"),
+                NodeEdge(rel="involves", to="person-2"),
+                NodeEdge(rel="about", to="topic-9"),
+            )
+        )
+    )
+    out, count = retype_edge(raw, to="person-1", from_rel="involves", to_rel="mentors")
+    assert count == 1
+    meta = parse_node_metadata(out, store_path="memory/a.md", fallback_created=CREATED)
+    # only the (involves, person-1) edge became mentors; conf/since preserved, others untouched.
+    assert {(e.rel, e.to) for e in meta.edges} == {
+        ("mentors", "person-1"),
+        ("involves", "person-2"),
+        ("about", "topic-9"),
+    }
+    mentors = next(e for e in meta.edges if e.rel == "mentors")
+    assert mentors.conf == 0.9 and mentors.since == date(2026, 7, 12)
+
+
+def test_retype_edge_drops_duplicate_after_retype():
+    # The node already carries the target rel to the same node → the re-typed edge collapses on it.
+    raw = render_node(
+        _memory_doc(
+            edges=(
+                NodeEdge(rel="involves", to="person-1", since="2026-07-12"),
+                NodeEdge(rel="mentors", to="person-1"),
+            )
+        )
+    )
+    out, count = retype_edge(raw, to="person-1", from_rel="involves", to_rel="mentors")
+    assert count == 1
+    meta = parse_node_metadata(out, store_path="memory/a.md", fallback_created=CREATED)
+    assert [(e.rel, e.to) for e in meta.edges] == [("mentors", "person-1")]
+
+
+def test_retype_edge_does_not_match_a_prefix_colliding_rel():
+    # from_rel "at" must NOT corrupt an edge whose rel is "at_home" to the same target (field
+    # boundary, not substring). The intended {rel: at, to: place-1} edge isn't present → no change.
+    raw = render_node(_memory_doc(edges=(NodeEdge(rel="at_home", to="place-1"),)))
+    out, count = retype_edge(raw, to="place-1", from_rel="at", to_rel="located_at")
+    assert count == 0 and out == raw
+    # and when both exist, only the exact-rel edge is re-typed.
+    raw2 = render_node(
+        _memory_doc(edges=(NodeEdge(rel="at", to="place-1"), NodeEdge(rel="at_home", to="place-1")))
+    )
+    out2, count2 = retype_edge(raw2, to="place-1", from_rel="at", to_rel="located_at")
+    assert count2 == 1
+    meta = parse_node_metadata(out2, store_path="memory/a.md", fallback_created=CREATED)
+    rels = {(e.rel, e.to) for e in meta.edges}
+    assert rels == {("located_at", "place-1"), ("at_home", "place-1")}
+
+
+def test_retype_edge_no_match_is_verbatim():
+    raw = render_node(_memory_doc(edges=(NodeEdge(rel="about", to="topic-9"),)))
+    # wrong rel and wrong target both leave the file byte-identical.
+    assert retype_edge(raw, to="topic-9", from_rel="involves", to_rel="mentors") == (raw, 0)
+    assert retype_edge(raw, to="other", from_rel="about", to_rel="mentors") == (raw, 0)
+
+
+def test_writer_retype_edge_atomic(tmp_path: Path):
+    writer = NodeWriter(str(tmp_path))
+    [src] = writer.write_nodes(
+        [_memory_doc(edges=(NodeEdge(rel="involves", to="person-1", since="2026-07-12"),))]
+    )
+    count = writer.retype_edge(src.store_path, to="person-1", from_rel="involves", to_rel="mentors")
+    assert count == 1
+    text = (tmp_path / Path(*src.store_path.split("/"))).read_text(encoding="utf-8")
+    meta = parse_node_metadata(text, store_path=src.store_path, fallback_created=CREATED)
+    assert [(e.rel, e.to) for e in meta.edges] == [("mentors", "person-1")]
 
 
 def test_upsert_frontmatter_list_replaces_and_inserts():
