@@ -3,8 +3,8 @@
 # Run as ROOT on a fresh VPS. Idempotent where practical.
 #
 # What it does (ADR-018): creates the non-root `deploy` user (docker + sudo groups, owns
-# /srv/*), seeds its authorized_keys, installs Docker + UFW, generates the vault deploy key,
-# restores the vault, and — as its FINAL, guarded step — hardens SSH (disables root login +
+# /srv/*), seeds its authorized_keys, installs Docker + UFW, generates the graph-store deploy key,
+# restores the graph store, and — as its FINAL, guarded step — hardens SSH (disables root login +
 # password auth, keys-only). After it finishes, deploys come in as `deploy`.
 #
 # CI is the SOLE writer of deploy/.env AND the origin TLS files (ADR-016/017) and starts the
@@ -29,10 +29,10 @@ fi
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
 DEPLOY_HOME="${DEPLOY_HOME:-/home/$DEPLOY_USER}"
 APP_DIR="${APP_DIR:-/srv/app}"
-VAULT_DIR="${VAULT_DIR:-/srv/vault}"
+GRAPH_STORE_DIR="${GRAPH_STORE_DIR:-/srv/graph-store}"
 DATA_DIR="${DATA_DIR:-/srv/data}"
-VAULT_REPO="${VAULT_REPO:-git@github.com:bodyionita/PSB-vault.git}"
-VAULT_DEPLOY_KEY="${VAULT_DEPLOY_KEY:-$DEPLOY_HOME/.ssh/vault_deploy_key}"
+GRAPH_STORE_REPO="${GRAPH_STORE_REPO:-git@github.com:bodyionita/PSB-graph.git}"
+GRAPH_STORE_DEPLOY_KEY="${GRAPH_STORE_DEPLOY_KEY:-$DEPLOY_HOME/.ssh/graph_store_deploy_key}"
 CI_DEPLOY_PUBKEY="${CI_DEPLOY_PUBKEY:-}"   # non-secret public key; optional
 
 echo "==> System packages + Docker"
@@ -49,9 +49,9 @@ usermod -aG docker "$DEPLOY_USER"
 usermod -aG sudo "$DEPLOY_USER"
 
 echo "==> Own /srv/* as $DEPLOY_USER"
-install -d -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$APP_DIR" "$VAULT_DIR" "$DATA_DIR"
+install -d -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$APP_DIR" "$GRAPH_STORE_DIR" "$DATA_DIR"
 # /srv/app may already hold the hand-cloned repo (root-owned) — hand it to deploy.
-chown -R "$DEPLOY_USER:$DEPLOY_USER" "$APP_DIR" "$VAULT_DIR" "$DATA_DIR"
+chown -R "$DEPLOY_USER:$DEPLOY_USER" "$APP_DIR" "$GRAPH_STORE_DIR" "$DATA_DIR"
 
 echo "==> Seed $DEPLOY_USER authorized_keys (operator key from root + CI deploy pubkey)"
 install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$DEPLOY_HOME/.ssh"
@@ -81,43 +81,46 @@ if command -v ufw >/dev/null 2>&1; then
   ufw --force enable
 fi
 
-echo "==> Vault deploy key (generated on the box as $DEPLOY_USER; private half never leaves — ADR-016)"
-if [ ! -f "$VAULT_DEPLOY_KEY" ]; then
-  runuser -u "$DEPLOY_USER" -- ssh-keygen -t ed25519 -N "" -C "braindan-vault-deploy" -f "$VAULT_DEPLOY_KEY"
-  echo "    Add this PUBLIC key to $VAULT_REPO"
+echo "==> Graph-store deploy key (generated on the box as $DEPLOY_USER; private half never leaves — ADR-016)"
+if [ ! -f "$GRAPH_STORE_DEPLOY_KEY" ]; then
+  runuser -u "$DEPLOY_USER" -- ssh-keygen -t ed25519 -N "" -C "braindan-graph-store-deploy" -f "$GRAPH_STORE_DEPLOY_KEY"
+  echo "    Add this PUBLIC key to $GRAPH_STORE_REPO"
   echo "    -> Settings -> Deploy keys -> Add key -> [x] Allow write access:"
   echo "    ----8<----"
-  cat "${VAULT_DEPLOY_KEY}.pub"
+  cat "${GRAPH_STORE_DEPLOY_KEY}.pub"
   echo "    ---->8----"
-  echo "    Then re-run this script AS ROOT to clone the vault and finish (incl. SSH hardening)."
+  echo "    Then re-run this script AS ROOT to clone the graph store and finish (incl. SSH hardening)."
 fi
 
-echo "==> Vault: restore from GitHub (source of truth lives in git, ADR-001)"
-# VAULT_READY gates SSH hardening below: on a fresh box the vault deploy key is generated
-# here (private half never leaves), so the FIRST run cannot clone yet — the pubkey isn't on
-# GitHub. We therefore DON'T harden (disable root) until the box is actually complete, so both
-# passes run as root. Pass 1: prints the vault pubkey, clone fails, hardening deferred. Add the
-# key to the vault repo (write), then re-run AS ROOT: pass 2 clones and hardens (final step).
-VAULT_READY=0
-if [ -d "$VAULT_DIR/.git" ]; then
-  echo "    (vault already present)"
-  VAULT_READY=1
+echo "==> Graph store: restore from GitHub (source of truth lives in git, ADR-001/026)"
+# GRAPH_STORE_READY gates SSH hardening below: on a fresh box the deploy key is generated here
+# (private half never leaves), so the FIRST run cannot clone yet — the pubkey isn't on GitHub.
+# We therefore DON'T harden (disable root) until the box is actually complete, so both passes run
+# as root. Pass 1: prints the pubkey, clone fails, hardening deferred. Add the key to PSB-graph
+# (write), then re-run AS ROOT: pass 2 clones and hardens (final step). NOTE: a freshly-created
+# empty PSB-graph clones fine into an empty tree — the app-level bootstrap (ADR-031 §6) then inits
+# the skeleton and `push -u`s it on first boot, so DR-restore and the zero-touch cutover share this
+# one path (a populated repo is restored as-is; an empty one is seeded by the app).
+GRAPH_STORE_READY=0
+if [ -d "$GRAPH_STORE_DIR/.git" ]; then
+  echo "    (graph store already present)"
+  GRAPH_STORE_READY=1
 elif runuser -u "$DEPLOY_USER" -- \
-       env GIT_SSH_COMMAND="ssh -i $VAULT_DEPLOY_KEY -o IdentitiesOnly=yes" \
-       git clone "$VAULT_REPO" "$VAULT_DIR"; then
-  echo "    Vault cloned to $VAULT_DIR"
-  VAULT_READY=1
+       env GIT_SSH_COMMAND="ssh -i $GRAPH_STORE_DEPLOY_KEY -o IdentitiesOnly=yes" \
+       git clone "$GRAPH_STORE_REPO" "$GRAPH_STORE_DIR"; then
+  echo "    Graph store cloned to $GRAPH_STORE_DIR"
+  GRAPH_STORE_READY=1
 else
-  echo "    (clone failed — add the deploy key above to $VAULT_REPO with WRITE access, then re-run)"
+  echo "    (clone failed — add the deploy key above to $GRAPH_STORE_REPO with WRITE access, then re-run)"
 fi
 
 echo "==> Harden SSH (FINAL step, guarded — ADR-018): keys-only, no root login"
-# Defer until the box is fully provisioned (vault cloned) so root stays reachable across the
-# two-pass vault-key bootstrap; re-running as root after adding the key completes + hardens.
-if [ "$VAULT_READY" -ne 1 ]; then
-  echo "    DEFERRED: vault not cloned yet, so the box isn't finished. Root login stays ENABLED." >&2
-  echo "    Add the vault deploy key printed above to $VAULT_REPO (write access), then re-run" >&2
-  echo "    this script AS ROOT to clone the vault and harden SSH. (Nothing else to redo.)" >&2
+# Defer until the box is fully provisioned (graph store cloned) so root stays reachable across the
+# two-pass deploy-key bootstrap; re-running as root after adding the key completes + hardens.
+if [ "$GRAPH_STORE_READY" -ne 1 ]; then
+  echo "    DEFERRED: graph store not cloned yet, so the box isn't finished. Root login stays ENABLED." >&2
+  echo "    Add the graph-store deploy key printed above to $GRAPH_STORE_REPO (write access), then re-run" >&2
+  echo "    this script AS ROOT to clone the graph store and harden SSH. (Nothing else to redo.)" >&2
   exit 0
 fi
 # Guard (fail-safe): never disable root login + password auth unless deploy has a usable key,

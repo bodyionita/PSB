@@ -154,6 +154,29 @@ jobs:
           target: /srv/app
           overwrite: true
 
+      - name: "Print the graph-store deploy PUBLIC key (zero-touch cutover convenience, ADR-031 §6)"
+        if: env.HAVE_VPS == 'true'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # The graph-store deploy key is generated on the VPS by provision.sh; only its PUBLIC
+          # half is printed here (never the private key — that never leaves the box, ADR-016).
+          # Paste it into PSB-graph -> Settings -> Deploy keys (Allow write access) so the app's
+          # first-boot bootstrap can `push -u`. Idempotent: reprints every deploy, safe to ignore
+          # once the key is registered. Best-effort — never fails the deploy if the key is absent.
+          script: |
+            KEY=~/.ssh/graph_store_deploy_key.pub
+            if [ -f "$KEY" ]; then
+              echo "==> graph-store deploy PUBLIC key — add to PSB-graph deploy keys (write access):"
+              echo "----8<----"
+              cat "$KEY"
+              echo "---->8----"
+            else
+              echo "==> graph-store deploy key not found at $KEY (run deploy/provision.sh on the VPS first)."
+            fi
+
       - name: Deploy — secure perms, pull, build, migrate
         if: env.HAVE_VPS == 'true'
         uses: appleboy/ssh-action@v1

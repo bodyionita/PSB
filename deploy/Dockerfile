@@ -1,5 +1,5 @@
 # Braindan API image (ADR-003: single service = FastAPI + scheduler + agents).
-# Includes git (vault backup) and the Claude Code CLI (provider claude-max, ADR-004):
+# Includes git (graph-store backup) and the Claude Code CLI (provider claude-max, ADR-004):
 # OAuth is done once on the VPS via `docker compose exec api claude login`, credentials
 # persisted on a volume (07-infrastructure.md).
 FROM python:3.12-slim
@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:/usr/local/share/npm-global/bin:$PATH"
 
-# System deps: git + openssh-client for vault backup (SSH push to GitHub), nodejs/npm for the
+# System deps: git + openssh-client for graph-store backup (SSH push to GitHub), nodejs/npm for the
 # Claude Code CLI, curl for uv, and postgresql-client-17 for the M1 db-backup job's pg_dump
 # (v17 to match the Supabase Postgres 17 server — an older client refuses to dump a newer server).
 # The python:3.12-slim base is Debian 13 (trixie), whose main repo ships PostgreSQL 17 directly,
@@ -18,13 +18,13 @@ RUN apt-get update \
         git openssh-client curl ca-certificates nodejs npm postgresql-client-17 \
     && rm -rf /var/lib/apt/lists/*
 
-# /srv/vault is bind-mounted and owned by the host 'deploy' user, but this container runs
+# /srv/graph-store is bind-mounted and owned by the host 'deploy' user, but this container runs
 # as root — git refuses ("dubious ownership"). Mark it safe so the /health git-remote probe
-# and the M1 vault auto-backup (commit/push) work.
-RUN git config --global --add safe.directory /srv/vault
+# and the graph-store auto-backup (commit/push) work.
+RUN git config --global --add safe.directory /srv/graph-store
 
-# Entrypoint wires the bind-mounted vault deploy key into a root-owned SSH setup so the vault
-# push authenticates to GitHub (ADR-014). No-op if the key isn't mounted.
+# Entrypoint wires the bind-mounted graph-store deploy key into a root-owned SSH setup so the
+# graph-store push authenticates to GitHub (ADR-014). No-op if the key isn't mounted.
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
