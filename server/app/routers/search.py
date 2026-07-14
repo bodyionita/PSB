@@ -32,7 +32,13 @@ async def search(
 ) -> list[SearchResultItem]:
     try:
         hits = await service.search(
-            payload.query, top_k=payload.top_k, planes=payload.planes, types=payload.types
+            payload.query,
+            top_k=payload.top_k,
+            planes=payload.planes,
+            types=payload.types,
+            since=payload.since,
+            until=payload.until,
+            as_of=payload.as_of,
         )
     except ProviderUnavailable:
         raise HTTPException(

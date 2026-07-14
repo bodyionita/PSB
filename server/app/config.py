@@ -271,10 +271,26 @@ class Settings(BaseSettings):
     # Default result count when the request omits top_k; the request is clamped to this ceiling.
     search_top_k_default: int = 10
     search_max_top_k: int = 50
-    # No hard score floor by default (0 keeps every hit); raise to prune weak matches.
+    # No hard score floor by default (0 keeps every hit); raise to prune weak matches. With the M4
+    # hybrid retriever this floors on the fused RRF×recency score (small magnitude), not raw cosine.
     search_min_score: float = 0.0
     # A result snippet (the best chunk) is truncated to this many chars for the results list.
     search_snippet_max_chars: int = 400
+    # --- M4 hybrid retrieval (03-api §Search, ADR-032 §5/§7). vector ⊍ tsvector FTS legs fused by
+    # RRF, then a mild recency prior. The FTS leg self-suppresses on non-English / zero-lexeme
+    # queries (English corpus, 02 §3) so no language-detect knob is needed. ---
+    # Reciprocal-rank-fusion constant: score contribution of a leg = 1/(k + rank). k=60 per ADR-032.
+    search_rrf_k: int = 60
+    # Candidate pool taken from EACH leg (top-N by that leg's own score) before fusion; bounds the
+    # fused set so RRF isn't diluted across the whole corpus. Clamped up to top_k at request time.
+    search_rrf_candidates: int = 60
+    # Recency prior on `occurred ?? created` (bounded multiplicative nudge applied to the fused
+    # list pre-cut, ADR-032 §7): factor = floor + (1-floor)·0.5^(age_days/half_life), capped at 1.0.
+    # `gt=0`: the half-life is a SQL divisor — a 0 would divide-by-zero in the ranking query.
+    search_recency_half_life_days: float = Field(default=180.0, gt=0)
+    # Floor of the recency multiplier — the most an old node is ever down-weighted (never zeroed).
+    # Bounded [0,1]: 1.0 disables the prior (every node at full recency), 0 lets it decay fully.
+    search_recency_floor: float = Field(default=0.9, ge=0, le=1)
 
     # --- Connectors ---
     slack_user_token: str = ""

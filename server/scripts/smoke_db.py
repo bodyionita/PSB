@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from app.config import Settings
 from app.db import Database
 from app.entities.entity_store import PgEntityStore
 from app.entities.profile_store import PgProfileStore
 from app.entities.store import PgAliasStore
-from app.search.store import PgSearchStore
+from app.search.store import PgSearchStore, RetrievalParams
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
 
@@ -55,6 +55,25 @@ def vec(seed: float) -> list[float]:
     v[0] = 1.0
     v[1] = seed
     return v
+
+
+def rp(settings: Settings, **over) -> RetrievalParams:
+    """A default hybrid RetrievalParams (Settings-driven knobs), overridable per check."""
+    base = dict(
+        top_k=10,
+        candidates=60,
+        rrf_k=settings.search_rrf_k,
+        recency_half_life_days=settings.search_recency_half_life_days,
+        recency_floor=settings.search_recency_floor,
+        min_score=0.0,
+        planes=None,
+        types=None,
+        since=None,
+        until=None,
+        as_of=None,
+    )
+    base.update(over)
+    return RetrievalParams(**base)
 
 
 async def seed(db: Database) -> None:
@@ -217,21 +236,17 @@ async def main() -> int:
             neighborhood_hash="hash_g", embedding=vec(0.10),
         )
 
-        print("\n== PgSearchStore (get_node profile join + search_chunks + profile-in-search) ==")
+        print("\n== PgSearchStore (get_node profile join + hybrid RRF search + temporal, M4 t2) ==")
         node_row = await search.get_node(ALEX)
         check("get_node LEFT JOIN returns profile text",
               node_row is not None and node_row.profile == "Alex, updated.", str(node_row))
-        # chunk leg intact: query at MEM2's chunk direction surfaces MEM2.
-        chunk_hits = await search.search_chunks(
-            vec(0.21), top_k=10, planes=None, types=None, min_score=0.0
-        )
-        check("chunk leg intact: query -> MEM2 via chunk embedding",
+        # chunk (vector) leg intact: query at MEM2's chunk direction, no FTS text → vector-only.
+        chunk_hits = await search.search_chunks(vec(0.21), "", rp(settings))
+        check("vector leg intact: query -> MEM2 via chunk embedding",
               MEM2 in [h.node_id for h in chunk_hits], str([h.node_id for h in chunk_hits]))
         # ADR-037 profile leg: ALEX has a profile embedding but NO chunk — a query at the profile's
-        # direction must now surface the ALEX entity node, snippet = the profile text.
-        prof_hits = await search.search_chunks(
-            vec(0.10), top_k=10, planes=None, types=None, min_score=0.0
-        )
+        # direction must surface the ALEX entity node, snippet = the profile text.
+        prof_hits = await search.search_chunks(vec(0.10), "", rp(settings))
         alex_hit = next((h for h in prof_hits if h.node_id == ALEX), None)
         check("ADR-037: profile-only entity ALEX reachable via search (profile leg)",
               alex_hit is not None, str([h.node_id for h in prof_hits]))
@@ -241,11 +256,47 @@ async def main() -> int:
         check("ADR-037: tombstoned entity's profile excluded from search leg",
               GHOST not in [h.node_id for h in prof_hits], str([h.node_id for h in prof_hits]))
         # type filter still applies to the profile leg (ALEX is a person).
-        filtered = await search.search_chunks(
-            vec(0.10), top_k=10, planes=None, types=["idea"], min_score=0.0
-        )
-        check("ADR-037: type filter excludes ALEX profile hit",
+        filtered = await search.search_chunks(vec(0.10), "", rp(settings, types=["idea"]))
+        check("type filter excludes ALEX profile hit",
               ALEX not in [h.node_id for h in filtered], str([h.node_id for h in filtered]))
+
+        # --- M4 task 2: hybrid FTS leg (migration 008 tsv) + RRF fusion ------------------------
+        # FTS leg matches by lexeme (not vector): a far-off embedding + a text query hitting MEM2's
+        # chunk ("office project") must still surface MEM2 via the tsvector leg, proving the tsv
+        # column + websearch_to_tsquery + RRF fuse. vec(9.0) is far from every seeded direction.
+        fts_hits = await search.search_chunks(vec(9.0), "office project", rp(settings))
+        check("FTS leg: text 'office project' surfaces MEM2 via tsvector (migration 008)",
+              MEM2 in [h.node_id for h in fts_hits], str([h.node_id for h in fts_hits]))
+        check("FTS leg: 'office' matches both office-chunk memories (MEM1+MEM2)",
+              {MEM1, MEM2} <= set(h.node_id for h in
+                                  await search.search_chunks(vec(9.0), "office", rp(settings))))
+        # Self-suppression: a non-English query yields no corpus-matching lexemes → FTS contributes
+        # nothing, ranking falls back to the vector leg (no crash, MEM2 still reachable by vector).
+        suppressed = await search.search_chunks(vec(0.21), "bonjour salut ça va", rp(settings))
+        check("FTS self-suppresses on non-English query (vector-only fallback, no error)",
+              MEM2 in [h.node_id for h in suppressed], str([h.node_id for h in suppressed]))
+
+        # --- M4 task 2: temporal filters on occurred (ALEX 2026-01-01, MEM1 02-01, MEM2 03-01) ---
+        until_hits = await search.search_chunks(
+            vec(0.20), "office", rp(settings, until=date(2026, 1, 15))
+        )
+        check("temporal until: occurred_start <= 2026-01-15 keeps ALEX, drops MEM1/MEM2",
+              MEM1 not in [h.node_id for h in until_hits]
+              and MEM2 not in [h.node_id for h in until_hits], str([h.node_id for h in until_hits]))
+        since_hits = await search.search_chunks(
+            vec(0.20), "office", rp(settings, since=date(2026, 2, 15))
+        )
+        check("temporal since: occurred >= 2026-02-15 keeps MEM2, drops MEM1/ALEX",
+              MEM2 in [h.node_id for h in since_hits]
+              and MEM1 not in [h.node_id for h in since_hits]
+              and ALEX not in [h.node_id for h in since_hits], str([h.node_id for h in since_hits]))
+        asof_hits = await search.search_chunks(
+            vec(0.10), "", rp(settings, as_of=date(2026, 1, 15))
+        )
+        check("temporal as_of: occurred_start <= 2026-01-15 keeps ALEX only (dated nodes)",
+              ALEX in [h.node_id for h in asof_hits]
+              and MEM1 not in [h.node_id for h in asof_hits]
+              and MEM2 not in [h.node_id for h in asof_hits], str([h.node_id for h in asof_hits]))
 
         print("\n== PgVocabularyStore (task-7a app_settings jsonb) ==")
         check("get_additions empty initially",

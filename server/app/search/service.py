@@ -24,7 +24,7 @@ from pathlib import Path
 from ..config import Settings
 from ..indexing.chunking import split_frontmatter
 from ..providers.registry import ProviderRegistry
-from .store import NodeEdgeView, SearchHit, SearchStore
+from .store import NodeEdgeView, RetrievalParams, SearchHit, SearchStore
 
 # nomic asymmetric task prefix for the query side (ADR-022); the indexer uses ``search_document:``.
 _QUERY_PREFIX = "search_query:"
@@ -67,21 +67,35 @@ class SearchService:
         top_k: int | None = None,
         planes: list[str] | None = None,
         types: list[str] | None = None,
+        since: date | None = None,
+        until: date | None = None,
+        as_of: date | None = None,
     ) -> list[SearchHit]:
-        """Rank nodes by their best matching chunk (03-api §Search).
+        """Hybrid (vector ⊍ FTS, RRF-fused) node-grouped search + recency prior (03-api §Search).
 
-        Raises ``ProviderUnavailable`` if the query can't be embedded (single embedding provider,
-        no hot fallback — ADR-022).
+        The **same** query string drives both legs: the vector leg embeds it (``search_query:``
+        prefix, ADR-022); the FTS leg passes it verbatim to ``websearch_to_tsquery`` in the store.
+        ``since``/``until``/``as_of`` are the M4 temporal filters. Raises ``ProviderUnavailable`` if
+        the query can't be embedded (single embedding provider, no hot fallback — ADR-022).
         """
         limit = self._clamp_top_k(top_k)
         result = await self._registry.embed([f"{_QUERY_PREFIX} {query}"])
-        hits = await self._store.search_chunks(
-            result.vectors[0],
+        params = RetrievalParams(
             top_k=limit,
+            # Fuse at least `top_k` candidates from each leg, else a large top_k could out-run the
+            # configured pool and silently truncate before ranking.
+            candidates=max(self._settings.search_rrf_candidates, limit),
+            rrf_k=self._settings.search_rrf_k,
+            recency_half_life_days=self._settings.search_recency_half_life_days,
+            recency_floor=self._settings.search_recency_floor,
+            min_score=self._settings.search_min_score,
             planes=planes or None,  # an empty filter list means "no filter"
             types=types or None,
-            min_score=self._settings.search_min_score,
+            since=since,
+            until=until,
+            as_of=as_of,
         )
+        hits = await self._store.search_chunks(result.vectors[0], query, params)
         return [self._trim_snippet(hit) for hit in hits]
 
     async def get_node(self, node_id: str) -> NodePreview | None:

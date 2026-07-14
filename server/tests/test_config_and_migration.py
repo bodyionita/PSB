@@ -91,7 +91,7 @@ def test_vocabulary_guards_reject_bad_config():
         Settings(node_types="memory,person", entity_like_types="person,ghost")
 
 
-def test_compute_head_is_migration_007():
-    # M3 task 10 adds revision 007 (node_profiles HNSW index, ADR-037 profile-embedding-in-search);
-    # head advances to it from 006 (node_profiles, task 6).
-    assert compute_head() == "007"
+def test_compute_head_is_migration_008():
+    # M4 task 2 adds revision 008 (chunks/node_profiles tsvector + GIN for the hybrid FTS leg,
+    # migration 008); head advances to it from 007 (node_profiles HNSW, ADR-037).
+    assert compute_head() == "008"

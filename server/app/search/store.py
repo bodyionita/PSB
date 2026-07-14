@@ -7,6 +7,14 @@ plain-SQL asyncpg implementation (CLAUDE.md rule 5, ADR-011).
 Query embeddings pass as plain ``list[float]`` — the ``vector`` codec on the pool (see ``db.py``)
 encodes them for the ``<=>`` cosine operator, which runs against the HNSW index (migration 005).
 Tombstoned nodes (``merged_into`` set) are hidden from search and from neighbour lists (ADR-030 §5).
+
+**M4 hybrid retrieval** ([ADR-032](adr/032-prior-art-adoptions.md) §5/§7): ``search_chunks`` fuses a
+**vector** leg (cosine over ``chunks`` ⊍ ``node_profiles.embedding``, best-per-node — ADR-037) with
+a **full-text** leg (``tsvector`` over the same ``chunks`` ⊍ ``node_profiles`` set, migration 008)
+by **Reciprocal Rank Fusion** (rank-based, ``k=60`` — never blend raw cosine with ``ts_rank``), then
+applies a **mild recency prior** on ``occurred ?? created``. The FTS leg self-suppresses on
+non-English / zero-lexeme queries (the English corpus contains no matching lexemes — no
+language-detect dependency). Temporal filters (``since``/``until``/``as_of``) narrow both legs.
 """
 
 from __future__ import annotations
@@ -31,6 +39,28 @@ class SearchHit:
     tags: list[str]
     snippet: str
     score: float
+
+
+@dataclass(frozen=True)
+class RetrievalParams:
+    """Tuning + filters for one hybrid retrieval (built by the service from Settings + request).
+
+    Grouped into a value object so the store signature stays legible as the retriever gains knobs.
+    ``candidates`` is the per-leg pool taken before RRF; ``rrf_k`` is the fusion constant; the two
+    ``recency_*`` fields shape the multiplicative prior; ``min_score`` floors the final fused score.
+    ``planes``/``types``/``since``/``until``/``as_of`` = ``None`` skips that filter."""
+
+    top_k: int
+    candidates: int
+    rrf_k: int
+    recency_half_life_days: float
+    recency_floor: float
+    min_score: float
+    planes: list[str] | None = None
+    types: list[str] | None = None
+    since: date | None = None
+    until: date | None = None
+    as_of: date | None = None
 
 
 @dataclass(frozen=True)
@@ -78,16 +108,14 @@ class SearchStore(Protocol):
     """The read surface the search service relies on."""
 
     async def search_chunks(
-        self,
-        embedding: list[float],
-        *,
-        top_k: int,
-        planes: list[str] | None,
-        types: list[str] | None,
-        min_score: float,
+        self, embedding: list[float], query_text: str, params: RetrievalParams
     ) -> list[SearchHit]:
-        """Node-grouped cosine search: one row per node (best chunk), ranked by score desc.
-        Tombstoned nodes are excluded; ``planes``/``types`` = None skips that filter."""
+        """Node-grouped hybrid search: one row per node, ranked by fused RRF×recency score desc.
+
+        Fuses a vector leg (``embedding``, cosine) with a full-text leg (``query_text`` → tsvector)
+        by RRF, applies the recency prior, and returns the top ``params.top_k`` above
+        ``params.min_score``. Tombstoned nodes are excluded; the filters in ``params`` narrow both
+        legs. The FTS leg contributes nothing when ``query_text`` yields no matching lexemes."""
         ...
 
     async def get_node(self, node_id: str) -> NodeRow | None:
@@ -102,77 +130,157 @@ class PgSearchStore:
         self._db = db
 
     async def search_chunks(
-        self,
-        embedding: list[float],
-        *,
-        top_k: int,
-        planes: list[str] | None,
-        types: list[str] | None,
-        min_score: float,
+        self, embedding: list[float], query_text: str, params: RetrievalParams
     ) -> list[SearchHit]:
-        # Two retrieval legs unioned, then best-per-node (ADR-037): the per-chunk vector scan over
-        # `chunks` ⊍ a per-profile scan over `node_profiles.embedding` (the derived entity summary,
-        # same `search_document:` space, all tiers). `DISTINCT ON (node_id) ORDER BY node_id, dist`
-        # collapses to the single nearest row per node across both legs — free dedup when a node
-        # matches on both a chunk and its profile — then re-rank winners by score and take top_k.
-        # `planes && $2` is array-overlap membership (ADR-005 — never folder); `n.type = ANY($3)`
-        # filters node type; `$2/$3 IS NULL` skips the filter. Tombstones + null embeddings excluded
-        # in both legs. score = 1 - cosine distance; raw union, no leg weighting (RRF is M4).
+        # HYBRID RRF (ADR-032 §5/§7). Two legs, each a best-per-node union over `chunks` ⊍
+        # `node_profiles` (ADR-037: same node universe, so a chunk hit and a profile hit for one
+        # node collapse to a single candidate):
+        #   • VEC — cosine distance `<=>` over `chunks.embedding` ⊍ `node_profiles.embedding`;
+        #           best (nearest) row per node, then the top `candidates` by distance.
+        #   • FTS — `tsvector @@ websearch_to_tsquery('english', $4)` over `chunks.tsv` ⊍
+        #           `node_profiles.tsv` (migration 008); best `ts_rank` per node, top `candidates`.
+        # Each leg is rank-numbered (row_number, 1 = best) and the two are FULL-OUTER-JOINed on
+        # node_id. RRF fuses by RANK, never by raw score — cosine and ts_rank are incommensurate:
+        #   rrf = 1/(k + vec_rank) + 1/(k + fts_rank)   (a leg missing the node contributes 0).
+        # A mild recency prior multiplies the fused score (bounded [floor,1], never zeroes an old
+        # node): factor = floor + (1-floor)·0.5^(age_days / half_life), age on `occurred_start ??
+        # node_created_at`, future dates clamped to age 0 → factor 1. The FTS leg self-suppresses on
+        # non-English / empty queries (no matching lexemes → 0 rows → vector-only ranking). Filters
+        # (planes/types + temporal) apply to every sub-leg; a `$…::T IS NULL` skips that filter.
+        # Temporal: `since`/`until` = occurred-range overlap on occurred_start/occurred_end; `as_of`
+        # = node-date `occurred_start <= as_of` (ADR-032; undated nodes fall outside any window).
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT node_id, store_path, type, title, plane, planes, tags, snippet, score
-                FROM (
-                    SELECT DISTINCT ON (node_id)
-                        node_id, store_path, type, title, plane, planes, tags, snippet, score
+                WITH vec AS (
+                    SELECT node_id, store_path, type, title, plane, planes, tags,
+                           occurred_start, node_created_at, snippet,
+                           row_number() OVER (ORDER BY dist ASC, node_id) AS rank
                     FROM (
-                        SELECT
-                            n.id          AS node_id,
-                            n.store_path  AS store_path,
-                            n.type        AS type,
-                            n.title       AS title,
-                            n.plane       AS plane,
-                            n.planes      AS planes,
-                            n.tags        AS tags,
-                            c.content     AS snippet,
-                            c.embedding <=> $1       AS dist,
-                            1 - (c.embedding <=> $1) AS score
-                        FROM chunks c
-                        JOIN nodes n ON n.id = c.node_id
-                        WHERE c.embedding IS NOT NULL
-                          AND n.merged_into IS NULL
-                          AND ($2::text[] IS NULL OR n.planes && $2::text[])
-                          AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
-                        UNION ALL
-                        SELECT
-                            n.id          AS node_id,
-                            n.store_path  AS store_path,
-                            n.type        AS type,
-                            n.title       AS title,
-                            n.plane       AS plane,
-                            n.planes      AS planes,
-                            n.tags        AS tags,
-                            np.profile    AS snippet,
-                            np.embedding <=> $1       AS dist,
-                            1 - (np.embedding <=> $1) AS score
-                        FROM node_profiles np
-                        JOIN nodes n ON n.id = np.node_id
-                        WHERE np.embedding IS NOT NULL
-                          AND n.merged_into IS NULL
-                          AND ($2::text[] IS NULL OR n.planes && $2::text[])
-                          AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
-                    ) legs
-                    ORDER BY node_id, dist
-                ) best
-                WHERE score >= $4
+                        SELECT DISTINCT ON (node_id)
+                            node_id, store_path, type, title, plane, planes, tags,
+                            occurred_start, node_created_at, snippet, dist
+                        FROM (
+                            SELECT n.id AS node_id, n.store_path, n.type, n.title, n.plane,
+                                   n.planes, n.tags, n.occurred_start, n.node_created_at,
+                                   c.content AS snippet, c.embedding <=> $1 AS dist
+                            FROM chunks c JOIN nodes n ON n.id = c.node_id
+                            WHERE c.embedding IS NOT NULL AND n.merged_into IS NULL
+                              AND ($2::text[] IS NULL OR n.planes && $2::text[])
+                              AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
+                              AND ($5::date IS NULL
+                                   OR COALESCE(n.occurred_end, n.occurred_start) >= $5)
+                              AND ($6::date IS NULL OR n.occurred_start <= $6)
+                              AND ($7::date IS NULL OR n.occurred_start <= $7)
+                            UNION ALL
+                            SELECT n.id, n.store_path, n.type, n.title, n.plane, n.planes, n.tags,
+                                   n.occurred_start, n.node_created_at,
+                                   np.profile AS snippet, np.embedding <=> $1 AS dist
+                            FROM node_profiles np JOIN nodes n ON n.id = np.node_id
+                            WHERE np.embedding IS NOT NULL AND n.merged_into IS NULL
+                              AND ($2::text[] IS NULL OR n.planes && $2::text[])
+                              AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
+                              AND ($5::date IS NULL
+                                   OR COALESCE(n.occurred_end, n.occurred_start) >= $5)
+                              AND ($6::date IS NULL OR n.occurred_start <= $6)
+                              AND ($7::date IS NULL OR n.occurred_start <= $7)
+                        ) legs
+                        ORDER BY node_id, dist
+                    ) best
+                    ORDER BY dist ASC, node_id
+                    LIMIT $8
+                ),
+                fts AS (
+                    SELECT node_id, store_path, type, title, plane, planes, tags,
+                           occurred_start, node_created_at, snippet,
+                           row_number() OVER (ORDER BY ftrank DESC, node_id) AS rank
+                    FROM (
+                        SELECT DISTINCT ON (node_id)
+                            node_id, store_path, type, title, plane, planes, tags,
+                            occurred_start, node_created_at, snippet, ftrank
+                        FROM (
+                            SELECT n.id AS node_id, n.store_path, n.type, n.title, n.plane,
+                                   n.planes, n.tags, n.occurred_start, n.node_created_at,
+                                   c.content AS snippet,
+                                   ts_rank(c.tsv, websearch_to_tsquery('english', $4)) AS ftrank
+                            FROM chunks c JOIN nodes n ON n.id = c.node_id
+                            WHERE c.tsv @@ websearch_to_tsquery('english', $4)
+                              AND n.merged_into IS NULL
+                              AND ($2::text[] IS NULL OR n.planes && $2::text[])
+                              AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
+                              AND ($5::date IS NULL
+                                   OR COALESCE(n.occurred_end, n.occurred_start) >= $5)
+                              AND ($6::date IS NULL OR n.occurred_start <= $6)
+                              AND ($7::date IS NULL OR n.occurred_start <= $7)
+                            UNION ALL
+                            SELECT n.id, n.store_path, n.type, n.title, n.plane, n.planes, n.tags,
+                                   n.occurred_start, n.node_created_at, np.profile AS snippet,
+                                   ts_rank(np.tsv, websearch_to_tsquery('english', $4)) AS ftrank
+                            FROM node_profiles np JOIN nodes n ON n.id = np.node_id
+                            WHERE np.tsv @@ websearch_to_tsquery('english', $4)
+                              AND n.merged_into IS NULL
+                              AND ($2::text[] IS NULL OR n.planes && $2::text[])
+                              AND ($3::text[] IS NULL OR n.type = ANY($3::text[]))
+                              AND ($5::date IS NULL
+                                   OR COALESCE(n.occurred_end, n.occurred_start) >= $5)
+                              AND ($6::date IS NULL OR n.occurred_start <= $6)
+                              AND ($7::date IS NULL OR n.occurred_start <= $7)
+                        ) legs
+                        ORDER BY node_id, ftrank DESC
+                    ) best
+                    ORDER BY ftrank DESC, node_id
+                    LIMIT $8
+                ),
+                fused AS (
+                    SELECT
+                        COALESCE(v.node_id, f.node_id)       AS node_id,
+                        COALESCE(v.store_path, f.store_path) AS store_path,
+                        COALESCE(v.type, f.type)             AS type,
+                        COALESCE(v.title, f.title)           AS title,
+                        COALESCE(v.plane, f.plane)           AS plane,
+                        COALESCE(v.planes, f.planes)         AS planes,
+                        COALESCE(v.tags, f.tags)             AS tags,
+                        COALESCE(v.snippet, f.snippet)       AS snippet,
+                        COALESCE(v.occurred_start, f.occurred_start)   AS occurred_start,
+                        COALESCE(v.node_created_at, f.node_created_at) AS node_created_at,
+                        COALESCE(1.0 / ($9 + v.rank), 0.0)
+                          + COALESCE(1.0 / ($9 + f.rank), 0.0) AS rrf
+                    FROM vec v FULL OUTER JOIN fts f ON v.node_id = f.node_id
+                ),
+                scored AS (
+                    -- `today` is pinned to UTC (CLAUDE convention: DB timestamps are UTC) so the
+                    -- recency age doesn't drift by a day under a non-UTC session timezone.
+                    SELECT node_id, store_path, type, title, plane, planes, tags, snippet,
+                           rrf * ($11::float + (1 - $11::float) * power(
+                               0.5,
+                               GREATEST(
+                                   (now() AT TIME ZONE 'UTC')::date
+                                   - COALESCE(occurred_start, node_created_at::date,
+                                              (now() AT TIME ZONE 'UTC')::date),
+                                   0
+                               )::float / $10::float
+                           )) AS score
+                    FROM fused
+                )
+                SELECT node_id, store_path, type, title, plane, planes, tags, snippet, score
+                FROM scored
+                WHERE score >= $12
                 ORDER BY score DESC
-                LIMIT $5
+                LIMIT $13
                 """,
                 embedding,
-                planes,
-                types,
-                min_score,
-                top_k,
+                params.planes,
+                params.types,
+                query_text,
+                params.since,
+                params.until,
+                params.as_of,
+                params.candidates,
+                params.rrf_k,
+                params.recency_half_life_days,
+                params.recency_floor,
+                params.min_score,
+                params.top_k,
             )
         return [
             SearchHit(

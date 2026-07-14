@@ -85,6 +85,11 @@ class SearchRequest(BaseModel):
     planes: list[str] | None = None
     # Filter on `nodes.type` (M3). None/[] = no filter.
     types: list[str] | None = None
+    # M4 temporal filters (03-api §Search, ADR-032). `since`/`until` = occurred-range window;
+    # `as_of` = simple node-date filter (`occurred_start ≤ as_of`). None = no filter.
+    since: date | None = None
+    until: date | None = None
+    as_of: date | None = None
 
 
 class SearchResultItem(BaseModel):

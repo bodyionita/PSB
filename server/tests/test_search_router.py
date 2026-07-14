@@ -68,8 +68,20 @@ class FakeSearchService:
         self._embed_down = embed_down
         self.calls: list[dict] = []
 
-    async def search(self, query, *, top_k=None, planes=None, types=None):
-        self.calls.append({"query": query, "top_k": top_k, "planes": planes, "types": types})
+    async def search(
+        self, query, *, top_k=None, planes=None, types=None, since=None, until=None, as_of=None
+    ):
+        self.calls.append(
+            {
+                "query": query,
+                "top_k": top_k,
+                "planes": planes,
+                "types": types,
+                "since": since,
+                "until": until,
+                "as_of": as_of,
+            }
+        )
         if self._embed_down:
             raise ProviderUnavailable("embedder down")
         return list(self._hits)
@@ -99,7 +111,33 @@ def test_search_returns_node_grouped_hits():
     assert body[0]["type"] == "memory"
     assert body[0]["snippet"] == "a snippet"
     assert body[0]["score"] == pytest.approx(0.87)
-    assert service.calls == [{"query": "pricing", "top_k": 5, "planes": None, "types": ["memory"]}]
+    assert service.calls == [
+        {
+            "query": "pricing",
+            "top_k": 5,
+            "planes": None,
+            "types": ["memory"],
+            "since": None,
+            "until": None,
+            "as_of": None,
+        }
+    ]
+
+
+def test_search_forwards_temporal_filters():
+    service = FakeSearchService(hits=[_HIT])
+    resp = _client(service).post(
+        f"{PREFIX}/search",
+        json={"query": "pricing", "since": "2026-01-01", "until": "2026-06-30",
+              "as_of": "2026-03-15"},
+    )
+    assert resp.status_code == 200
+    call = service.calls[0]
+    assert (str(call["since"]), str(call["until"]), str(call["as_of"])) == (
+        "2026-01-01",
+        "2026-06-30",
+        "2026-03-15",
+    )
 
 
 def test_search_missing_query_is_422():

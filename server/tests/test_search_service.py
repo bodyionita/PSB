@@ -18,12 +18,17 @@ def _make_service(
     store: FakeSearchStore | None = None,
     embedder: FakeEmbeddingProvider | None = None,
     snippet_max: int = 400,
+    rrf_candidates: int = 60,
 ) -> tuple[SearchService, FakeSearchStore, FakeEmbeddingProvider, Path]:
     root = tmp_path / "store"
     root.mkdir(exist_ok=True)
     store = store or FakeSearchStore()
     embedder = embedder or FakeEmbeddingProvider(dim=4)
-    settings = Settings(graph_store_path=str(root), search_snippet_max_chars=snippet_max)
+    settings = Settings(
+        graph_store_path=str(root),
+        search_snippet_max_chars=snippet_max,
+        search_rrf_candidates=rrf_candidates,
+    )
     registry = ProviderRegistry(
         {"fake-embed": embedder},
         chat_chain=[],
@@ -56,6 +61,42 @@ async def test_search_embeds_query_with_search_query_prefix(tmp_path: Path):
     assert embedder.inputs == [[prefixed]]
     assert [h.node_id for h in hits] == ["n1"]
     assert store.search_args["embedding"] == [float(len(prefixed))] * 4
+
+
+async def test_search_passes_raw_query_to_fts_leg_unprefixed(tmp_path: Path):
+    # The vector leg gets the `search_query:`-prefixed text (embedded); the FTS leg gets the RAW
+    # query verbatim (it drives websearch_to_tsquery in the store — a prefix poisons the tsquery).
+    service, store, _, _ = _make_service(tmp_path)
+    await service.search("pricing decision")
+    assert store.search_args["query_text"] == "pricing decision"
+
+
+async def test_search_candidate_pool_is_at_least_top_k(tmp_path: Path):
+    # The per-leg RRF pool defaults to search_rrf_candidates but never drops below top_k, so a large
+    # top_k can't out-run the pool and silently truncate before ranking. Pin candidates low to reach
+    # the top_k-wins branch (the default 60 exceeds the max clamped top_k of 50).
+    service, store, _, _ = _make_service(tmp_path, rrf_candidates=3)
+    await service.search("q", top_k=2)
+    assert store.search_args["candidates"] == 3  # configured pool wins when it exceeds top_k
+    await service.search("q", top_k=20)
+    assert store.search_args["candidates"] == 20  # top_k wins when it exceeds the configured pool
+
+
+async def test_search_forwards_temporal_filters(tmp_path: Path):
+    from datetime import date
+
+    service, store, _, _ = _make_service(tmp_path)
+    await service.search(
+        "q", since=date(2026, 1, 1), until=date(2026, 6, 30), as_of=date(2026, 3, 15)
+    )
+    assert store.search_args["since"] == date(2026, 1, 1)
+    assert store.search_args["until"] == date(2026, 6, 30)
+    assert store.search_args["as_of"] == date(2026, 3, 15)
+
+    await service.search("q")  # omitted → no filter
+    assert store.search_args["since"] is None
+    assert store.search_args["until"] is None
+    assert store.search_args["as_of"] is None
 
 
 async def test_search_clamps_top_k_to_configured_max(tmp_path: Path):

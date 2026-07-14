@@ -20,7 +20,7 @@ from app.providers.base import (
     STTProvider,
 )
 from app.providers.registry import ProviderRegistry
-from app.search.store import NodeRow, SearchHit
+from app.search.store import NodeRow, RetrievalParams, SearchHit
 from app.services.agent_runs import RUNNING, AgentRun
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
@@ -202,20 +202,22 @@ class FakeSearchStore:
         self.search_args: dict | None = None
 
     async def search_chunks(
-        self,
-        embedding: list[float],
-        *,
-        top_k: int,
-        planes: list[str] | None,
-        types: list[str] | None,
-        min_score: float,
+        self, embedding: list[float], query_text: str, params: RetrievalParams
     ) -> list[SearchHit]:
+        # Flattened so tests can assert clamping / filter / query-text handling without reaching
+        # into the params object; `params` kept too for any structural assertion.
         self.search_args = {
             "embedding": embedding,
-            "top_k": top_k,
-            "planes": planes,
-            "types": types,
-            "min_score": min_score,
+            "query_text": query_text,
+            "top_k": params.top_k,
+            "candidates": params.candidates,
+            "planes": params.planes,
+            "types": params.types,
+            "since": params.since,
+            "until": params.until,
+            "as_of": params.as_of,
+            "min_score": params.min_score,
+            "params": params,
         }
         return list(self._hits)
 
