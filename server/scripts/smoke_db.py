@@ -199,6 +199,12 @@ async def main() -> int:
             ALEX, tier="full", profile="Alex, updated.", observations=[],
             neighborhood_hash="hash_v3", embedding=vec(0.10),
         )
+        # a tombstoned entity (GHOST, merged into ALEX) with a profile on the SAME direction — the
+        # profile leg's `merged_into IS NULL` guard must keep it out of search (ADR-030 §5 / 037).
+        await prof.upsert_profile(
+            GHOST, tier="stub", profile="Ghost profile.", observations=[],
+            neighborhood_hash="hash_g", embedding=vec(0.10),
+        )
 
         print("\n== PgSearchStore (get_node profile join + search_chunks + profile-in-search) ==")
         node_row = await search.get_node(ALEX)
@@ -221,6 +227,8 @@ async def main() -> int:
         check("ADR-037: profile hit snippet = profile text",
               alex_hit is not None and alex_hit.snippet == "Alex, updated.",
               str(alex_hit))
+        check("ADR-037: tombstoned entity's profile excluded from search leg",
+              GHOST not in [h.node_id for h in prof_hits], str([h.node_id for h in prof_hits]))
         # type filter still applies to the profile leg (ALEX is a person).
         filtered = await search.search_chunks(
             vec(0.10), top_k=10, planes=None, types=["idea"], min_score=0.0
