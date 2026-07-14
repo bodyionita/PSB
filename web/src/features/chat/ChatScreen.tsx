@@ -41,8 +41,11 @@ function toUnits(text: string): Unit[] {
   const re = /\[(\d+)\]/g;
   let last = 0;
   let m: RegExpExecArray | null;
+  // Keep leading + trailing whitespace on each token so spacing survives — including the space
+  // that sits between a word and an adjacent `[n]` badge (`\S+\s*` alone would drop a chunk's
+  // leading space, gluing "…SQS [1] and…" into "…[1]and…").
   const pushText = (chunk: string) => {
-    for (const w of chunk.match(/\S+\s*/g) ?? []) units.push({ kind: 'word', value: w });
+    for (const w of chunk.match(/\s*\S+\s*/g) ?? []) units.push({ kind: 'word', value: w });
   };
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) pushText(text.slice(last, m.index));
@@ -230,9 +233,10 @@ function SourceCard({
 
 // --- Message bubbles ---------------------------------------------------------------------------
 function UserBubble({ content }: { content: string }) {
+  const reduced = useReducedMotion();
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: reduced ? 0 : 8 }}
       animate={{ opacity: 1, y: 0 }}
       style={{ display: 'flex', justifyContent: 'flex-end' }}
     >
@@ -294,6 +298,7 @@ function FallbackBanner({ model }: { model: string }) {
 }
 
 function AssistantMessage({ msg }: { msg: ThreadMessage }) {
+  const reduced = useReducedMotion();
   const [openSources, setOpenSources] = useState<ReadonlySet<number>>(new Set());
   const refs = useRef<Record<number, HTMLDivElement | null>>({});
 
@@ -324,7 +329,7 @@ function AssistantMessage({ msg }: { msg: ThreadMessage }) {
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: reduced ? 0 : 8 }}
       animate={{ opacity: 1, y: 0 }}
       style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}
     >
@@ -363,13 +368,15 @@ function AssistantMessage({ msg }: { msg: ThreadMessage }) {
 }
 
 function ThinkingBubble() {
+  const reduced = useReducedMotion();
   return (
     <div style={{ display: 'flex', gap: 5, alignItems: 'center', height: 20 }}>
       {[0, 1, 2].map((i) => (
         <motion.span
           key={i}
-          animate={{ opacity: [0.25, 1, 0.25] }}
-          transition={{ duration: 1.1, repeat: Infinity, delay: i * 0.18 }}
+          // Reduced motion: hold a static row of dots rather than an endless opacity pulse.
+          animate={reduced ? { opacity: 0.6 } : { opacity: [0.25, 1, 0.25] }}
+          transition={reduced ? undefined : { duration: 1.1, repeat: Infinity, delay: i * 0.18 }}
           style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--muted)' }}
         />
       ))}
