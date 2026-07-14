@@ -149,6 +149,38 @@ async def test_pick_candidate_materializes_edge(tmp_path: Path):
     assert backup.reasons == ["review: materialize entity edge"]
 
 
+async def test_pick_candidate_accretes_new_surface_form(tmp_path: Path):
+    # ADR-040 §4: a human's disambiguation under a NEW surface form accretes it onto the hub's file.
+    service, review, index, indexer, backup, _, writer, settings = _build(tmp_path)
+    _seed_source_node(writer, index)
+    # A real "Horia" hub on disk + indexed, so get_index_state finds its path for accretion.
+    [hub] = writer.write_nodes([NodeDocument(
+        id="horia-1", type="person", title="Horia", body="",
+        created_local=CREATED, source="text", aliases=("Horia",),
+    )])
+    index.nodes["horia-1"] = NodeUpsert(
+        id="horia-1", store_path=hub.store_path, type="person", content_hash="h"
+    )
+    item = ReviewItem(
+        kind=KIND_ENTITY_AMBIGUITY,
+        payload={
+            "mention": {"name": "Horia Fenwick", "type": "person", "rel": "involves"},
+            "candidates": [{"id": "horia-1", "name": "Horia", "aliases": ["Horia"]}],
+            "pending_edges": [{"src": SRC_ID, "rel": "involves", "since": "2026-07-12"}],
+        },
+        source="text",
+        source_ref="cap-1",
+    )
+    rid = await review.enqueue(item)
+
+    await service.resolve(rid, choice="horia-1")
+
+    raw = (tmp_path / "store" / Path(*hub.store_path.split("/"))).read_text(encoding="utf-8")
+    meta = parse_node_metadata(raw, store_path=hub.store_path, fallback_created=CREATED)
+    assert "Horia Fenwick" in meta.aliases  # accreted onto the hub
+    assert hub.store_path in [p for call in indexer.calls for p in call]  # hub reindexed
+
+
 async def test_pick_new_mints_entity_then_links(tmp_path: Path):
     service, review, index, indexer, backup, _, writer, settings = _build(tmp_path)
     src_path = _seed_source_node(writer, index)
