@@ -189,6 +189,42 @@ export interface ChatSessionDetail {
   messages: ChatMessageItem[];
 }
 
+// --- Settings → Models (03-api.md §Settings, M4 / ADR-025 / ADR-043) ---
+// One pickable chat model for a routing group's dropdowns. `effort_levels` is empty unless
+// `supports_effort` — the effort selector renders only where it applies, from these
+// registry-sourced levels (no hardcoded enums, ADR-025 §6).
+export interface RoutingModelItem {
+  id: string;
+  label: string;
+  supports_effort: boolean;
+  effort_levels: string[];
+}
+
+// One routing group's editable state (GET /settings): the effective active/fallback + per-model
+// effort (saved-over-seed) and the models the dropdowns choose from. `effort_by_provider` is keyed
+// by model id and carries an entry only for the effort-supporting models in {active, fallback}.
+export interface GroupRoutingModel {
+  group: string;
+  active: string;
+  fallback: string;
+  effort_by_provider: Record<string, string>;
+  models: RoutingModelItem[];
+}
+
+// GET /settings — model routing for all 3 groups (chat/conspect/quick), in fixed group order.
+export interface SettingsResponse {
+  groups: GroupRoutingModel[];
+}
+
+// PUT /settings/models — save one group's routing. `fallback` "" = none; `effort_by_provider`
+// must carry a valid level for each effort-supporting model in {active, fallback} (422 otherwise).
+export interface ModelRoutingUpdate {
+  group: 'chat' | 'conspect' | 'quick';
+  active: string;
+  fallback: string;
+  effort_by_provider: Record<string, string>;
+}
+
 // --- Types / vocabulary (03-api.md §Search & graph, §Settings, M3 / ADR-027) ---
 // A pending `vocab-proposal` the organizer filed; resolve it by its review-item `id`.
 export interface VocabProposalItem {

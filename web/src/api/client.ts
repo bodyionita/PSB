@@ -11,9 +11,11 @@ import type {
   ChatResponse,
   ChatSessionDetail,
   ChatSessionItem,
+  GroupRoutingModel,
   HealthResponse,
   LoginResponse,
   MeResponse,
+  ModelRoutingUpdate,
   NodeDetailResponse,
   PlanesResponse,
   ReviewChoice,
@@ -21,6 +23,7 @@ import type {
   ReviewVerdict,
   RunAcceptedResponse,
   SearchResultItem,
+  SettingsResponse,
   TagConsolidateProposeResponse,
   TagMergeItem,
   TypesResponse,
@@ -128,6 +131,14 @@ export const api = {
     request<ReviewItemResponse>(`/review/${encodeURIComponent(id)}`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+
+  // --- Settings → Models (03-api.md §Settings, M4 / ADR-025 / ADR-043) ---
+  getSettings: () => request<SettingsResponse>('/settings'),
+  saveModels: (update: ModelRoutingUpdate) =>
+    request<GroupRoutingModel>('/settings/models', {
+      method: 'PUT',
+      body: JSON.stringify(update),
     }),
 
   // --- Settings → Vocabulary (03-api.md §Settings, M3 / ADR-027) ---

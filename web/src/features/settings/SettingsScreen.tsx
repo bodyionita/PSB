@@ -1,10 +1,10 @@
 import { motion } from 'framer-motion';
 import { Button } from '../../ui/Button';
-import { ComingSoon } from '../../ui/ComingSoon';
 import { Surface } from '../../ui/Surface';
 import { useTheme } from '../../theme/theme-context';
 import { THEME_ORDER, THEMES } from '../../theme/themes';
 import { useLogout, useMe } from '../auth/useAuth';
+import { ModelsPanel } from './ModelsPanel';
 import { VocabularyPanel } from './VocabularyPanel';
 
 function ThemeSwitcher() {
@@ -74,15 +74,7 @@ export function SettingsScreen() {
 
       <VocabularyPanel />
 
-      <Surface>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 16 }}>Models</h2>
-          <ComingSoon milestone="M4" />
-        </div>
-        <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)', lineHeight: 1.6 }}>
-          Choose the chat and conspect models with their fallbacks and effort levels.
-        </p>
-      </Surface>
+      <ModelsPanel />
 
       <Surface>
         <h2 style={{ margin: '0 0 6px', fontSize: 16 }}>Session</h2>
