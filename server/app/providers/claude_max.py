@@ -33,6 +33,9 @@ def _render_prompt(messages: list[ChatMessage]) -> str:
 
 
 class ClaudeMaxProvider(ChatProvider):
+    # The CLI takes ``--effort`` natively, so a per-call effort (ADR-025 §4) is honored.
+    supports_effort = True
+
     def __init__(
         self,
         *,
@@ -74,14 +77,16 @@ class ClaudeMaxProvider(ChatProvider):
             return False
         return result.returncode == 0
 
-    async def complete(self, messages: list[ChatMessage], *, model: str | None = None) -> str:
+    async def complete(
+        self, messages: list[ChatMessage], *, model: str | None = None, effort: str | None = None
+    ) -> str:
         cli = self._resolve_cli()
         if cli is None:
             raise ProviderUnavailable("claude-max: CLI not found on PATH")
         prompt = _render_prompt(messages)
         try:
             result = await asyncio.to_thread(
-                self._run_cli, cli, prompt, model or self._model, self._effort
+                self._run_cli, cli, prompt, model or self._model, effort or self._effort
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise ProviderUnavailable(f"claude-max invocation failed: {exc}") from exc

@@ -107,6 +107,21 @@ async def test_available_and_default_chat_models():
     assert reg.default_chat_model() == "claude-max"
 
 
+def test_build_registry_registers_claude_max_sonnet():
+    """ADR-043 §3 wiring: build_registry adds a distinct effort-capable `claude-max-sonnet` id."""
+    from app.config import Settings
+    from app.providers.registry import build_registry
+
+    reg = build_registry(Settings())
+
+    # The quick tier's provider id exists and honors per-call effort (same CLI as claude-max)...
+    assert reg.supports_chat("claude-max-sonnet")
+    assert reg.supports_effort("claude-max-sonnet")
+    assert reg.supports_effort("claude-max")
+    # ...while Nebius carries no reasoning-effort control.
+    assert not reg.supports_effort("nebius")
+
+
 async def test_embed_delegates_to_embedding_provider():
     embed = FakeEmbeddingProvider("openai", dim=4)
     reg = _registry([embed], chat_chain=[], embed_id="openai")

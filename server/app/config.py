@@ -217,16 +217,28 @@ class Settings(BaseSettings):
     # OpenAI's STT model — used when the chain falls back to the "openai" provider.
     stt_model: str = "whisper-1"
 
-    # Chat/distill fallback chains, by provider id. First entry is primary.
+    # Chat/distill fallback chains, by provider id. First entry is primary. These are the config
+    # SEEDS for the `chat`/`conspect` routing groups (ADR-025): the ModelRoutingService overlays
+    # any user-saved `app_settings.model_routing`, falling back to these when a group is unset.
     chat_chain: CsvList = Field(default=["claude-max", "nebius"])
     distill_chain: CsvList = Field(default=["claude-max", "nebius"])
+    # `quick` routing-group seed (ADR-043): a cheap/fast lane for trivial calls (M4 = session
+    # titling). Sonnet-primary via the `claude-max-sonnet` provider id; Nebius fallback.
+    quick_chain: CsvList = Field(default=["claude-max-sonnet", "nebius"])
     # STT fallback chain (ADR-020): Groq (whisper-large-v3) primary, OpenAI (whisper-1) fallback.
     stt_chain: CsvList = Field(default=["groq", "openai"])
     # Model the claude-max provider drives through the Agent SDK / CLI.
     claude_max_model: str = "claude-opus-4-8"
-    # Reasoning-effort level passed to every claude-max CLI call (`--effort`). Global in v1;
-    # per-task effort is a post-v1 extension (ADR-004 / M1 replan). low|medium|high|xhigh|max.
+    # Model the `claude-max-sonnet` provider drives through the SAME `claude` CLI (ADR-043 §3): a
+    # cheaper Sonnet tier for the `quick` group. Initially Sonnet 4.6; a one-line swap to Sonnet 5
+    # or any CLI alias later, no code change (the exact alias is confirmed at deploy).
+    claude_max_sonnet_model: str = "claude-sonnet-4-6"
+    # Reasoning-effort level passed to every claude-max CLI call (`--effort`) when a routing group
+    # doesn't set its own. This is the effort SEED for `chat`/`conspect`; `quick` seeds its own
+    # `quick_effort` (ADR-025 §2, ADR-043 §2). low|medium|high|xhigh|max.
     claude_max_effort: str = "medium"
+    # `quick`-group effort seed (ADR-043 §2): cheap by default for trivia.
+    quick_effort: str = "low"
 
     # --- Chunking (02-data-model §4) ---
     chunk_size: int = 1200
@@ -309,6 +321,7 @@ class Settings(BaseSettings):
         "entity_stop_tokens",
         "chat_chain",
         "distill_chain",
+        "quick_chain",
         "stt_chain",
         "cors_origins",
         mode="before",

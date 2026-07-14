@@ -3,9 +3,9 @@
 The organizer turns raw capture text into one or more atomic **typed nodes** (memory/idea/… — the
 9-type vocabulary), each with typed **edges to entity mentions** (person/place/topic/…) and an
 optional partial-ISO ``occurred``. Every function here is pure and unit-tested — no I/O, no
-provider calls. The pipeline (``services/capture_pipeline.py``) owns the ``registry.distill()``
-call, entity resolution, and the never-lose fallback; this module only shapes prompts and sanitises
-model output.
+provider calls. The pipeline (``services/capture_pipeline.py``) owns the model call (the
+``conspect`` routing group, ADR-025), entity resolution, and the never-lose fallback; this module
+only shapes prompts and sanitises model output.
 
 Never-lose contract (CLAUDE.md rule 2): a malformed or empty organize result must NOT fail a
 capture. :func:`validate_organizer_output` returns no nodes for unusable output and the pipeline

@@ -52,6 +52,7 @@ from ..graph.node_writer import NodeDocument, NodeEdge, NodeWriter
 from ..indexing.indexer import NodeIndexer
 from ..providers.base import ChatMessage, ProviderUnavailable, TranscriptResult
 from ..providers.registry import ProviderRegistry
+from ..services.model_routing import ModelRoutingService
 from ..services.review_queue import KIND_VOCAB_PROPOSAL, ReviewItem, ReviewQueue
 from ..tags.store import TagVocabulary
 from ..vocab.service import VocabularyProvider, effective_vocabulary
@@ -168,6 +169,7 @@ class CapturePipeline:
         *,
         settings: Settings,
         store: CaptureStore,
+        routing: ModelRoutingService,
         registry: ProviderRegistry,
         node_writer: NodeWriter,
         store_backup: StoreBackup,
@@ -180,6 +182,9 @@ class CapturePipeline:
     ) -> None:
         self._settings = settings
         self._store = store
+        # Organize + nudge distillation route through the `conspect` group (ADR-025); the registry
+        # is kept for the STT leg (transcribe), which is a separate provider chain (ADR-020).
+        self._routing = routing
         self._registry = registry
         self._writer = node_writer
         self._backup = store_backup
@@ -587,7 +592,7 @@ class CapturePipeline:
             ),
         ]
         try:
-            result = await self._registry.distill(messages)
+            result = await self._routing.complete("conspect", messages)
         except ProviderUnavailable as exc:
             logger.warning("organize chain exhausted, using inbox fallback: %s", exc)
             return self._inbox_result(text)
@@ -859,11 +864,12 @@ class CapturePipeline:
         interaction log), or ``None`` if it was skipped.
         """
         try:
-            result = await self._registry.distill(
+            result = await self._routing.complete(
+                "conspect",
                 [
                     ChatMessage(role="system", content=NUDGE_SYSTEM_PROMPT),
                     ChatMessage(role="user", content=capture_text),
-                ]
+                ],
             )
             question = result.text.strip()[:_MAX_NUDGE_CHARS].strip()
             if question:

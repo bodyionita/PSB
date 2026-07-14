@@ -46,6 +46,7 @@ from .fakes import (
     FakeReviewQueue,
     FakeStoreBackup,
     FakeVocabularyStore,
+    fake_routing,
 )
 
 CREATED = datetime(2026, 7, 12, 12, 0, 0)
@@ -389,7 +390,7 @@ async def test_resolver_review_item_carries_pending_edges(tmp_path: Path):
         settings=settings,
         alias_store=FakeAliasStore(candidates_by_key=candidates),
         review_queue=review,
-        registry=registry,
+        routing=fake_routing(registry),
     )
     key = mention_key("Alex", "person")
     pending = [{"src": SRC_ID, "rel": "involves", "since": "2026-07-12"}]

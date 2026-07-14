@@ -10,7 +10,7 @@ from app.entities.resolver import EntityResolver, Mention, significant_tokens
 from app.entities.store import EntityCandidate
 from app.providers.registry import ProviderRegistry
 
-from .fakes import FakeAliasStore, FakeChatProvider, FakeReviewQueue
+from .fakes import FakeAliasStore, FakeChatProvider, FakeReviewQueue, fake_routing
 
 CREATED = datetime(2026, 7, 14, 12, 0, 0, tzinfo=UTC)
 
@@ -27,7 +27,10 @@ def _resolver(alias_store: FakeAliasStore, *, reply: str = '{"choice": "none", "
     )
     review = FakeReviewQueue()
     resolver = EntityResolver(
-        settings=settings, alias_store=alias_store, review_queue=review, registry=registry
+        settings=settings,
+        alias_store=alias_store,
+        review_queue=review,
+        routing=fake_routing(registry),
     )
     return resolver, review, chat
 

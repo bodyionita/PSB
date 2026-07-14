@@ -19,6 +19,7 @@ from .fakes import (
     FakeCommitBackup,
     FakeIndexer,
     FakeTagStore,
+    fake_routing,
 )
 
 
@@ -45,7 +46,7 @@ def _service(
     return TagConsolidationService(
         settings=settings,
         store=store,
-        registry=_registry(chat or FakeChatProvider("fake-chat", reply="{}")),
+        routing=fake_routing(_registry(chat or FakeChatProvider("fake-chat", reply="{}"))),
         indexer=indexer or FakeIndexer(),
         store_backup=backup or FakeCommitBackup(),
         run_store=runs or FakeAgentRunStore(),

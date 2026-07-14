@@ -39,6 +39,7 @@ from .services.backup_jobs import build_backup_jobs
 from .services.capture_pipeline import CapturePipeline
 from .services.capture_store import PgCaptureStore
 from .services.git_repo import GitRepo
+from .services.model_routing import build_model_routing
 from .services.rate_limit import RateLimiter
 from .services.reindex import ReindexService
 from .services.reprocess import PgReprocessStore, ReprocessService
@@ -66,6 +67,10 @@ async def lifespan(app: FastAPI):
     app.state.db = db
 
     app.state.registry = build_registry(settings)
+    # Model routing brain (ADR-025 / ADR-043): resolves the `chat`/`conspect`/`quick` groups from
+    # config seeds overlaid with saved `app_settings.model_routing`, threading per-provider effort.
+    # Every conspect distillation call site funnels through this; the registry stays pure mechanics.
+    app.state.model_routing = build_model_routing(settings, db, app.state.registry)
     # One agent_runs store, shared by every background job/service that opens a run and by
     # GET /activity/runs/{id} (the Admin tab's run-status poll). Stateless over the pool.
     run_store = PgAgentRunStore(db)
@@ -122,7 +127,7 @@ async def lifespan(app: FastAPI):
     app.state.tag_consolidation_service = TagConsolidationService(
         settings=settings,
         store=tag_store,
-        registry=app.state.registry,
+        routing=app.state.model_routing,
         indexer=indexer,
         store_backup=store_backup,
         run_store=run_store,
@@ -153,7 +158,7 @@ async def lifespan(app: FastAPI):
         settings=settings,
         store=PgEdgeConsolidationStore(db),
         node_writer=node_writer,
-        registry=app.state.registry,
+        routing=app.state.model_routing,
         indexer=indexer,
         store_backup=store_backup,
         run_store=run_store,
@@ -164,7 +169,7 @@ async def lifespan(app: FastAPI):
         settings=settings,
         alias_store=PgAliasStore(db),
         review_queue=review_queue,
-        registry=app.state.registry,
+        routing=app.state.model_routing,
         vocab=vocabulary_service,
     )
 
@@ -202,6 +207,7 @@ async def lifespan(app: FastAPI):
         settings=settings,
         entity_store=entity_store,
         profile_store=PgProfileStore(db),
+        routing=app.state.model_routing,
         registry=app.state.registry,
         run_store=run_store,
         vocab=vocabulary_service,
@@ -223,6 +229,7 @@ async def lifespan(app: FastAPI):
     pipeline = CapturePipeline(
         settings=settings,
         store=PgCaptureStore(db),
+        routing=app.state.model_routing,
         registry=app.state.registry,
         node_writer=node_writer,
         store_backup=store_backup,

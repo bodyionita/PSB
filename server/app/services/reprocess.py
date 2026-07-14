@@ -307,9 +307,11 @@ def build_reprocess_service(
     from .agent_runs import PgAgentRunStore
     from .capture_pipeline import CapturePipeline
     from .capture_store import PgCaptureStore
+    from .model_routing import build_model_routing
     from .review_queue import PgReviewQueue
 
     registry = build_registry(settings)
+    routing = build_model_routing(settings, db, registry)
     run_store = PgAgentRunStore(db)
     index_store = PgIndexStore(db)
     indexer = Indexer(settings=settings, store=index_store, registry=registry)
@@ -325,12 +327,13 @@ def build_reprocess_service(
         settings=settings,
         alias_store=PgAliasStore(db),
         review_queue=review_queue,
-        registry=registry,
+        routing=routing,
         vocab=vocabulary_service,
     )
     pipeline = CapturePipeline(
         settings=settings,
         store=PgCaptureStore(db),
+        routing=routing,
         registry=registry,
         node_writer=node_writer,
         store_backup=store_backup,

@@ -34,6 +34,7 @@ from .fakes import (
     FakeCommitBackup,
     FakeEdgeConsolidationStore,
     FakeIndexer,
+    fake_routing,
 )
 
 CREATED = datetime(2026, 7, 12, 12, 0, 0)
@@ -132,7 +133,7 @@ def _service(
         settings=settings,
         store=store,
         node_writer=NodeWriter(settings.graph_store_path),
-        registry=_registry(chat or FakeChatProvider("fake-chat", reply="{}")),
+        routing=fake_routing(_registry(chat or FakeChatProvider("fake-chat", reply="{}"))),
         indexer=indexer or FakeIndexer(),
         store_backup=backup or FakeCommitBackup(),
         run_store=runs or FakeAgentRunStore(),

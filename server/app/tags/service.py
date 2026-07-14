@@ -29,8 +29,8 @@ from typing import Protocol
 from ..config import Settings
 from ..indexing.indexer import IndexOutcome, NodeIndexer
 from ..providers.base import ChatMessage
-from ..providers.registry import ProviderRegistry
 from ..services.agent_runs import FAILED, SUCCEEDED, AgentRunStore
+from ..services.model_routing import ModelRoutingService
 from ..services.store_backup import BackupResult
 from .consolidation import (
     CONSOLIDATION_SYSTEM_PROMPT,
@@ -71,14 +71,14 @@ class TagConsolidationService:
         *,
         settings: Settings,
         store: TagStore,
-        registry: ProviderRegistry,
+        routing: ModelRoutingService,
         indexer: NodeIndexer,
         store_backup: StoreCommitter,
         run_store: AgentRunStore,
     ) -> None:
         self._settings = settings
         self._store = store
-        self._registry = registry
+        self._routing = routing
         self._indexer = indexer
         self._backup = store_backup
         self._runs = run_store
@@ -102,7 +102,9 @@ class TagConsolidationService:
 
         vocabulary = render_vocabulary([(c.tag, c.count) for c in counts])
         system = CONSOLIDATION_SYSTEM_PROMPT.replace("{vocabulary}", vocabulary)
-        result = await self._registry.distill([ChatMessage(role="system", content=system)])
+        result = await self._routing.complete(
+            "conspect", [ChatMessage(role="system", content=system)]
+        )
 
         allowed = {c.tag: c.count for c in counts}
         merges = clean_merges(parse_merge_plan(result.text), allowed=allowed)

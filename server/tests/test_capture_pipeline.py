@@ -36,6 +36,7 @@ from .fakes import (
     FakeReviewQueue,
     FakeStoreBackup,
     FakeSTTProvider,
+    fake_routing,
 )
 
 CREATED = datetime(2026, 7, 12, 12, 0, 0, tzinfo=UTC)
@@ -116,15 +117,17 @@ def _make_pipeline(
     runs = run_store if run_store is not None else FakeAgentRunStore()
     indexer = indexer if indexer is not None else FakeIndexer()
     review = FakeReviewQueue()
+    routing = fake_routing(registry)
     resolver = EntityResolver(
         settings=settings,
         alias_store=alias_store if alias_store is not None else FakeAliasStore(),
         review_queue=review,
-        registry=registry,
+        routing=routing,
     )
     pipeline = CapturePipeline(
         settings=settings,
         store=store,
+        routing=routing,
         registry=registry,
         node_writer=NodeWriter(str(tmp_path / "store")),
         store_backup=backup,

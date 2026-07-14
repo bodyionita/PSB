@@ -28,6 +28,7 @@ from .fakes import (
     FakeEmbeddingProvider,
     FakeEntityStore,
     FakeProfileStore,
+    fake_routing,
 )
 
 
@@ -107,6 +108,7 @@ def _service(entity_store, profile_store, registry, runs) -> ProfileRefreshServi
         settings=Settings(profile_tier_snapshot_min=2, profile_tier_full_min=5),
         entity_store=entity_store,
         profile_store=profile_store,
+        routing=fake_routing(registry),
         registry=registry,
         run_store=runs,
     )

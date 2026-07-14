@@ -65,7 +65,11 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         if self._requires_api_key and not self._api_key:
             raise ProviderUnavailable(f"{self.id}: no API key configured")
 
-    async def complete(self, messages: list[ChatMessage], *, model: str | None = None) -> str:
+    async def complete(
+        self, messages: list[ChatMessage], *, model: str | None = None, effort: str | None = None
+    ) -> str:
+        # ``effort`` is accepted for interface parity (ADR-025 §4) but ignored: OpenAI-compatible
+        # chat models (Nebius) have no reasoning-effort control (``supports_effort`` stays False).
         self._require_available()
         payload = {
             "model": model or self._default_chat_model,

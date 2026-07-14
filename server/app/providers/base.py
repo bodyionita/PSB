@@ -62,9 +62,20 @@ class Provider(ABC):
 
 
 class ChatProvider(Provider):
+    # Whether this provider honors a per-call reasoning ``effort`` (ADR-025 §4). Only models with
+    # a native effort control (the Claude Max CLI's ``--effort``) set this True; the registry uses
+    # it to route a group's effort only to providers that support one, and GET /settings to render
+    # the effort control only where it applies. Providers without one ignore the arg.
+    supports_effort: bool = False
+
     @abstractmethod
-    async def complete(self, messages: list[ChatMessage], *, model: str | None = None) -> str:
-        """Return the assistant text, or raise ProviderUnavailable to trigger fallback."""
+    async def complete(
+        self, messages: list[ChatMessage], *, model: str | None = None, effort: str | None = None
+    ) -> str:
+        """Return the assistant text, or raise ProviderUnavailable to trigger fallback.
+
+        ``effort`` is the per-call reasoning effort (ADR-025 §4); providers that don't support one
+        (``supports_effort`` False) ignore it and fall back to their construction default."""
 
 
 class EmbeddingProvider(Provider):

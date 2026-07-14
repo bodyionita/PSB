@@ -16,7 +16,7 @@ Approving a new **edge rel** makes it forward-live (task 7a) and opens a marker
 ADR-036 scopes M3 to **re-typing existing edges only** — inventing brand-new edges from node bodies
 is a deferred follow-up, and node re-typing stays propose-only (ADR-035). The pure helpers (prompt,
 parse, sanitise) take no I/O so they unit-test with no mocks (08 testing policy); the service
-depends on protocols (edge store, registry, indexer, committer, run store) so it too uses fakes.
+depends on protocols (edge store, routing, indexer, committer, run store) so it too uses fakes.
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ from ..config import Settings
 from ..graph.node_writer import NodeWriter
 from ..indexing.indexer import IndexOutcome, NodeIndexer
 from ..providers.base import ChatMessage
-from ..providers.registry import ProviderRegistry
 from ..services.agent_runs import FAILED, SUCCEEDED, AgentRunStore
+from ..services.model_routing import ModelRoutingService
 from ..services.store_backup import StoreCommitter
 from .consolidation import AGENT
 from .edge_store import EdgeCandidate, EdgeConsolidationStore
@@ -197,7 +197,7 @@ class EdgeConsolidationService:
         settings: Settings,
         store: EdgeConsolidationStore,
         node_writer: NodeWriter,
-        registry: ProviderRegistry,
+        routing: ModelRoutingService,
         indexer: NodeIndexer,
         store_backup: StoreCommitter,
         run_store: AgentRunStore,
@@ -206,7 +206,7 @@ class EdgeConsolidationService:
         self._settings = settings
         self._store = store
         self._writer = node_writer
-        self._registry = registry
+        self._routing = routing
         self._indexer = indexer
         self._backup = store_backup
         self._runs = run_store
@@ -235,7 +235,9 @@ class EdgeConsolidationService:
         system = EDGE_CONSOLIDATION_SYSTEM_PROMPT.replace("{rel}", rel).replace(
             "{edges}", render_edge_inventory(candidates)
         )
-        result = await self._registry.distill([ChatMessage(role="system", content=system)])
+        result = await self._routing.complete(
+            "conspect", [ChatMessage(role="system", content=system)]
+        )
         retypings = retypes_from_indices(parse_retype_plan(result.text), candidates, to_rel=rel)
         logger.info(
             "vocab consolidate propose: %d re-typing(s) over %d edge(s) → '%s'",

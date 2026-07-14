@@ -17,6 +17,7 @@ from .search.service import SearchService
 from .services.agent_runs import AgentRunStore
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
+from .services.model_routing import ModelRoutingService
 from .services.reindex import ReindexService
 from .services.reprocess import ReprocessService
 from .services.review_service import ReviewService
@@ -36,6 +37,10 @@ def get_db(request: Request) -> Database:
 
 def get_registry(request: Request) -> ProviderRegistry:
     return request.app.state.registry
+
+
+def get_model_routing(request: Request) -> ModelRoutingService:
+    return request.app.state.model_routing
 
 
 def get_auth_service(request: Request) -> AuthService:

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from app.config import Settings
 from app.entities.store import EntityCandidate, normalize_alias
 from app.graph.store import SimilarEdge
 from app.indexing.indexer import IndexOutcome
@@ -18,10 +19,12 @@ from app.providers.base import (
     ProviderUnavailable,
     STTProvider,
 )
+from app.providers.registry import ProviderRegistry
 from app.search.store import NodeRow, SearchHit
 from app.services.agent_runs import RUNNING, AgentRun
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
+from app.services.model_routing import GroupRouting, ModelRoutingService
 from app.services.review_queue import ReviewItem, ReviewRecord
 from app.vocab.store import VocabularyAdditions
 
@@ -39,23 +42,63 @@ class FakeChatProvider(ChatProvider):
         reply: str | None = None,
         responder: Callable[[list[ChatMessage]], str] | None = None,
         available: bool = True,
+        supports_effort: bool = False,
     ) -> None:
         self.id = id
         self._reply = reply if reply is not None else f"answer from {id}"
         self._responder = responder
         self._available = available
+        self.supports_effort = supports_effort
         self.calls = 0
+        # The per-call efforts this provider was asked for, in order (None when unset) — lets a
+        # routing test assert the group's effort reached the right provider (ADR-025 §4).
+        self.efforts: list[str | None] = []
 
     async def health(self) -> bool:
         return self._available
 
-    async def complete(self, messages: list[ChatMessage], *, model: str | None = None) -> str:
+    async def complete(
+        self, messages: list[ChatMessage], *, model: str | None = None, effort: str | None = None
+    ) -> str:
         self.calls += 1
+        self.efforts.append(effort)
         if not self._available:
             raise ProviderUnavailable(f"{self.id} is down")
         if self._responder is not None:
             return self._responder(messages)
         return self._reply
+
+
+class FakeModelRoutingStore:
+    """In-memory ModelRoutingStore — the saved-override half of the routing brain (ADR-025 §3).
+
+    Empty by default → the ModelRoutingService resolves from config seeds only; pass ``saved`` to
+    simulate a user having pinned a group."""
+
+    def __init__(self, saved: dict[str, GroupRouting] | None = None) -> None:
+        self.saved: dict[str, GroupRouting] = dict(saved or {})
+
+    async def get_all(self) -> dict[str, GroupRouting]:
+        return dict(self.saved)
+
+    async def save(self, group: str, routing: GroupRouting) -> None:
+        self.saved[group] = routing
+
+
+def fake_routing(
+    registry: ProviderRegistry,
+    *,
+    chain: tuple[str, ...] = ("fake-chat",),
+    store: FakeModelRoutingStore | None = None,
+) -> ModelRoutingService:
+    """A ModelRoutingService whose three groups all seed to ``chain`` (the test's fake ids).
+
+    Service tests build a registry over fake providers; this wraps it so ``routing.complete`` lands
+    on those same providers, standing in for the production ``build_model_routing`` wiring."""
+    settings = Settings(chat_chain=list(chain), distill_chain=list(chain), quick_chain=list(chain))
+    return ModelRoutingService(
+        settings=settings, store=store or FakeModelRoutingStore(), registry=registry
+    )
 
 
 class FakeSTTProvider(STTProvider):

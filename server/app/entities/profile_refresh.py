@@ -22,6 +22,7 @@ from ..config import Settings
 from ..providers.base import ProviderUnavailable
 from ..providers.registry import ProviderRegistry
 from ..services.agent_runs import FAILED, SUCCEEDED, AgentRunStore
+from ..services.model_routing import ModelRoutingService
 from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .entity_store import EntityRef, EntityStore
 from .profile_store import ProfileStore
@@ -85,6 +86,7 @@ class ProfileRefreshService:
         settings: Settings,
         entity_store: EntityStore,
         profile_store: ProfileStore,
+        routing: ModelRoutingService,
         registry: ProviderRegistry,
         run_store: AgentRunStore,
         vocab: VocabularyProvider | None = None,
@@ -92,6 +94,9 @@ class ProfileRefreshService:
         self._settings = settings
         self._entities = entity_store
         self._profiles = profile_store
+        # Profile synthesis routes through the `conspect` group (ADR-025); the embed leg still uses
+        # the registry directly (embeddings are single-provider, effort-irrelevant — not routed).
+        self._routing = routing
         self._registry = registry
         self._runs = run_store
         # Effective entity-like types (seeds ∪ approved additions — ADR-027/035); None ⇒ seeds.
@@ -192,7 +197,7 @@ class ProfileRefreshService:
             tier=plan.tier,
         )
         try:
-            reply = await self._registry.distill(messages)
+            reply = await self._routing.complete("conspect", messages)
         except ProviderUnavailable:
             logger.warning("profile refresh: LLM down for %s; storing stub, will retry", entity.id)
             return stub, True
@@ -228,13 +233,16 @@ def build_profile_refresh_service(settings: Settings, db) -> ProfileRefreshServi
     profile-refresh``). Touches only the DB (no store git), so it needs no store backup."""
     from ..providers.registry import build_registry
     from ..services.agent_runs import PgAgentRunStore
+    from ..services.model_routing import build_model_routing
     from .entity_store import PgEntityStore
     from .profile_store import PgProfileStore
 
+    registry = build_registry(settings)
     return ProfileRefreshService(
         settings=settings,
         entity_store=PgEntityStore(db),
         profile_store=PgProfileStore(db),
-        registry=build_registry(settings),
+        routing=build_model_routing(settings, db, registry),
+        registry=registry,
         run_store=PgAgentRunStore(db),
     )
