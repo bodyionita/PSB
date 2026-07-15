@@ -32,6 +32,7 @@ from app.identity.store import (
     PgCapsuleSourceStore,
     PgIdentityCapsuleStore,
 )
+from app.oauth.store import PgOAuthStore
 from app.search.store import PgSearchStore, RetrievalParams
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
@@ -337,6 +338,83 @@ async def cleanup(db: Database) -> None:
         await c.execute("DELETE FROM chat_sessions WHERE title LIKE 'smoke::%'")
 
 
+async def check_oauth(db: Database) -> None:
+    """PgOAuthStore (M5 task 3) — the un-fakeable atomic single-use code consume, the revoke-all
+    sweep's affected-row count, and the client→codes/tokens FK cascade. Self-contained + isolated:
+    one 'smoke_' client, cleaned up in a finally (cascade removes its codes + tokens)."""
+    print("\n== PgOAuthStore (M5 task 3 — OAuth clients / single-use codes / tokens) ==")
+    store = PgOAuthStore(db)
+    cid = "smoke_oauth_client"
+    try:
+        await store.create_client(
+            client_id=cid, client_secret_hash=None,
+            metadata={"redirect_uris": ["https://claude.ai/cb"], "client_name": "Smoke"},
+        )
+        got = await store.get_client(cid)
+        check("get_client round-trips metadata jsonb",
+              got is not None and got.metadata["redirect_uris"] == ["https://claude.ai/cb"],
+              str(got))
+
+        soon = datetime.now(UTC) + timedelta(minutes=5)
+        await store.create_code(
+            code_hash="smoke_code_hash", client_id=cid, redirect_uri="https://claude.ai/cb",
+            code_challenge="chal", code_challenge_method="S256", scope="brain",
+            resource="https://x/mcp", expires_at=soon,
+        )
+        first = await store.consume_code("smoke_code_hash")
+        check("consume_code returns the bound params once",
+              first is not None and first.scope == "brain" and first.client_id == cid, str(first))
+        second = await store.consume_code("smoke_code_hash")
+        check("consume_code is single-use (2nd time -> None)", second is None, str(second))
+        replay_owner = await store.consumed_code_client("smoke_code_hash")
+        check("consumed_code_client flags the replay (returns owner)", replay_owner == cid,
+              str(replay_owner))
+
+        # An expired code never consumes (real now()-vs-expires_at comparison).
+        await store.create_code(
+            code_hash="smoke_code_expired", client_id=cid, redirect_uri="https://claude.ai/cb",
+            code_challenge="c", code_challenge_method="S256", scope="brain", resource=None,
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        check("expired code -> None", (await store.consume_code("smoke_code_expired")) is None)
+
+        access_exp = datetime.now(UTC) + timedelta(hours=1)
+        refresh_exp = datetime.now(UTC) + timedelta(days=60)
+        tid = await store.create_token(
+            client_id=cid, token_hash="smoke_access", kind="access", scope="brain",
+            resource=None, expires_at=access_exp,
+        )
+        check("create_token returns an id", bool(tid))
+        await store.create_token(
+            client_id=cid, token_hash="smoke_refresh", kind="refresh", scope="brain",
+            resource=None, expires_at=refresh_exp,
+        )
+        rec = await store.get_token("smoke_access")
+        check("get_token round-trips kind/scope/liveness",
+              rec is not None and rec.kind == "access" and rec.revoked_at is None, str(rec))
+
+        n = await store.revoke_all()
+        check("revoke_all flags every live token (count = 2)", n == 2, f"revoked={n}")
+        after = await store.get_token("smoke_access")
+        check("token shows revoked_at after revoke-all", after is not None and after.revoked_at,
+              str(after))
+        again = await store.revoke_all()
+        check("revoke_all is idempotent (already-revoked not re-counted)", again == 0, f"n={again}")
+
+        # FK cascade: dropping the client removes its codes + tokens.
+        await db.pool.execute("DELETE FROM mcp_oauth_clients WHERE client_id = $1", cid)
+        orphan_tokens = await db.pool.fetchval(
+            "SELECT count(*) FROM mcp_tokens WHERE client_id = $1", cid
+        )
+        orphan_codes = await db.pool.fetchval(
+            "SELECT count(*) FROM mcp_auth_codes WHERE client_id = $1", cid
+        )
+        check("client delete cascades to tokens + codes",
+              orphan_tokens == 0 and orphan_codes == 0, f"tok={orphan_tokens} code={orphan_codes}")
+    finally:
+        await db.pool.execute("DELETE FROM mcp_oauth_clients WHERE client_id = $1", cid)
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -598,6 +676,7 @@ async def main() -> int:
 
         await check_identity_capsule(db)
         await check_model_routing_migration(db)
+        await check_oauth(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

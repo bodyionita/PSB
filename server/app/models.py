@@ -382,6 +382,14 @@ class IdentityCapsuleAcceptedResponse(BaseModel):
     run_id: str
 
 
+# --- MCP access revoke-all (03-api §MCP, M5 task 3 / ADR-046 §2) ---
+class McpRevokeAllResponse(BaseModel):
+    """POST /admin/mcp/revoke-all result — how many live MCP tokens this switch just revoked. The
+    "revoke all MCP access" control (single-user, instant + total); a connector must reauthorize."""
+
+    revoked: int
+
+
 # --- Entity merge (03-api §Admin, M3 / ADR-030 §5) ---
 class EntityMergeRequest(BaseModel):
     """POST /admin/entities/merge body. ``apply=false`` (default) proposes the inbound-edge

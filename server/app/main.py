@@ -32,8 +32,10 @@ from .identity.store import PgCapsuleSourceStore, PgIdentityCapsuleStore
 from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
+from .oauth.service import OAuthService
+from .oauth.store import PgOAuthStore
 from .providers.registry import build_registry
-from .routers import activity, admin, auth, capture, chat, health, meta, review, search
+from .routers import activity, admin, auth, capture, chat, health, meta, oauth, review, search
 from .routers import settings as settings_router
 from .search.service import SearchService
 from .search.store import PgSearchStore
@@ -83,6 +85,11 @@ async def lifespan(app: FastAPI):
     app.state.login_rate_limiter = RateLimiter(
         max_events=settings.login_rate_limit_per_min, window_seconds=60.0
     )
+    # MCP OAuth 2.1 authorization server (M5 task 3, ADR-046 §2): open DCR, the password+consent
+    # `/authorize` gate (reuses the auth service + login limiter above), `/token` (code exchange +
+    # sliding refresh rotation), and the revoke-all switch. Opaque HMAC-hashed DB tokens; the MCP
+    # server (task 4) reuses `validate_access_token` as its bearer gate. Root-level routes below.
+    app.state.oauth_service = OAuthService(settings=settings, store=PgOAuthStore(db))
 
     # Store backup / durability (ADR-014): the one owner of git ops on the graph store.
     # ensure_ready inits the repo if needed, wires the GRAPH_STORE_REPO remote, pins gc/reflog,
@@ -367,6 +374,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(settings_router.router, prefix=settings.api_prefix)
     app.include_router(activity.router, prefix=settings.api_prefix)
     app.include_router(admin.router, prefix=settings.api_prefix)
+
+    # OAuth 2.1 authorization-server + discovery routes live at the ROOT, not under /api/v1 — a
+    # connector expects `/.well-known/oauth-*`, `/authorize`, `/token`, `/register` at the origin
+    # (ADR-046 §2 / 03-api §MCP; Caddy proxies them to the api app — task 5).
+    app.include_router(oauth.router)
 
     return app
 

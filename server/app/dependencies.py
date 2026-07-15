@@ -14,6 +14,7 @@ from .db import Database
 from .entities.merge import MergeService
 from .graph.service import DerivedEdgeGraph, GraphService
 from .identity.service import IdentityCapsuleService
+from .oauth.service import OAuthService
 from .providers.registry import ProviderRegistry
 from .search.service import SearchService
 from .services.agent_runs import AgentRunStore
@@ -47,6 +48,10 @@ def get_model_routing(request: Request) -> ModelRoutingService:
 
 def get_auth_service(request: Request) -> AuthService:
     return request.app.state.auth_service
+
+
+def get_oauth_service(request: Request) -> OAuthService:
+    return request.app.state.oauth_service
 
 
 def get_capture_pipeline(request: Request) -> CapturePipeline:

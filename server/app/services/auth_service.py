@@ -33,9 +33,17 @@ class AuthService:
         self._db = db
         self._settings = settings
 
+    def verify_password(self, password: str) -> bool:
+        """Verify the single login password without opening a session.
+
+        The MCP OAuth ``/authorize`` gate (ADR-046 §2) reuses this to authenticate the consent
+        step when there is no valid PWA session, without minting a web session for a connector.
+        """
+        return verify_password(self._settings.api_password_hash, password)
+
     async def login(self, password: str, *, user_agent: str | None) -> str:
         """Verify the password and open a session. Returns the plaintext cookie token."""
-        if not verify_password(self._settings.api_password_hash, password):
+        if not self.verify_password(password):
             raise InvalidCredentials
 
         token = generate_session_token()

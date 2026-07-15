@@ -349,6 +349,31 @@ class Settings(BaseSettings):
     # Upper bound on the unpaginated `GET /chat/sessions` thread list, newest-first (03-api §Chat).
     chat_sessions_list_limit: int = 100
 
+    # --- MCP OAuth 2.1 authorization server (M5 task 3, ADR-046 §2). The `api` app is both the
+    # authorization server and the resource server for the MCP surface; tokens are opaque + HMAC-
+    # hashed in the DB (same discipline as web sessions), gated behind a password + explicit-consent
+    # /authorize flow with PKCE. ---
+    # The public origin the AS advertises in its discovery metadata (RFC 8414/9728) and the base of
+    # the MCP resource identifier `<public_base_url>/mcp` (RFC 8707). Absolute, NO trailing slash.
+    # Prod: https://braindan.cc (07-infra); dev: the local server origin the connector reaches.
+    public_base_url: str = "http://localhost:8000"
+    # HMAC secret that hashes MCP access/refresh tokens + auth codes before DB storage — the MCP
+    # analogue of `session_secret` (replaces 07-infra's static "MCP bearer-token secret"; the agent
+    # never handles the real value, it lives only in deploy/.env). Rotating it drops all MCP tokens.
+    mcp_token_hmac_secret: str = "dev-insecure-change-me"
+    # The single full-access scope an MCP connector is granted in M5 (read/write scope split is
+    # deferred — ADR-046 §2). Advertised in discovery + bound onto every issued token.
+    mcp_oauth_scope: str = "brain"
+    # Access-token lifetime (~1h, ADR-046 §2): short-lived so a leaked access token ages out fast;
+    # the connector refreshes silently against the long-lived refresh token.
+    mcp_access_token_ttl_seconds: int = 3600
+    # Refresh-token lifetime: long-lived + **sliding** (each use rotates to a fresh pair — old
+    # refresh revoked), so an active connector never re-approves. Idle past this ⇒ re-run the flow.
+    mcp_refresh_token_ttl_days: int = 60
+    # Authorization-code lifetime: very short + single-use (OAuth 2.1 SHOULD ≤ 10 min). The code is
+    # exchanged for tokens within seconds of the redirect.
+    mcp_auth_code_ttl_seconds: int = 300
+
     # --- Connectors ---
     slack_user_token: str = ""
 

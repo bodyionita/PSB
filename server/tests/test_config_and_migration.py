@@ -102,8 +102,7 @@ def test_vocabulary_guards_reject_bad_config():
         Settings(node_types="memory,person", entity_like_types="person,ghost")
 
 
-def test_compute_head_is_migration_009():
-    # M4 follow-up 3 task 2 adds revision 009 (migrate saved model_routing old provider ids →
-    # model-id vendor strings + effort_by_provider→effort_by_model, ADR-045 §4); head advances
-    # to it from 008 (hybrid FTS tsvector).
-    assert compute_head() == "009"
+def test_compute_head_is_migration_010():
+    # M5 task 3 adds revision 010 (MCP OAuth 2.1 client/auth-code/token tables, ADR-046 §2); head
+    # advances to it from 009 (the ADR-045 model-routing id migration).
+    assert compute_head() == "010"

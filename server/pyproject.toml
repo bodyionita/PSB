@@ -16,6 +16,11 @@ dependencies = [
     "boto3>=1.34",
     "httpx>=0.27",
     "python-multipart>=0.0.9",
+    # OAuth 2.1 authorization-server protocol crypto (M5, ADR-046): PKCE S256 challenge,
+    # secure token/code generation, and RFC 8414 metadata schemas. We use authlib only for the
+    # security-critical primitives; the flow orchestration lives over our own asyncpg store
+    # (rule 5 / async), mirroring how session tokens are already handled by hand (security.py).
+    "authlib>=1.3",
     # IANA tz database for zoneinfo (vault-facing local-time formatting) on platforms
     # without a system tzdata (e.g. Windows dev). Deterministic across dev/CI/prod.
     "tzdata>=2024.1",

@@ -19,6 +19,7 @@ from ..dependencies import (
     get_edge_consolidation_service,
     get_identity_capsule_service,
     get_merge_service,
+    get_oauth_service,
     get_registry,
     get_reindex_service,
     get_reprocess_service,
@@ -37,6 +38,7 @@ from ..models import (
     EntityMergeRequest,
     IdentityCapsuleAcceptedResponse,
     InboundEdgeModel,
+    McpRevokeAllResponse,
     MergeSideModel,
     ProviderErrorModel,
     ProvidersResponse,
@@ -53,6 +55,7 @@ from ..models import (
     VocabConsolidateProposeResponse,
     VocabConsolidateRequest,
 )
+from ..oauth.service import OAuthService
 from ..providers.base import ProviderUnavailable
 from ..providers.registry import ProviderRegistry
 from ..services.capture_pipeline import CaptureNotFound, CapturePipeline
@@ -286,6 +289,19 @@ async def reorganize_capture(
             status_code=status.HTTP_404_NOT_FOUND, detail="capture not found"
         ) from None
     return CaptureAcceptedResponse(capture_id=capture_id)
+
+
+@router.post("/mcp/revoke-all", response_model=McpRevokeAllResponse)
+async def revoke_all_mcp(
+    service: OAuthService = Depends(get_oauth_service),
+) -> McpRevokeAllResponse:
+    """The M5 "revoke all MCP access" switch (ADR-046 §2, 03-api §MCP): flag every live MCP
+    access + refresh token in one update — instant + total. A connector must re-run the OAuth
+    flow to regain access. Session-gated (only the logged-in user); the OAuth flow itself is the
+    public surface, revocation is the private control.
+    """
+    revoked = await service.revoke_all()
+    return McpRevokeAllResponse(revoked=revoked)
 
 
 @router.get("/providers", response_model=ProvidersResponse)
