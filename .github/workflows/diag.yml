@@ -1,0 +1,28 @@
+# Manual diagnostic: dump recent api-container logs from the VPS (read-only, no deploy).
+# Bearer tokens are redacted before printing. Triggered on demand via `gh workflow run diag.yml`.
+name: diag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tail:
+        description: "How many log lines to tail"
+        default: "500"
+
+jobs:
+  api-logs:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Dump api logs (Bearer-redacted)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /srv/app
+            echo "===== api logs (tail ${{ github.event.inputs.tail }}, Bearer-redacted) ====="
+            docker compose --env-file deploy/defaults.env -f deploy/docker-compose.yml logs api --tail "${{ github.event.inputs.tail }}" --no-color 2>&1 \
+              | sed -E 's/(Bearer|bearer) [A-Za-z0-9._~+/=-]+/\1 <redacted>/g' \
+              | tail -"${{ github.event.inputs.tail }}"
