@@ -195,12 +195,13 @@ jobs:
             # compose never tries to interpolate the $-laden argon2 hash in .env. The api
             # container still receives the real secrets via its `env_file: .env` (literal).
             docker compose --env-file deploy/defaults.env -f deploy/docker-compose.yml up -d --build
-            # Caddy caches its config in memory, and `up -d` does NOT recreate the caddy container
-            # when only the bind-mounted Caddyfile CONTENT changed (the service spec is identical) —
-            # so Caddyfile edits (e.g. new /mcp + OAuth proxy routes, M5) would silently not apply.
-            # Gracefully reload so the running Caddy re-reads the mounted file (zero downtime; a no-op
-            # on a fresh container that already read it). Fails loud under `set -e` on a bad config.
-            docker compose --env-file deploy/defaults.env -f deploy/docker-compose.yml exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+            # The caddy service bind-mounts a SINGLE file (deploy/Caddyfile), which pins that file's
+            # INODE into the container. `git pull` replaces the Caddyfile via atomic rename (a NEW
+            # inode), so a plain `up`/`restart`/`caddy reload` keeps serving the OLD config — the
+            # container still points at the deleted inode. Force-recreate ONLY caddy (`--no-deps` so
+            # api/ollama are untouched) so the mount re-resolves to the current file and Caddyfile
+            # changes (e.g. the M5 /mcp + OAuth root routes) actually load. Brief caddy-only blip.
+            docker compose --env-file deploy/defaults.env -f deploy/docker-compose.yml up -d --force-recreate --no-deps caddy
             docker compose --env-file deploy/defaults.env -f deploy/docker-compose.yml exec -T api uv run alembic upgrade head
 
       - name: Dormant notice
