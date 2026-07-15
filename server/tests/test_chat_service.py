@@ -43,6 +43,7 @@ def _make(
     hits: list[SearchHit] | None = None,
     retriever_down: bool = False,
     extra: dict[str, FakeChatProvider] | None = None,
+    capsule=None,
 ) -> tuple[ChatService, FakeChatStore, FakeRetriever, dict[str, FakeChatProvider]]:
     # The registry snapshots its chat-model catalog + model→provider index at construction (ADR-045
     # — providers are fixed at build), so any extra pickable/fallback model must be present here.
@@ -68,7 +69,7 @@ def _make(
     store = FakeChatStore()
     retriever = FakeRetriever(hits=hits, down=retriever_down)
     service = ChatService(
-        settings=settings, store=store, routing=routing, retriever=retriever
+        settings=settings, store=store, routing=routing, retriever=retriever, capsule=capsule
     )
     return service, store, retriever, providers
 
@@ -315,3 +316,44 @@ def test_clean_title_truncates_to_max_chars():
 def test_clean_title_empty_stays_empty():
     assert _clean_title("   ", 80) == ""
     assert _clean_title("", 80) == ""
+
+
+# --- identity capsule injection (M5 task 2, ADR-046 §5) ------------------------------------------
+
+
+async def test_capsule_prepended_to_answer_system_prompt():
+    from app.identity.store import CapsuleBlob
+
+    from .fakes import FakeCapsuleStore
+
+    capsule = FakeCapsuleStore(blob=CapsuleBlob(text="The user is a builder named B."))
+    service, _, _, providers = _make(hits=[_hit("n1")], capsule=capsule)
+
+    await service.send("what am I working on?")
+    await service.drain()
+
+    system = providers["chat-p"].last_messages[0].content
+    assert "ABOUT THE USER" in system
+    assert "The user is a builder named B." in system
+    # Fenced as data-not-instructions, ahead of the rendered CONTEXT block (the retrieved snippet).
+    assert system.index("ABOUT THE USER") < system.index("a snippet")
+
+
+async def test_no_capsule_leaves_system_prompt_clean():
+    service, _, _, providers = _make(hits=[_hit("n1")])  # no capsule wired
+    await service.send("hi")
+    await service.drain()
+    assert "ABOUT THE USER" not in providers["chat-p"].last_messages[0].content
+
+
+async def test_answer_survives_a_failing_capsule_read():
+    from .fakes import FakeCapsuleStore
+
+    capsule = FakeCapsuleStore(raise_on_read=True)  # read boom must not fail the turn (rule 7)
+    service, _, _, providers = _make(answer="Still answered.", hits=[_hit("n1")], capsule=capsule)
+
+    result = await service.send("hi")
+    await service.drain()
+
+    assert result.answer == "Still answered."
+    assert "ABOUT THE USER" not in providers["chat-p"].last_messages[0].content

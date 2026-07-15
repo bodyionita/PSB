@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from app.config import Settings
 from app.entities.store import EntityCandidate, normalize_alias
 from app.graph.store import NeighborCursor, NeighborEdge, SimilarEdge
+from app.identity.store import CapsuleBlob, HubProfile, RecentNode
 from app.indexing.indexer import IndexOutcome
 from app.indexing.store import CanonicalEdge, IndexState, NodeUpsert
 from app.providers.base import (
@@ -959,3 +960,55 @@ class FakeCaptureStore:
                 rec.error = error
                 count += 1
         return count
+
+
+class FakeCapsuleStore:
+    """In-memory CapsuleStore (M5 task 2): records the last saved blob, returns it from ``current``.
+
+    ``raise_on_read`` flips ``current`` into a raising read so the build_context / chat best-effort
+    (rule 7) paths can be exercised. Starts empty (``current`` → None) unless ``blob`` is preset."""
+
+    def __init__(
+        self, *, blob: CapsuleBlob | None = None, raise_on_read: bool = False
+    ) -> None:
+        self.blob = blob
+        self.saved: list[CapsuleBlob] = []
+        self.raise_on_read = raise_on_read
+
+    async def current(self) -> CapsuleBlob | None:
+        if self.raise_on_read:
+            raise RuntimeError("capsule read boom")
+        return self.blob
+
+    async def save(self, blob: CapsuleBlob) -> None:
+        self.saved.append(blob)
+        self.blob = blob
+
+
+class FakeCapsuleSourceStore:
+    """In-memory CapsuleSourceStore (M5 task 2): returns preset hubs/memories/insights, bounded by
+    the requested limit so a test can assert the config caps are honored."""
+
+    def __init__(
+        self,
+        *,
+        hubs: list[HubProfile] | None = None,
+        memories: list[RecentNode] | None = None,
+        insights: list[RecentNode] | None = None,
+    ) -> None:
+        self._hubs = hubs or []
+        self._memories = memories or []
+        self._insights = insights or []
+        self.limits: dict[str, int] = {}
+
+    async def top_profile_hubs(self, limit: int) -> list[HubProfile]:
+        self.limits["hubs"] = limit
+        return self._hubs[:limit]
+
+    async def recent_memories(self, limit: int) -> list[RecentNode]:
+        self.limits["memories"] = limit
+        return self._memories[:limit]
+
+    async def recent_insights(self, limit: int) -> list[RecentNode]:
+        self.limits["insights"] = limit
+        return self._insights[:limit]

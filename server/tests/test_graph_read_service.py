@@ -19,9 +19,10 @@ from app.graph.service import (
     _encode_cursor,
 )
 from app.graph.store import NeighborEdge
+from app.identity.store import CapsuleBlob
 from app.search.service import NodePreview
 
-from .fakes import FakeNeighborStore, FakeNodeReader
+from .fakes import FakeCapsuleStore, FakeNeighborStore, FakeNodeReader
 
 
 def _edge(
@@ -76,6 +77,7 @@ def _service(
     depth_default: int = 1,
     depth_max: int = 2,
     fanout: int = 10,
+    capsule=None,
 ) -> tuple[GraphService, FakeNeighborStore, FakeNodeReader]:
     store = FakeNeighborStore(edges=edges)
     reader = FakeNodeReader(nodes=nodes)
@@ -87,7 +89,8 @@ def _service(
         build_context_max_depth=depth_max,
         build_context_fanout=fanout,
     )
-    return GraphService(settings=settings, store=store, nodes=reader), store, reader
+    service = GraphService(settings=settings, store=store, nodes=reader, capsule=capsule)
+    return service, store, reader
 
 
 # --- neighbors ------------------------------------------------------------------------------
@@ -188,7 +191,7 @@ async def test_build_context_depth_zero_is_node_only():
     assert ctx is not None
     assert ctx.node.node_id == "c1"
     assert ctx.neighbors == [] and ctx.depth == 0 and ctx.truncated is False
-    assert ctx.identity_capsule is None  # L0 arrives in task 2
+    assert ctx.identity_capsule is None  # no capsule reader wired → L0 omitted
     assert store.calls == []  # depth 0 never touches the neighbor store
 
 
@@ -251,3 +254,39 @@ async def test_build_context_cycle_guard_does_not_reexpand():
     back_to_a = b.neighbors[0]
     assert back_to_a.edge.node_id == "c1"  # A is listed under B...
     assert back_to_a.neighbors == []  # ...but not expanded again (already on the path)
+
+
+# --- build_context L0 identity capsule (M5 task 2, ADR-046 §5) ------------------------------------
+
+
+async def test_build_context_serves_identity_capsule_as_l0():
+
+    capsule = FakeCapsuleStore(blob=CapsuleBlob(text="The user builds a second brain."))
+    service, _, _ = _service(
+        nodes={"c1": _preview()}, edges={"c1": [_edge("p2")]}, capsule=capsule
+    )
+    # Present at depth 0 (node + capsule only) and when the tree is expanded.
+    ctx0 = await service.build_context("c1", depth=0)
+    assert ctx0 is not None and ctx0.identity_capsule == "The user builds a second brain."
+    ctx1 = await service.build_context("c1", depth=1)
+    assert ctx1 is not None and ctx1.identity_capsule == "The user builds a second brain."
+
+
+async def test_build_context_omits_capsule_when_absent():
+
+    capsule = FakeCapsuleStore(blob=None)  # no capsule generated yet
+    service, _, _ = _service(nodes={"c1": _preview()}, capsule=capsule)
+    ctx = await service.build_context("c1", depth=0)
+    assert ctx is not None and ctx.identity_capsule is None
+
+
+async def test_build_context_survives_a_failing_capsule_read():
+
+    capsule = FakeCapsuleStore(raise_on_read=True)  # read boom — must not fail the bundle (rule 7)
+    service, _, _ = _service(
+        nodes={"c1": _preview()}, edges={"c1": [_edge("p2")]}, capsule=capsule
+    )
+    ctx = await service.build_context("c1", depth=1)
+    assert ctx is not None
+    assert ctx.identity_capsule is None  # omitted, best-effort
+    assert [n.edge.node_id for n in ctx.neighbors] == ["p2"]  # the rest of the bundle intact

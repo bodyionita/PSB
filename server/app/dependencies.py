@@ -13,6 +13,7 @@ from .config import Settings
 from .db import Database
 from .entities.merge import MergeService
 from .graph.service import DerivedEdgeGraph, GraphService
+from .identity.service import IdentityCapsuleService
 from .providers.registry import ProviderRegistry
 from .search.service import SearchService
 from .services.agent_runs import AgentRunStore
@@ -74,6 +75,10 @@ def get_graph_service(request: Request) -> GraphService:
 
 def get_reindex_service(request: Request) -> ReindexService:
     return request.app.state.reindex_service
+
+
+def get_identity_capsule_service(request: Request) -> IdentityCapsuleService:
+    return request.app.state.identity_capsule_service
 
 
 def get_reprocess_service(request: Request) -> ReprocessService:

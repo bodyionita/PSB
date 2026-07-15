@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.dependencies import (
     get_edge_consolidation_service,
+    get_identity_capsule_service,
     get_merge_service,
     get_registry,
     get_reindex_service,
@@ -95,6 +96,43 @@ def test_reindex_returns_202_with_run_id():
 def test_reindex_returns_409_when_already_running():
     client, fake = _reindex_client(None)  # start_manual → None ⇒ single-flight conflict
     resp = client.post(f"{PREFIX}/admin/reindex")
+    assert resp.status_code == 409
+    assert fake.calls == 1
+
+
+# --- POST /admin/identity-capsule/refresh (M5 task 2, ADR-046 §5) ---
+class FakeCapsuleTrigger:
+    """trigger() returns a run_id, or None to force the 409 single-flight path."""
+
+    def __init__(self, run_id: str | None) -> None:
+        self._run_id = run_id
+        self.calls = 0
+
+    async def trigger(self) -> str | None:
+        self.calls += 1
+        return self._run_id
+
+
+def _capsule_client(run_id: str | None) -> tuple[TestClient, FakeCapsuleTrigger]:
+    app = FastAPI()
+    app.include_router(admin.router, prefix=PREFIX)
+    fake = FakeCapsuleTrigger(run_id)
+    app.dependency_overrides[get_identity_capsule_service] = lambda: fake
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app), fake
+
+
+def test_identity_capsule_refresh_returns_202_with_run_id():
+    client, fake = _capsule_client("run-7")
+    resp = client.post(f"{PREFIX}/admin/identity-capsule/refresh")
+    assert resp.status_code == 202
+    assert resp.json() == {"run_id": "run-7"}
+    assert fake.calls == 1
+
+
+def test_identity_capsule_refresh_returns_409_when_already_running():
+    client, fake = _capsule_client(None)
+    resp = client.post(f"{PREFIX}/admin/identity-capsule/refresh")
     assert resp.status_code == 409
     assert fake.calls == 1
 

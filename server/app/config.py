@@ -319,6 +319,20 @@ class Settings(BaseSettings):
     build_context_max_depth: int = 2
     build_context_fanout: int = 10
 
+    # --- Identity capsule (M5 task 2, ADR-046 §5 / ADR-033 #1). The derived ~300-token "who the
+    # user is / current state" preamble, distilled nightly on `conspect` from a blend of the graph's
+    # high-degree entity-profile hubs + recent memories + recent insights, stored as an app_settings
+    # blob and served as build_context L0 + the chat system prompt (never generated inline). ---
+    # How many of each source kind the distiller blends (hubs ranked by graph degree; memories +
+    # insights newest-first). Bounds the prompt size; insights are usually absent until M6/M10.
+    identity_capsule_max_hubs: int = 8
+    identity_capsule_max_memories: int = 12
+    identity_capsule_max_insights: int = 8
+    # The soft token budget handed to the distiller prompt (~300 tokens, ADR-046 §5) + a hard char
+    # cap the stored text is truncated to (a runaway-length backstop; ~300 tokens ≈ 1200 chars).
+    identity_capsule_budget_tokens: int = 300
+    identity_capsule_max_chars: int = 1600
+
     # --- Chat (M4 task 3, 04-pipelines §5, ADR-025). Interactive grounded chat over the graph. ---
     # Turns condensed into a standalone English query on turn ≥2 (04 §5). Also bounds how much
     # prior history is replayed into the answer prompt, so a long session can't bloat the context.
@@ -362,6 +376,9 @@ class Settings(BaseSettings):
     backup_data_sync_cron: str = "10 3 * * *"  # nightly /srv/data raw inputs → R2
     backup_db_backup_cron: str = "25 3 * * *"  # nightly pg_dump → R2
     integrity_drill_cron: str = "30 4 * * sun"  # weekly verify+clone drill (ADR-014 §6)
+    # Identity-capsule refresh (M5, ADR-046 §5): distil the ~300-token capsule over the day's fresh
+    # hubs — after profile-refresh (04:10) + backfill (04:20) so those land first, before the sweep.
+    identity_capsule_refresh_cron: str = "35 4 * * *"
     backup_store_sweep_cron: str = "55 4 * * *"  # ADR-010 04:55 commit+push sweep
     backup_store_bundle_cron: str = "57 4 * * *"  # WORM `git bundle` right after the sweep
     # /health `backups` leg degrades when the last successful integrity-drill is older than this

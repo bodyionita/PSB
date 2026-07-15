@@ -14,6 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import Settings
+from app.identity.service import IdentityCapsuleService
 from app.services.backup_jobs import BackupJobs
 from app.services.reindex import ReindexService
 from app.services.scheduler import BackupScheduler
@@ -75,6 +76,27 @@ def test_reindex_job_is_absent_without_a_reindex_service(tmp_path: Path):
     settings, jobs = _jobs(tmp_path)
     specs = BackupScheduler(settings=settings, jobs=jobs).job_specs()
     assert {s.id for s in specs} == JOB_IDS  # backup-only when no reindex is wired
+
+
+def _capsule(settings: Settings) -> IdentityCapsuleService:
+    # Only the run_scheduled coroutine is referenced by the scheduler; the deps can be None here.
+    return IdentityCapsuleService(
+        settings=settings, capsule_store=None, sources=None, routing=None, run_store=None
+    )
+
+
+def test_identity_capsule_job_is_added_when_the_service_is_given(tmp_path: Path):
+    settings, jobs = _jobs(tmp_path)
+    capsule = _capsule(settings)
+    specs = BackupScheduler(
+        settings=settings, jobs=jobs, identity_capsule=capsule
+    ).job_specs()
+
+    by_id = {s.id: s for s in specs}
+    assert set(by_id) == JOB_IDS | {"identity-capsule-refresh"}
+    assert by_id["identity-capsule-refresh"].func == capsule.run_scheduled
+    assert by_id["identity-capsule-refresh"].crontab == settings.identity_capsule_refresh_cron
+    assert CronTrigger.from_crontab(by_id["identity-capsule-refresh"].crontab)
 
 
 async def test_start_registers_all_jobs_then_shuts_down(tmp_path: Path):

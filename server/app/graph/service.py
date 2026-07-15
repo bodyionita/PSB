@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from ..config import Settings
+from ..identity.store import IdentityCapsuleReader
 from ..search.service import NodePreview
 from .store import GraphStore, NeighborCursor, NeighborEdge, NeighborStore
 
@@ -110,9 +111,10 @@ class ContextNeighbor:
 class NodeContext:
     """The ``build_context`` result: the identity capsule (L0), the center node, its neighbor tree.
 
-    ``identity_capsule`` is ``None`` here — M5 task 2 distils it and wires it in as L0. ``depth`` is
-    the effective (clamped) traversal depth; ``truncated`` marks the center having more 1-hop
-    neighbors than the fanout cap included."""
+    ``identity_capsule`` is the last-distilled capsule text (ADR-046 §5, served as L0), or ``None``
+    when no capsule exists yet / the read failed (never generated inline — rule 7). ``depth`` is the
+    effective (clamped) traversal depth; ``truncated`` marks the center having more 1-hop neighbors
+    than the fanout cap included."""
 
     node: NodePreview
     neighbors: list[ContextNeighbor]
@@ -123,15 +125,23 @@ class NodeContext:
 
 class GraphService:
     """One-hop traversal + bounded context assembly over the graph (M5 task 1). Thin over the
-    store — no LLM call — so MCP ``traverse``/``build_context`` and the M7 map share one seam."""
+    store — no LLM call — so MCP ``traverse``/``build_context`` and the M7 map share one seam. The
+    ``build_context`` L0 identity capsule is a cheap ``app_settings`` read (task 2), never distilled
+    inline."""
 
     _DIRECTIONS = frozenset({"out", "in", "both"})
 
     def __init__(
-        self, *, settings: Settings, store: NeighborStore, nodes: NodeReader
+        self,
+        *,
+        settings: Settings,
+        store: NeighborStore,
+        nodes: NodeReader,
+        capsule: IdentityCapsuleReader | None = None,
     ) -> None:
         self._store = store
         self._nodes = nodes
+        self._capsule = capsule
         self._page_default = settings.graph_neighbors_page_default
         self._page_max = settings.graph_neighbors_page_max
         self._depth_default = settings.build_context_default_depth
@@ -188,13 +198,31 @@ class GraphService:
         center = await self._nodes.get_node(node_id)
         if center is None:
             return None
+        capsule = await self._identity_capsule()
         effective_depth = self._clamp_depth(depth)
         if effective_depth <= 0:
-            return NodeContext(node=center, neighbors=[], depth=effective_depth, truncated=False)
+            return NodeContext(
+                node=center, neighbors=[], depth=effective_depth, truncated=False,
+                identity_capsule=capsule,
+            )
         tree, truncated = await self._expand(node_id, effective_depth, {node_id})
         return NodeContext(
-            node=center, neighbors=tree, depth=effective_depth, truncated=truncated
+            node=center, neighbors=tree, depth=effective_depth, truncated=truncated,
+            identity_capsule=capsule,
         )
+
+    async def _identity_capsule(self) -> str | None:
+        """The last-distilled capsule text served as L0 (ADR-046 §5) — a cheap ``app_settings``
+        read, omitted if absent and never generated inline. Best-effort: a read failure yields
+        ``None`` rather than failing the whole bundle (rule 7)."""
+        if self._capsule is None:
+            return None
+        try:
+            blob = await self._capsule.current()
+        except Exception:  # noqa: BLE001 — the capsule is grounding, not load-bearing for a bundle
+            logger.warning("build_context: capsule read failed; omitting L0", exc_info=True)
+            return None
+        return blob.text if blob else None
 
     async def _expand(
         self, node_id: str, remaining: int, seen: frozenset[str] | set[str]

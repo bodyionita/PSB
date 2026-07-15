@@ -20,6 +20,7 @@ from .config import get_settings
 from .db import Database
 from .entities.backfill import build_backfill_service
 from .entities.profile_refresh import build_profile_refresh_service
+from .identity.service import build_identity_capsule_service
 from .services.backup_jobs import build_backup_jobs
 from .services.git_repo import GitRepo
 from .services.reindex import build_reindex_service
@@ -41,11 +42,14 @@ BACKUP_JOBS: dict[str, str] = {
 REINDEX = "reindex"
 PROFILE_REFRESH = "profile-refresh"
 BACKFILL = "entity-backfill"
+IDENTITY_CAPSULE = "identity-capsule-refresh"
 # The reprocess-all-from-raw op (ADR-042). Destructive of derived state but confirm is implicit at
 # the CLI (an operator running it deliberately) — raw + approved vocab are preserved.
 REPROCESS = "reprocess-all"
-# Every valid CLI job name (backup jobs + reindex + entity jobs + reprocess).
-JOBS: tuple[str, ...] = (*BACKUP_JOBS.keys(), REINDEX, PROFILE_REFRESH, BACKFILL, REPROCESS)
+# Every valid CLI job name (backup jobs + reindex + entity jobs + capsule + reprocess).
+JOBS: tuple[str, ...] = (
+    *BACKUP_JOBS.keys(), REINDEX, PROFILE_REFRESH, BACKFILL, IDENTITY_CAPSULE, REPROCESS
+)
 
 
 async def run_job(name: str) -> None:
@@ -68,6 +72,9 @@ async def run_job(name: str) -> None:
             await build_profile_refresh_service(settings, db).run_scheduled()
         elif name == BACKFILL:
             await build_backfill_service(settings, db, store_backup).run_scheduled()
+        elif name == IDENTITY_CAPSULE:
+            # DB-only (app_settings + reads), no store git — like profile-refresh.
+            await build_identity_capsule_service(settings, db).run_scheduled()
         else:
             jobs = build_backup_jobs(settings, db, store_backup)
             await getattr(jobs, BACKUP_JOBS[name])()

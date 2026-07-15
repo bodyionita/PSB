@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from ..dependencies import (
     get_capture_pipeline,
     get_edge_consolidation_service,
+    get_identity_capsule_service,
     get_merge_service,
     get_registry,
     get_reindex_service,
@@ -26,6 +27,7 @@ from ..dependencies import (
     require_session,
 )
 from ..entities.merge import BadMerge, MergeNodeNotFound, MergeService
+from ..identity.service import IdentityCapsuleService
 from ..models import (
     BackupResponse,
     CaptureAcceptedResponse,
@@ -33,6 +35,7 @@ from ..models import (
     EntityMergeAcceptedResponse,
     EntityMergeProposeResponse,
     EntityMergeRequest,
+    IdentityCapsuleAcceptedResponse,
     InboundEdgeModel,
     MergeSideModel,
     ProviderErrorModel,
@@ -90,6 +93,29 @@ async def reindex(
             status_code=status.HTTP_409_CONFLICT, detail="a reindex is already running"
         )
     return ReindexAcceptedResponse(run_id=run_id)
+
+
+@router.post(
+    "/identity-capsule/refresh",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=IdentityCapsuleAcceptedResponse,
+)
+async def refresh_identity_capsule(
+    capsule_service: IdentityCapsuleService = Depends(get_identity_capsule_service),
+) -> IdentityCapsuleAcceptedResponse:
+    """On-demand identity-capsule refresh (ADR-046 §5): re-distil the ~300-token capsule over the
+    current hubs + recent memories/insights in the background.
+
+    Returns `202 {run_id}` and opens an `agent="identity-capsule-refresh"` run; single-flight —
+    `409` if a refresh (nightly or manual) is already running.
+    """
+    run_id = await capsule_service.trigger()
+    if run_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="an identity-capsule refresh is already running",
+        )
+    return IdentityCapsuleAcceptedResponse(run_id=run_id)
 
 
 @router.post("/reprocess", response_model=None)

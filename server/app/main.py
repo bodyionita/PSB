@@ -27,6 +27,8 @@ from .entities.store import PgAliasStore
 from .graph.node_writer import NodeWriter
 from .graph.service import DerivedEdgeGraph, GraphService
 from .graph.store import PgGraphStore, PgNeighborStore
+from .identity.service import IdentityCapsuleService
+from .identity.store import PgCapsuleSourceStore, PgIdentityCapsuleStore
 from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
@@ -121,18 +123,35 @@ async def lifespan(app: FastAPI):
         settings=settings, store=PgSearchStore(db), registry=app.state.registry
     )
 
+    # Identity capsule (M5 task 2, ADR-046 §5 / ADR-033 #1): the derived ~300-token "who the user
+    # is" blob. The store is the cheap read side (build_context L0 + the chat system prompt below);
+    # the distiller service owns the nightly/on-demand refresh (wired into the scheduler below).
+    capsule_store = PgIdentityCapsuleStore(db)
+    app.state.identity_capsule_service = IdentityCapsuleService(
+        settings=settings,
+        capsule_store=capsule_store,
+        sources=PgCapsuleSourceStore(db),
+        routing=app.state.model_routing,
+        run_store=run_store,
+    )
+
     # Graph reads (M5 task 1, ADR-046/028/032): the cursor-paginated one-hop `traverse` primitive +
-    # `build_context` bundle. Thin over the edges table; reuses the search service for get_node. The
-    # MCP tools (task 4) + the M7 map endpoint delegate here — no traversal logic of their own.
+    # `build_context` bundle. Thin over the edges table; reuses the search service for get_node +
+    # the capsule store for the L0 identity capsule. The MCP tools (task 4) + the M7 map endpoint
+    # delegate here — no traversal logic of their own.
     app.state.graph_service = GraphService(
-        settings=settings, store=PgNeighborStore(db), nodes=app.state.search_service
+        settings=settings,
+        store=PgNeighborStore(db),
+        nodes=app.state.search_service,
+        capsule=capsule_store,
     )
 
     # Chat (M4 task 3, ADR-025): grounded chat over the graph — condense → hybrid retrieval (via the
-    # search service) → fenced prompt → cited-only answer → persistence, with best-effort quick-tier
-    # titling. Wired here so it can be drained on shutdown; the routers (task 4) delegate to it.
+    # search service) → fenced prompt (+ the identity capsule as up-front grounding, M5 task 2) →
+    # cited-only answer → persistence, with best-effort quick-tier titling. Wired here so it can be
+    # drained on shutdown; the routers (task 4) delegate to it.
     app.state.chat_service = build_chat_service(
-        settings, PgChatStore(db), app.state.model_routing, app.state.search_service
+        settings, PgChatStore(db), app.state.model_routing, app.state.search_service, capsule_store
     )
 
     # Tags (ADR-024): the live tag vocabulary (organizer reuse) + the manual two-step consolidation
@@ -290,6 +309,7 @@ async def lifespan(app: FastAPI):
             reindex=reindex_service,
             profile_refresh=profile_refresh_service,
             backfill=backfill_service,
+            identity_capsule=app.state.identity_capsule_service,
         )
         scheduler.start()
     app.state.scheduler = scheduler
@@ -309,6 +329,7 @@ async def lifespan(app: FastAPI):
         await app.state.edge_consolidation_service.drain()
         await app.state.merge_service.drain()
         await app.state.chat_service.drain()
+        await app.state.identity_capsule_service.drain()
         await pipeline.drain()
         await store_backup.flush()
         await db.disconnect()

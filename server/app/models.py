@@ -374,6 +374,14 @@ class ReprocessAcceptedResponse(BaseModel):
     run_id: str
 
 
+# --- Identity-capsule refresh (03-api §Admin, M5 task 2 / ADR-046 §5) ---
+class IdentityCapsuleAcceptedResponse(BaseModel):
+    """202 body for POST /admin/identity-capsule/refresh — the ``agent_runs`` id of the background
+    distill run. Poll the activity feed with it for the refreshed/kept outcome."""
+
+    run_id: str
+
+
 # --- Entity merge (03-api §Admin, M3 / ADR-030 §5) ---
 class EntityMergeRequest(BaseModel):
     """POST /admin/entities/merge body. ``apply=false`` (default) proposes the inbound-edge

@@ -26,6 +26,12 @@ from app.entities.entity_store import PgEntityStore
 from app.entities.profile_store import PgProfileStore
 from app.entities.store import PgAliasStore
 from app.graph.store import PgNeighborStore
+from app.identity.store import (
+    CAPSULE_KEY,
+    CapsuleBlob,
+    PgCapsuleSourceStore,
+    PgIdentityCapsuleStore,
+)
 from app.search.store import PgSearchStore, RetrievalParams
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
@@ -254,6 +260,63 @@ async def check_model_routing_migration(db: Database) -> None:
                 await c.execute(
                     "INSERT INTO app_settings (key, value) VALUES ('model_routing', $1::jsonb)",
                     backup,
+                )
+
+
+async def check_identity_capsule(db: Database) -> None:
+    """Drive the M5 task-2 capsule stores against real pg (ADR-046 §5): the degree-ranked hub read,
+    recent-node ordering, tombstone exclusion, and the app_settings blob round-trip.
+
+    The source reads are GLOBAL (not smoke-scoped), so assert the smoke rows as a subset (present +
+    correctly ordered/ranked, tombstone excluded) against a dev DB that may hold real nodes. The
+    blob write backs up + restores any real ``identity_capsule`` row so dev state is untouched."""
+    print("\n== PgIdentityCapsuleStore + PgCapsuleSourceStore (M5 task 2, ADR-046 §5) ==")
+    caps = PgIdentityCapsuleStore(db)
+    src = PgCapsuleSourceStore(db)
+
+    # top_profile_hubs: ALEX has a profile + canonical degree 2 (involves-in + at-out); GHOST has a
+    # profile too but is tombstoned (merged into ALEX) → excluded; PLACE has no profile → not a hub.
+    hubs = {h.node_id: h for h in await src.top_profile_hubs(500)}
+    check("top_profile_hubs includes ALEX at canonical degree 2, excludes tombstone GHOST",
+          ALEX in hubs and hubs[ALEX].degree == 2 and GHOST not in hubs,
+          str({k: v.degree for k, v in hubs.items()}))
+
+    # recent_memories: MEM2 (occurred 2026-03) before MEM1 (2026-02), first-chunk excerpt rides.
+    mems = await src.recent_memories(500)
+    smoke_order = [m.node_id for m in mems if m.node_id in (MEM1, MEM2)]
+    mem1 = next((m for m in mems if m.node_id == MEM1), None)
+    check("recent_memories orders MEM2 before MEM1 (occurred desc) + carries a chunk excerpt",
+          smoke_order == [MEM2, MEM1]
+          and mem1 is not None and "Alex" in (mem1.excerpt or ""), str(smoke_order))
+    # recent_insights: none of the smoke nodes are insights (memory/person/place) → excluded.
+    ins = await src.recent_insights(500)
+    smoke_ids = (MEM1, MEM2, ALEX, PLACE, GHOST)
+    check("recent_insights excludes the smoke non-insight nodes",
+          all(i.node_id not in smoke_ids for i in ins), str([i.node_id for i in ins]))
+
+    # Blob round-trip, isolated: back up any real capsule row, exercise save/current, restore.
+    async with db.acquire() as conn:
+        backup = await conn.fetchval("SELECT value FROM app_settings WHERE key = $1", CAPSULE_KEY)
+    try:
+        await caps.save(CapsuleBlob(
+            text="smoke capsule text", generated_at=datetime.now(UTC),
+            source_refs=[{"node_id": ALEX, "title": "Alex", "kind": "hub"}],
+        ))
+        got = await caps.current()
+        check("capsule save/current round-trips text + generated_at + refs",
+              got is not None and got.text == "smoke capsule text"
+              and got.generated_at is not None and got.source_refs[0]["node_id"] == ALEX, str(got))
+        await caps.save(CapsuleBlob(text="smoke capsule updated"))  # ON CONFLICT update path
+        got2 = await caps.current()
+        check("capsule save upserts (ON CONFLICT)",
+              got2 is not None and got2.text == "smoke capsule updated", str(got2))
+    finally:
+        async with db.transaction() as c:
+            await c.execute("DELETE FROM app_settings WHERE key = $1", CAPSULE_KEY)
+            if backup is not None:
+                await c.execute(
+                    "INSERT INTO app_settings (key, value) VALUES ($1, $2::jsonb)",
+                    CAPSULE_KEY, backup,
                 )
 
 
@@ -533,6 +596,7 @@ async def main() -> int:
         check("list_sessions includes the session", sid in [s.id for s in listed])
         await db.pool.execute("DELETE FROM chat_sessions WHERE id = $1", sid)
 
+        await check_identity_capsule(db)
         await check_model_routing_migration(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")

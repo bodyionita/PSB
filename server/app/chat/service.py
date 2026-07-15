@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from ..config import Settings
+from ..identity.store import IdentityCapsuleReader
 from ..providers.base import ChatMessage, ProviderUnavailable
 from ..search.store import SearchHit
 from ..services.model_routing import ModelRoutingService
@@ -38,6 +39,7 @@ from .prompts import (
     TITLE_SYSTEM_PROMPT,
     render_condense_input,
     render_context,
+    render_identity,
     render_title_input,
 )
 from .store import ROLE_ASSISTANT, ROLE_USER, ChatMessageRecord, ChatSessionRecord, ChatStore
@@ -99,11 +101,15 @@ class ChatService:
         store: ChatStore,
         routing: ModelRoutingService,
         retriever: Retriever,
+        capsule: IdentityCapsuleReader | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._routing = routing
         self._retriever = retriever
+        # The identity capsule (M5 task 2, ADR-046 §5): a cheap last-distilled blob read prepended
+        # to the system prompt for up-front grounding. Optional so the service builds without it.
+        self._capsule = capsule
         # Strong refs to in-flight titling tasks so they aren't GC'd mid-run (drained on shutdown).
         self._tasks: set[asyncio.Task] = set()
 
@@ -231,13 +237,30 @@ class ChatService:
 
     async def _answer(self, history, message: str, hits: list[SearchHit], *, requested_model):
         """Answer over the fenced numbered context (chat group; the picker's ``requested_model``
-        overrides the active model, ADR-025 §5). Raises ``RegistryExhausted`` if the whole chat
-        chain is down — the user turn is already persisted, and the router maps it to 503."""
-        system = f"{CHAT_SYSTEM_PROMPT}\n\n{render_context(hits)}"
-        messages = [ChatMessage(role="system", content=system)]
+        overrides the active model, ADR-025 §5). The identity capsule (when present) is prepended as
+        up-front grounding. Raises ``RegistryExhausted`` if the whole chat chain is down — the user
+        turn is already persisted, and the router maps it to 503."""
+        parts = [CHAT_SYSTEM_PROMPT]
+        capsule = await self._identity_capsule()
+        if capsule:
+            parts.append(render_identity(capsule))
+        parts.append(render_context(hits))
+        messages = [ChatMessage(role="system", content="\n\n".join(parts))]
         messages.extend(ChatMessage(role=m.role, content=m.content) for m in history)
         messages.append(ChatMessage(role="user", content=message))
         return await self._routing.complete("chat", messages, requested_model=requested_model)
+
+    async def _identity_capsule(self) -> str | None:
+        """The last-distilled capsule text (ADR-046 §5), or ``None`` when absent / the read failed.
+        Best-effort: a capsule read must never fail an answerable turn (rule 7)."""
+        if self._capsule is None:
+            return None
+        try:
+            blob = await self._capsule.current()
+        except Exception:  # noqa: BLE001 — grounding is optional; answer without it
+            logger.warning("chat: identity capsule read failed; answering without", exc_info=True)
+            return None
+        return blob.text if blob else None
 
     async def _title_session(self, session_id: str, user_message: str, answer: str) -> None:
         """Generate + save a short session title on the quick tier (ADR-043). Best-effort: any
@@ -306,6 +329,9 @@ def build_chat_service(
     store: ChatStore,
     routing: ModelRoutingService,
     retriever: Retriever,
+    capsule: IdentityCapsuleReader | None = None,
 ) -> ChatService:
     """Construct the chat service — shared by ``main.py`` (the router lands in task 4)."""
-    return ChatService(settings=settings, store=store, routing=routing, retriever=retriever)
+    return ChatService(
+        settings=settings, store=store, routing=routing, retriever=retriever, capsule=capsule
+    )

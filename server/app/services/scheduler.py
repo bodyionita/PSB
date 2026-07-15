@@ -32,10 +32,11 @@ logger = logging.getLogger(__name__)
 
 
 class EntityJob(Protocol):
-    """A nightly entity job (profile-refresh / backfill) — one idempotent, never-raising entry
-    point the scheduler and CLI both drive (ADR-030 §4/§6)."""
+    """A nightly agent-window job (profile-refresh / backfill / identity-capsule) — one idempotent,
+    never-raising entry point the scheduler and CLI both drive (ADR-030 §4/§6, ADR-046 §5). Some
+    return an outcome for CLI logging; the scheduler ignores it."""
 
-    async def run_scheduled(self) -> None: ...
+    async def run_scheduled(self): ...
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class BackupScheduler:
         reindex: ReindexService | None = None,
         profile_refresh: EntityJob | None = None,
         backfill: EntityJob | None = None,
+        identity_capsule: EntityJob | None = None,
         scheduler: AsyncIOScheduler | None = None,
     ) -> None:
         self._settings = settings
@@ -63,6 +65,7 @@ class BackupScheduler:
         self._reindex = reindex
         self._profile_refresh = profile_refresh
         self._backfill = backfill
+        self._identity_capsule = identity_capsule
         self._tz = ZoneInfo(settings.scheduler_tz)
         self._scheduler = scheduler or AsyncIOScheduler(timezone=self._tz)
 
@@ -91,6 +94,17 @@ class BackupScheduler:
             )
         if self._backfill is not None:
             specs.append(JobSpec("entity-backfill", self._backfill.run_scheduled, s.backfill_cron))
+        # M5 (ADR-046 §5): the identity-capsule refresh. Runs after profile-refresh + backfill so
+        # it distils over the day's fresh hubs; DB-only (app_settings), so it doesn't touch the
+        # store lock. Never generated on a read — this nightly (or the on-demand trigger) is it.
+        if self._identity_capsule is not None:
+            specs.append(
+                JobSpec(
+                    "identity-capsule-refresh",
+                    self._identity_capsule.run_scheduled,
+                    s.identity_capsule_refresh_cron,
+                )
+            )
         return specs
 
     def start(self) -> None:
