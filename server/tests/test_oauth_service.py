@@ -108,10 +108,20 @@ class FakeStore:
     async def touch_token(self, token_hash) -> None:
         pass
 
-    async def revoke_token(self, token_hash) -> None:
+    async def revoke_token(self, token_hash) -> int:
         row = self.tokens.get(token_hash)
         if row and row["revoked_at"] is None:
             row["revoked_at"] = self._now()
+            return 1
+        return 0
+
+    async def invalidate_all_codes(self) -> int:
+        n = 0
+        for row in self.codes.values():
+            if row["consumed_at"] is None:
+                row["consumed_at"] = self._now()
+                n += 1
+        return n
 
     async def revoke_client_tokens(self, client_id) -> int:
         n = 0
@@ -485,6 +495,43 @@ async def test_revoke_all(ctx):
     # A revoked refresh can no longer rotate.
     with pytest.raises(InvalidGrant):
         await service.refresh(refresh_token=g1.refresh_token, client_id=reg.client_id)
+
+
+async def test_revoke_all_invalidates_pending_code(ctx):
+    # Review finding 2: revoke-all must be TOTAL — an issued-but-unexchanged code cannot still mint
+    # tokens after the switch is thrown.
+    service, _, _ = ctx
+    reg = await _register(service)
+    code = await _issue_code(service, reg.client_id)
+    await service.revoke_all()
+    with pytest.raises(InvalidGrant):
+        await service.exchange_code(
+            code=code, client_id=reg.client_id, redirect_uri=REDIRECT, code_verifier=VERIFIER
+        )
+
+
+async def test_refresh_rotation_is_atomic(ctx):
+    # Review finding 1: the revoke is the race-decider. Simulate a concurrent second presentation of
+    # the same refresh by pre-revoking it (rowcount 0 path) → reuse detection revokes the client.
+    service, store, _ = ctx
+    reg = await _register(service)
+    grant = await _first_grant(service, reg.client_id)
+    other_access = (await _first_grant(service, reg.client_id)).access_token
+    # Manually revoke the presented refresh out from under the call (mimics the race loser's state).
+    await store.revoke_token(service._hash(grant.refresh_token))
+    with pytest.raises(InvalidGrant):
+        await service.refresh(refresh_token=grant.refresh_token, client_id=reg.client_id)
+    # Reuse detection revoked the whole client, incl. the other live access token.
+    assert await service.validate_access_token(other_access) is None
+
+
+async def test_register_rejects_client_secret_basic(ctx):
+    # Review finding 3: basic auth isn't wired at /token, so it must not be registrable.
+    service, _, _ = ctx
+    with pytest.raises(InvalidClientMetadata):
+        await service.register_client(
+            {"redirect_uris": [REDIRECT], "token_endpoint_auth_method": "client_secret_basic"}
+        )
 
 
 async def test_token_record_replace_is_frozen(ctx):

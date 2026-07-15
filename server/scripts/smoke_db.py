@@ -378,6 +378,17 @@ async def check_oauth(db: Database) -> None:
         )
         check("expired code -> None", (await store.consume_code("smoke_code_expired")) is None)
 
+        # invalidate_all_codes (revoke-all's code leg — review finding 2): a live code is consumed.
+        await store.create_code(
+            code_hash="smoke_code_pending", client_id=cid, redirect_uri="https://claude.ai/cb",
+            code_challenge="c", code_challenge_method="S256", scope="brain", resource=None,
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+        invalidated = await store.invalidate_all_codes()
+        check("invalidate_all_codes consumes live codes", invalidated >= 1, f"n={invalidated}")
+        check("code no longer consumable after invalidate",
+              (await store.consume_code("smoke_code_pending")) is None)
+
         access_exp = datetime.now(UTC) + timedelta(hours=1)
         refresh_exp = datetime.now(UTC) + timedelta(days=60)
         tid = await store.create_token(
@@ -392,6 +403,16 @@ async def check_oauth(db: Database) -> None:
         rec = await store.get_token("smoke_access")
         check("get_token round-trips kind/scope/liveness",
               rec is not None and rec.kind == "access" and rec.revoked_at is None, str(rec))
+
+        # revoke_token returns the affected-row count — the refresh-rotation race-decider (finding
+        # 1). Use a throwaway token so the revoke_all count below stays 2 (access + refresh).
+        await store.create_token(
+            client_id=cid, token_hash="smoke_throwaway", kind="access", scope="brain",
+            resource=None, expires_at=access_exp,
+        )
+        check("revoke_token returns 1 then 0 (idempotent rowcount)",
+              (await store.revoke_token("smoke_throwaway")) == 1
+              and (await store.revoke_token("smoke_throwaway")) == 0)
 
         n = await store.revoke_all()
         check("revoke_all flags every live token (count = 2)", n == 2, f"revoked={n}")

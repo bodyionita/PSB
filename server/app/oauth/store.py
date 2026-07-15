@@ -89,9 +89,11 @@ class OAuthStore(Protocol):
 
     async def touch_token(self, token_hash: str) -> None: ...
 
-    async def revoke_token(self, token_hash: str) -> None: ...
+    async def revoke_token(self, token_hash: str) -> int: ...
 
     async def revoke_client_tokens(self, client_id: str) -> int: ...
+
+    async def invalidate_all_codes(self) -> int: ...
 
     async def revoke_all(self) -> int: ...
 
@@ -253,13 +255,16 @@ class PgOAuthStore:
                 "UPDATE mcp_tokens SET last_used_at = now() WHERE token_hash = $1", token_hash
             )
 
-    async def revoke_token(self, token_hash: str) -> None:
+    async def revoke_token(self, token_hash: str) -> int:
+        """Revoke one token; returns the affected-row count so the caller can detect that it lost a
+        race to a concurrent revocation (refresh rotation reuse-detection, ADR-046 §2)."""
         async with self._db.transaction() as conn:
-            await conn.execute(
+            result = await conn.execute(
                 "UPDATE mcp_tokens SET revoked_at = now() "
                 "WHERE token_hash = $1 AND revoked_at IS NULL",
                 token_hash,
             )
+        return _rowcount(result)
 
     async def revoke_client_tokens(self, client_id: str) -> int:
         async with self._db.transaction() as conn:
@@ -267,6 +272,15 @@ class PgOAuthStore:
                 "UPDATE mcp_tokens SET revoked_at = now() "
                 "WHERE client_id = $1 AND revoked_at IS NULL",
                 client_id,
+            )
+        return _rowcount(result)
+
+    async def invalidate_all_codes(self) -> int:
+        """Consume every outstanding (unexchanged) authorization code — part of revoke-all, so the
+        switch is *total*: a code issued but not yet redeemed can't still mint tokens afterwards."""
+        async with self._db.transaction() as conn:
+            result = await conn.execute(
+                "UPDATE mcp_auth_codes SET consumed_at = now() WHERE consumed_at IS NULL"
             )
         return _rowcount(result)
 

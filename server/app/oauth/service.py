@@ -138,8 +138,11 @@ class OAuthService:
         if not isinstance(grant_types, list) or set(grant_types) - _SUPPORTED_GRANT_TYPES:
             raise InvalidClientMetadata("unsupported grant_types")
 
+        # Only the two methods the discovery metadata advertises. `client_secret_basic` is rejected
+        # (the `/token` endpoint reads the secret from the form body, not the Authorization header —
+        # accepting basic would register a client that can never authenticate).
         auth_method = metadata.get("token_endpoint_auth_method", "none")
-        if auth_method not in ("none", "client_secret_post", "client_secret_basic"):
+        if auth_method not in ("none", "client_secret_post"):
             raise InvalidClientMetadata("unsupported token_endpoint_auth_method")
 
         client_id = "mcp_" + generate_token(24)
@@ -303,8 +306,13 @@ class OAuthService:
         client = await self._require_client(client_id)
         self._authenticate_client(client, client_secret)
 
-        # Rotate: revoke the presented refresh, mint a fresh access+refresh pair (sliding lifetime).
-        await self._store.revoke_token(self._hash(refresh_token))
+        # Rotate atomically: the revoke is the race-decider — only the caller whose UPDATE flips
+        # revoked_at (rowcount 1) may mint the next pair. A concurrent second presentation of the
+        # same refresh loses the race (rowcount 0) and is treated as reuse → revoke the whole client
+        # (ADR-046 §2 reuse-detection, race-proof — not the earlier read-then-write check).
+        if await self._store.revoke_token(self._hash(refresh_token)) == 0:
+            await self._store.revoke_client_tokens(record.client_id)
+            raise InvalidGrant("refresh token has been revoked")
         return await self._issue_grant(client_id, record.scope, record.resource)
 
     # --- resource-server token validation (task 4 reuses) ------------------------------------
@@ -326,7 +334,10 @@ class OAuthService:
     # --- revoke-all switch -------------------------------------------------------------------
 
     async def revoke_all(self) -> int:
-        """The M5 "revoke all MCP access" control — flag every live token (ADR-046 §2)."""
+        """The M5 "revoke all MCP access" control (ADR-046 §2): total + instant. Invalidates every
+        outstanding auth code *and* flags every live token — so a code caught mid-flow (issued but
+        not yet exchanged) can't still be redeemed after the switch. Returns the token count."""
+        await self._store.invalidate_all_codes()
         return await self._store.revoke_all()
 
     # --- internals ---------------------------------------------------------------------------
