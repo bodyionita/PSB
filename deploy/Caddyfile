@@ -15,6 +15,18 @@
 		reverse_proxy api:8000
 	}
 
+	# MCP + OAuth 2.1 (M5, ADR-046 / 07-infrastructure.md): the remote MCP server and its
+	# OAuth authorization server live on the SAME origin as the API, but at root-level paths
+	# (OAuth discovery is spec-fixed at the origin root; the MCP SDK registers `/mcp` exactly).
+	# Proxy them to the same api container alongside /api. `/mcp` is matched without a trailing
+	# slash so the Streamable-HTTP path resolves exactly (no 307 redirect that breaks connectors).
+	# NOTE (manual, un-scriptable): Cloudflare must pass these paths through UN-CACHED — add a
+	# Cache Rule bypassing cache for `/mcp*` and `/.well-known/oauth-*` (proxied DNS is fine).
+	@mcp_oauth path /mcp /mcp/* /.well-known/oauth-* /authorize /token /register
+	handle @mcp_oauth {
+		reverse_proxy api:8000
+	}
+
 	# PWA static assets + SPA fallback (client-side routing).
 	handle {
 		root * /srv/web

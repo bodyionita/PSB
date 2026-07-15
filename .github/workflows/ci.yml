@@ -92,6 +92,7 @@ jobs:
         env:                          # values as env vars — NOT substituted into the script
           API_PASSWORD_HASH: ${{ secrets.API_PASSWORD_HASH }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          MCP_TOKEN_HMAC_SECRET: ${{ secrets.MCP_TOKEN_HMAC_SECRET }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
@@ -113,6 +114,7 @@ jobs:
           {
             printf 'API_PASSWORD_HASH=%s\n'    "$API_PASSWORD_HASH"
             printf 'SESSION_SECRET=%s\n'       "$SESSION_SECRET"
+            printf 'MCP_TOKEN_HMAC_SECRET=%s\n' "$MCP_TOKEN_HMAC_SECRET"
             printf 'DATABASE_URL=%s\n'         "$DATABASE_URL"
             printf 'OPENAI_API_KEY=%s\n'       "$OPENAI_API_KEY"
             printf 'NEBIUS_API_KEY=%s\n'       "$NEBIUS_API_KEY"
