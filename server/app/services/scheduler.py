@@ -36,7 +36,7 @@ class EntityJob(Protocol):
     never-raising entry point the scheduler and CLI both drive (ADR-030 §4/§6, ADR-046 §5). Some
     return an outcome for CLI logging; the scheduler ignores it."""
 
-    async def run_scheduled(self): ...
+    async def run_scheduled(self) -> object | None: ...
 
 
 @dataclass(frozen=True)
