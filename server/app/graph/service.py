@@ -182,9 +182,9 @@ class GraphService:
         """``get_node`` + a bounded neighbor tree in one call (03-api §MCP ``build_context``).
 
         Returns ``None`` if the node is unknown. ``depth`` is clamped to
-        ``[0, build_context_max_depth]`` (hard-bounded at 2, ADR-032); every visited node
-        contributes at most ``build_context_fanout`` neighbors (the rest flagged truncated). The
-        L0 identity capsule is layered in by M5 task 2."""
+        ``[0, build_context_max_depth]`` (default max 2 = the 03-api ``depth ≤ 2`` contract,
+        ADR-032); every visited node contributes at most ``build_context_fanout`` neighbors (the
+        rest flagged truncated). The L0 identity capsule is layered in by M5 task 2."""
         center = await self._nodes.get_node(node_id)
         if center is None:
             return None

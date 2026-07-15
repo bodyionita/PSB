@@ -105,14 +105,15 @@ async def seed(db: Database) -> None:
             ALEX, GHOST, PLACE, MEM1, MEM2, vec(0.10), now, vec(0.20), vec(0.21),
         )
         # edges: MEM1 -involves-> ALEX (canonical), ALEX -at-> PLACE (canonical),
-        #        GHOST -involves-> ALEX inbound (canonical, from tombstone src excluded),
-        #        MEM1 -similar-> MEM2 (derived, must be ignored by canonical reads)
+        #        GHOST -similar-> MEM2 (derived, from tombstone src → hidden from canonical reads),
+        #        MEM1 -knows-> GHOST (canonical, tombstoned TARGET → hidden from the out-leg)
         await c.execute(
             """
             INSERT INTO edges (src_id, dst_id, rel, origin, score, since, until) VALUES
              ($1,$2,'involves','canonical',NULL,'2026-02-01',NULL),
              ($2,$3,'at','canonical',NULL,'2026-01-05',NULL),
-             ($4,$5,'similar','derived',0.87,NULL,NULL)
+             ($4,$5,'similar','derived',0.87,NULL,NULL),
+             ($1,$4,'knows','canonical',NULL,NULL,NULL)
             """,
             MEM1, ALEX, PLACE, GHOST, MEM2,
         )
@@ -446,10 +447,14 @@ async def main() -> int:
         outbound = await nbr.neighbors(ALEX, rel=None, direction="out", after=None, limit=50)
         check("direction 'out' -> PLACE only",
               [e.node_id for e in outbound] == [PLACE], str(outbound))
-        # Tombstone exclusion on the OTHER end: MEM2's only edge comes from GHOST (merged) → hidden.
+        # Tombstone exclusion on BOTH ends: the in-leg drops a tombstoned src (MEM2's only edge is
+        # GHOST -similar-> MEM2), the out-leg drops a tombstoned dst (MEM1 -knows-> GHOST).
         mem2 = await nbr.neighbors(MEM2, rel=None, direction=None, after=None, limit=50)
-        check("neighbors(MEM2) empty — derived edge's tombstoned src excluded", mem2 == [],
+        check("neighbors(MEM2) empty — derived edge's tombstoned src excluded (in-leg)", mem2 == [],
               str(mem2))
+        mem1 = await nbr.neighbors(MEM1, rel=None, direction=None, after=None, limit=50)
+        check("neighbors(MEM1) = ALEX only — tombstoned dst GHOST excluded (out-leg)",
+              [e.node_id for e in mem1] == [ALEX], str(mem1))
         # Keyset pagination drives the real (origin,rel,dir,node_id) > (…::uuid) tuple comparison.
         pg1 = await nbr.neighbors(ALEX, rel=None, direction=None, after=None, limit=1)
         check("page 1 (limit 1) -> PLACE", [e.node_id for e in pg1] == [PLACE], str(pg1))

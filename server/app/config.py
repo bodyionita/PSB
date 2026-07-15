@@ -311,9 +311,10 @@ class Settings(BaseSettings):
     # the ceiling below (a hub can have hundreds of edges — one page must never dump them all).
     graph_neighbors_page_default: int = 25
     graph_neighbors_page_max: int = 100
-    # `build_context` traversal caps: depth is hard-bounded at 2 (ADR-032, Basic-Memory pattern) and
-    # each visited node contributes at most `build_context_fanout` neighbors (the rest are flagged
-    # truncated, reachable via `traverse`). Depth 0 = the node + capsule only.
+    # `build_context` traversal caps: depth is capped at `build_context_max_depth` (default 2 per
+    # ADR-032's Basic-Memory pattern — the 03-api contract's `depth ≤ 2`; raise only deliberately)
+    # and each visited node contributes at most `build_context_fanout` neighbors (the rest are
+    # flagged truncated, reachable via `traverse`). Depth 0 = the node + capsule only.
     build_context_default_depth: int = 1
     build_context_max_depth: int = 2
     build_context_fanout: int = 10
