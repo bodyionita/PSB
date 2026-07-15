@@ -18,6 +18,11 @@ from app.providers.labels import friendly_model_label
         ("meta-llama/Llama-3.3-70B-Instruct", "Llama 3.3 70B"),
         ("meta-llama/Meta-Llama-3.1-70B-Instruct", "Llama 3.1 70B"),  # old id still folds cleanly
         ("meta-llama/Llama-3.3-70b-instruct", "Llama 3.3 70B"),
+        # Legacy-tolerant audit labels (ADR-045 §4): retired provider ids on historical
+        # `chat_messages.model` rows fold to the vendor model string they stood for, then derive.
+        ("claude-max", "Claude Opus 4.8"),
+        ("claude-max-sonnet", "Claude Sonnet 4.6"),
+        ("nebius", "Llama 3.3 70B"),
         # Unknown shapes fall back to the raw string (never mislabelled).
         ("gpt-4o", "gpt-4o"),
         ("Qwen/Qwen2.5-72B-Instruct", "Qwen/Qwen2.5-72B-Instruct"),

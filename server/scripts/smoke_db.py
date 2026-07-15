@@ -13,8 +13,11 @@ Run:  uv run python <path>/smoke_db.py
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import json
 import sys
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 from app.chat.store import PgChatStore
 from app.config import Settings
@@ -128,6 +131,115 @@ async def seed(db: Database) -> None:
             """,
             MEM1, vec(0.20),
         )
+
+
+def _load_migration_sql() -> tuple[str, str]:
+    """The EXACT upgrade/downgrade SQL from migration 009 (numeric module name → load by path)."""
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "migrations" / "versions" / "009_model_routing_id_migration.py"
+    )
+    spec = importlib.util.spec_from_file_location("_mig009", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._UPGRADE_SQL, mod._DOWNGRADE_SQL
+
+
+async def check_model_routing_migration(db: Database) -> None:
+    """Drive migration 009's real SQL against Postgres (ADR-045 §4, M4 follow-up 3 task 2).
+
+    Backs up any real ``model_routing`` row, runs the actual upgrade statement over seeded
+    old-shape data, and restores — asserting the remap, the effort-key rename, idempotency, a
+    downgrade round-trip, and the no-op guards (empty + absent)."""
+    up_sql, down_sql = _load_migration_sql()
+    print("\n== migration 009 (saved model_routing → model ids, ADR-045 §4) ==")
+    async with db.acquire() as conn:
+        backup = await conn.fetchval(
+            "SELECT value FROM app_settings WHERE key = 'model_routing'"
+        )
+    try:
+        old = {
+            "chat": {
+                "active": "claude-max",
+                "fallback": "nebius",
+                "effort_by_provider": {"claude-max": "high"},
+            },
+            "quick": {
+                "active": "claude-max-sonnet",
+                "fallback": "nebius",
+                "effort_by_provider": {"claude-max-sonnet": "low"},
+            },
+        }
+        async with db.transaction() as c:
+            await c.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('model_routing', $1::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value = $1::jsonb",
+                json.dumps(old),
+            )
+            await c.execute(up_sql)
+        async with db.acquire() as conn:
+            got = json.loads(await conn.fetchval(
+                "SELECT value FROM app_settings WHERE key = 'model_routing'"
+            ))
+        check("active/fallback remapped to model ids",
+              got["chat"]["active"] == "claude-opus-4-8"
+              and got["chat"]["fallback"] == "meta-llama/Llama-3.3-70B-Instruct"
+              and got["quick"]["active"] == "claude-sonnet-4-6", str(got))
+        check("effort_by_provider → effort_by_model (key renamed, keys remapped)",
+              got["chat"].get("effort_by_model") == {"claude-opus-4-8": "high"}
+              and "effort_by_provider" not in got["chat"]
+              and got["quick"]["effort_by_model"] == {"claude-sonnet-4-6": "low"}, str(got))
+
+        # Idempotent: a second pass over the already-migrated row changes nothing.
+        async with db.transaction() as c:
+            await c.execute(up_sql)
+        async with db.acquire() as conn:
+            again = json.loads(await conn.fetchval(
+                "SELECT value FROM app_settings WHERE key = 'model_routing'"
+            ))
+        check("re-running upgrade is idempotent (no double-remap)", again == got, str(again))
+
+        # Downgrade round-trip: new ids/keys map back to the old provider vocabulary (best-effort).
+        async with db.transaction() as c:
+            await c.execute(down_sql)
+        async with db.acquire() as conn:
+            reverted = json.loads(await conn.fetchval(
+                "SELECT value FROM app_settings WHERE key = 'model_routing'"
+            ))
+        check("downgrade round-trip restores old provider ids + effort_by_provider",
+              reverted == old, str(reverted))
+
+        # No-op on an empty object: the guard skips a row with no old tokens.
+        async with db.transaction() as c:
+            await c.execute(
+                "UPDATE app_settings SET value = '{}'::jsonb WHERE key = 'model_routing'"
+            )
+            await c.execute(up_sql)
+        async with db.acquire() as conn:
+            empty = await conn.fetchval(
+                "SELECT value FROM app_settings WHERE key = 'model_routing'"
+            )
+        check("empty {} row is a no-op (guard skips, never NULLed)",
+              json.loads(empty) == {}, str(empty))
+
+        # No-op on an absent row: nothing to migrate, no error, no row created.
+        async with db.transaction() as c:
+            await c.execute("DELETE FROM app_settings WHERE key = 'model_routing'")
+            await c.execute(up_sql)
+        async with db.acquire() as conn:
+            absent = await conn.fetchval(
+                "SELECT 1 FROM app_settings WHERE key = 'model_routing'"
+            )
+        check("absent row stays absent (no-op, no error)", absent is None, str(absent))
+    finally:
+        async with db.transaction() as c:
+            await c.execute("DELETE FROM app_settings WHERE key = 'model_routing'")
+            if backup is not None:
+                await c.execute(
+                    "INSERT INTO app_settings (key, value) VALUES ('model_routing', $1::jsonb)",
+                    backup,
+                )
 
 
 async def cleanup(db: Database) -> None:
@@ -360,6 +472,8 @@ async def main() -> int:
         listed = await chat.list_sessions(50)
         check("list_sessions includes the session", sid in [s.id for s in listed])
         await db.pool.execute("DELETE FROM chat_sessions WHERE id = $1", sid)
+
+        await check_model_routing_migration(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

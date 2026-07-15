@@ -102,7 +102,8 @@ def test_vocabulary_guards_reject_bad_config():
         Settings(node_types="memory,person", entity_like_types="person,ghost")
 
 
-def test_compute_head_is_migration_008():
-    # M4 task 2 adds revision 008 (chunks/node_profiles tsvector + GIN for the hybrid FTS leg,
-    # migration 008); head advances to it from 007 (node_profiles HNSW, ADR-037).
-    assert compute_head() == "008"
+def test_compute_head_is_migration_009():
+    # M4 follow-up 3 task 2 adds revision 009 (migrate saved model_routing old provider ids →
+    # model-id vendor strings + effort_by_provider→effort_by_model, ADR-045 §4); head advances
+    # to it from 008 (hybrid FTS tsvector).
+    assert compute_head() == "009"
