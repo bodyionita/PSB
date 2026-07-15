@@ -1,8 +1,8 @@
-"""ModelRoutingService tests — the UI-editable routing brain (ADR-025 / ADR-043, M4 task 1).
+"""ModelRoutingService tests — the UI-editable routing brain (ADR-025 / ADR-043 / ADR-045).
 
-Verifies the three groups resolve from config seeds, saved overrides win, per-provider effort is
-threaded only to effort-capable providers, and a bad saved model id degrades to the seed chain
-(rule 7). Fakes only: no live LLM/DB (08 testing policy).
+Verifies the three groups resolve from config seeds (chains of MODEL ids), saved overrides win,
+per-model effort is threaded only to effort-capable models, and a bad saved model id degrades to
+the seed chain (rule 7). Fakes only: no live LLM/DB (08 testing policy).
 """
 
 from __future__ import annotations
@@ -22,19 +22,21 @@ MESSAGES = [ChatMessage(role="user", content="hi")]
 def _registry(
     **overrides: FakeChatProvider,
 ) -> tuple[ProviderRegistry, dict[str, FakeChatProvider]]:
-    """A registry over Claude-ish (effort-capable) + Nebius-ish (not) fakes, keyed by real ids."""
+    """A registry over effort-capable Claude models + a non-effort fallback, keyed by MODEL id
+    (ADR-045 — a routing group's active/fallback are model ids). Each fake is a one-model provider
+    here (the one-provider-N-models case is covered in test_registry_fallback)."""
     providers = {
-        "claude-max": FakeChatProvider("claude-max", reply="opus", supports_effort=True),
-        "claude-max-sonnet": FakeChatProvider(
-            "claude-max-sonnet", reply="sonnet", supports_effort=True
+        "claude-opus-4-8": FakeChatProvider("claude-opus-4-8", reply="opus", supports_effort=True),
+        "claude-sonnet-4-6": FakeChatProvider(
+            "claude-sonnet-4-6", reply="sonnet", supports_effort=True
         ),
         "nebius": FakeChatProvider("nebius", reply="nebius"),
     }
     providers.update(overrides)
     reg = ProviderRegistry(
         providers,
-        chat_chain=["claude-max", "nebius"],
-        distill_chain=["claude-max", "nebius"],
+        chat_chain=["claude-opus-4-8", "nebius"],
+        distill_chain=["claude-opus-4-8", "nebius"],
         embedding_provider_id="none",
         stt_chain=[],
     )
@@ -42,11 +44,12 @@ def _registry(
 
 
 def _settings() -> Settings:
-    # Explicit chains keyed by the fakes; effort seeds are the config defaults (medium / low).
+    # Explicit chains of model ids keyed by the fakes; effort seed is the config default (medium)
+    # for every group (ADR-045 §5 — one `claude_effort` scalar, no per-tier effort).
     return Settings(
-        chat_chain=["claude-max", "nebius"],
-        distill_chain=["claude-max", "nebius"],
-        quick_chain=["claude-max-sonnet", "nebius"],
+        chat_chain=["claude-opus-4-8", "nebius"],
+        distill_chain=["claude-opus-4-8", "nebius"],
+        quick_chain=["claude-sonnet-4-6", "nebius"],
     )
 
 
@@ -66,27 +69,30 @@ async def test_conspect_seed_from_config():
 
     decision = await service.resolve("conspect")
 
-    assert decision.chain == ["claude-max", "nebius"]
-    # Only the effort-capable provider carries the seed effort (claude_max_effort default).
-    assert decision.effort_by_provider == {"claude-max": "medium"}
+    assert decision.chain == ["claude-opus-4-8", "nebius"]
+    # Only the effort-capable model carries the seed effort (claude_effort default = medium).
+    assert decision.effort_by_model == {"claude-opus-4-8": "medium"}
 
 
-async def test_quick_seed_is_sonnet_low():
+async def test_quick_seed_is_sonnet_at_claude_effort():
     reg, _ = _registry()
     service, _ = _service(reg)
 
     decision = await service.resolve("quick")
 
-    assert decision.chain == ["claude-max-sonnet", "nebius"]
-    assert decision.effort_by_provider == {"claude-max-sonnet": "low"}
+    assert decision.chain == ["claude-sonnet-4-6", "nebius"]
+    # ADR-045 §5 collapsed the per-tier effort scalars into one `claude_effort` (medium): the quick
+    # tier's cheapness now comes from the Sonnet MODEL, not a lower effort seed. The user can still
+    # tune quick to a lower effort in Settings → Models.
+    assert decision.effort_by_model == {"claude-sonnet-4-6": "medium"}
 
 
 async def test_groups_are_independent():
     reg, _ = _registry()
     service, _ = _service(reg)
 
-    assert (await service.resolve("chat")).chain == ["claude-max", "nebius"]
-    assert (await service.resolve("quick")).chain[0] == "claude-max-sonnet"
+    assert (await service.resolve("chat")).chain == ["claude-opus-4-8", "nebius"]
+    assert (await service.resolve("quick")).chain[0] == "claude-sonnet-4-6"
 
 
 async def test_unknown_group_raises():
@@ -106,16 +112,16 @@ async def test_complete_routes_conspect_to_primary():
     result = await service.complete("conspect", MESSAGES)
 
     assert result.text == "opus"
-    assert result.model_used == "claude-max"
+    assert result.model_used == "claude-opus-4-8"
     assert result.fallback_used is False
     assert providers["nebius"].calls == 0
     # Seed effort reached the effort-capable primary; nebius was never asked.
-    assert providers["claude-max"].efforts == ["medium"]
+    assert providers["claude-opus-4-8"].efforts == ["medium"]
 
 
 async def test_complete_falls_back_and_records():
-    down = FakeChatProvider("claude-max", available=False, supports_effort=True)
-    reg, providers = _registry(**{"claude-max": down})
+    down = FakeChatProvider("claude-opus-4-8", available=False, supports_effort=True)
+    reg, providers = _registry(**{"claude-opus-4-8": down})
     service, _ = _service(reg)
 
     result = await service.complete("conspect", MESSAGES)
@@ -130,7 +136,7 @@ async def test_complete_falls_back_and_records():
 async def test_all_down_raises_exhausted():
     reg, _ = _registry(
         **{
-            "claude-max": FakeChatProvider("claude-max", available=False),
+            "claude-opus-4-8": FakeChatProvider("claude-opus-4-8", available=False),
             "nebius": FakeChatProvider("nebius", available=False),
         }
     )
@@ -147,7 +153,7 @@ async def test_requested_model_tried_first():
 
     assert result.model_used == "nebius"
     assert result.fallback_used is False
-    assert providers["claude-max"].calls == 0
+    assert providers["claude-opus-4-8"].calls == 0
 
 
 # --- saved overrides + rule-7 degradation -------------------------------------------------------
@@ -157,40 +163,40 @@ async def test_saved_override_wins_over_seed():
     reg, providers = _registry()
     saved = {
         "chat": GroupRouting(
-            active="nebius", fallback="claude-max", effort_by_provider={"claude-max": "high"}
+            active="nebius", fallback="claude-opus-4-8", effort_by_model={"claude-opus-4-8": "high"}
         )
     }
     service, _ = _service(reg, saved=saved)
 
     decision = await service.resolve("chat")
-    assert decision.chain == ["nebius", "claude-max"]
+    assert decision.chain == ["nebius", "claude-opus-4-8"]
     # Saved effort is kept for the effort-capable provider even when it's the fallback.
-    assert decision.effort_by_provider == {"claude-max": "high"}
+    assert decision.effort_by_model == {"claude-opus-4-8": "high"}
 
     result = await service.complete("chat", MESSAGES)
     assert result.model_used == "nebius"
-    assert providers["claude-max"].calls == 0
+    assert providers["claude-opus-4-8"].calls == 0
 
 
 async def test_saved_high_effort_reaches_claude():
     reg, providers = _registry()
     saved = {
         "chat": GroupRouting(
-            active="claude-max", fallback="nebius", effort_by_provider={"claude-max": "high"}
+            active="claude-opus-4-8", fallback="nebius", effort_by_model={"claude-opus-4-8": "high"}
         )
     }
     service, _ = _service(reg, saved=saved)
 
     await service.complete("chat", MESSAGES)
 
-    assert providers["claude-max"].efforts == ["high"]
+    assert providers["claude-opus-4-8"].efforts == ["high"]
 
 
 async def test_effort_for_incapable_provider_is_dropped():
     reg, _ = _registry()
     saved = {
         "chat": GroupRouting(
-            active="claude-max", fallback="nebius", effort_by_provider={"nebius": "high"}
+            active="claude-opus-4-8", fallback="nebius", effort_by_model={"nebius": "high"}
         )
     }
     service, _ = _service(reg, saved=saved)
@@ -198,7 +204,7 @@ async def test_effort_for_incapable_provider_is_dropped():
     decision = await service.resolve("chat")
 
     # Nebius has no reasoning-effort control, so a saved value for it is filtered out.
-    assert decision.effort_by_provider == {}
+    assert decision.effort_by_model == {}
 
 
 async def test_unknown_saved_model_degrades_to_seed():
@@ -209,7 +215,7 @@ async def test_unknown_saved_model_degrades_to_seed():
     decision = await service.resolve("chat")
 
     # Both saved ids are unknown → fall back to the config seed chain, never an empty/hard failure.
-    assert decision.chain == ["claude-max", "nebius"]
+    assert decision.chain == ["claude-opus-4-8", "nebius"]
 
 
 # --- cache busting on save ----------------------------------------------------------------------
@@ -220,10 +226,10 @@ async def test_save_busts_cache():
     service, store = _service(reg)
 
     # Prime the cache with the seed.
-    assert (await service.resolve("chat")).chain == ["claude-max", "nebius"]
+    assert (await service.resolve("chat")).chain == ["claude-opus-4-8", "nebius"]
 
-    await service.save("chat", GroupRouting(active="nebius", fallback="claude-max"))
+    await service.save("chat", GroupRouting(active="nebius", fallback="claude-opus-4-8"))
 
     # The next resolve reflects the save without a restart (bust-on-save, ADR-025 §3).
-    assert (await service.resolve("chat")).chain == ["nebius", "claude-max"]
+    assert (await service.resolve("chat")).chain == ["nebius", "claude-opus-4-8"]
     assert store.saved["chat"].active == "nebius"

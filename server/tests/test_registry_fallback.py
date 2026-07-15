@@ -25,22 +25,22 @@ def _registry(providers, *, chat_chain, distill_chain=None, embed_id="openai", s
 
 
 async def test_primary_answers_no_fallback():
-    claude = FakeChatProvider("claude-max", reply="from claude")
+    claude = FakeChatProvider("claude-opus-4-8", reply="from claude")
     nebius = FakeChatProvider("nebius", reply="from nebius")
-    reg = _registry([claude, nebius], chat_chain=["claude-max", "nebius"])
+    reg = _registry([claude, nebius], chat_chain=["claude-opus-4-8", "nebius"])
 
     result = await reg.chat(MESSAGES)
 
     assert result.text == "from claude"
-    assert result.model_used == "claude-max"
+    assert result.model_used == "claude-opus-4-8"
     assert result.fallback_used is False
     assert nebius.calls == 0  # fallback never touched
 
 
 async def test_claude_limit_falls_back_to_nebius_and_records_it():
-    claude = FakeChatProvider("claude-max", available=False)  # simulate usage-limit / down
+    claude = FakeChatProvider("claude-opus-4-8", available=False)  # simulate usage-limit / down
     nebius = FakeChatProvider("nebius", reply="from nebius")
-    reg = _registry([claude, nebius], chat_chain=["claude-max", "nebius"])
+    reg = _registry([claude, nebius], chat_chain=["claude-opus-4-8", "nebius"])
 
     result = await reg.chat(MESSAGES)
 
@@ -51,18 +51,18 @@ async def test_claude_limit_falls_back_to_nebius_and_records_it():
 
 
 async def test_all_providers_down_raises_exhausted():
-    claude = FakeChatProvider("claude-max", available=False)
+    claude = FakeChatProvider("claude-opus-4-8", available=False)
     nebius = FakeChatProvider("nebius", available=False)
-    reg = _registry([claude, nebius], chat_chain=["claude-max", "nebius"])
+    reg = _registry([claude, nebius], chat_chain=["claude-opus-4-8", "nebius"])
 
     with pytest.raises(RegistryExhausted):
         await reg.chat(MESSAGES)
 
 
 async def test_requested_model_is_tried_first():
-    claude = FakeChatProvider("claude-max", reply="from claude")
+    claude = FakeChatProvider("claude-opus-4-8", reply="from claude")
     nebius = FakeChatProvider("nebius", reply="from nebius")
-    reg = _registry([claude, nebius], chat_chain=["claude-max", "nebius"])
+    reg = _registry([claude, nebius], chat_chain=["claude-opus-4-8", "nebius"])
 
     result = await reg.chat(MESSAGES, requested_model="nebius")
 
@@ -72,24 +72,24 @@ async def test_requested_model_is_tried_first():
 
 
 async def test_requested_model_still_falls_back_when_it_is_down():
-    claude = FakeChatProvider("claude-max", reply="from claude")
+    claude = FakeChatProvider("claude-opus-4-8", reply="from claude")
     nebius = FakeChatProvider("nebius", available=False)
-    reg = _registry([claude, nebius], chat_chain=["claude-max", "nebius"])
+    reg = _registry([claude, nebius], chat_chain=["claude-opus-4-8", "nebius"])
 
-    # User asked for nebius; it's down → chain continues to the configured claude-max.
+    # User asked for nebius; it's down → chain continues to the configured Claude model.
     result = await reg.chat(MESSAGES, requested_model="nebius")
 
-    assert result.model_used == "claude-max"
+    assert result.model_used == "claude-opus-4-8"
     assert result.fallback_used is True
 
 
 async def test_distill_uses_its_own_chain():
-    claude = FakeChatProvider("claude-max", available=False)
+    claude = FakeChatProvider("claude-opus-4-8", available=False)
     nebius = FakeChatProvider("nebius", reply="distilled")
     reg = _registry(
         [claude, nebius],
-        chat_chain=["claude-max"],
-        distill_chain=["claude-max", "nebius"],
+        chat_chain=["claude-opus-4-8"],
+        distill_chain=["claude-opus-4-8", "nebius"],
     )
 
     result = await reg.distill(MESSAGES)
@@ -99,27 +99,69 @@ async def test_distill_uses_its_own_chain():
 
 
 async def test_available_and_default_chat_models():
-    claude = FakeChatProvider("claude-max")
+    claude = FakeChatProvider("claude-opus-4-8")
     nebius = FakeChatProvider("nebius")
-    reg = _registry([claude, nebius], chat_chain=["claude-max", "nebius"])
+    reg = _registry([claude, nebius], chat_chain=["claude-opus-4-8", "nebius"])
 
-    assert reg.available_chat_models() == ["claude-max", "nebius"]
-    assert reg.default_chat_model() == "claude-max"
+    assert reg.available_chat_models() == ["claude-opus-4-8", "nebius"]
+    assert reg.default_chat_model() == "claude-opus-4-8"
 
 
-def test_build_registry_registers_claude_max_sonnet():
-    """ADR-043 §3 wiring: build_registry adds a distinct effort-capable `claude-max-sonnet` id."""
+def test_build_registry_claude_serves_opus_and_sonnet_as_models():
+    """ADR-045: one `claude` provider serves BOTH Opus + Sonnet as model ids (the former two fake
+    provider ids are gone); both honor per-call effort, the Nebius model does not."""
     from app.config import Settings
     from app.providers.registry import build_registry
 
-    reg = build_registry(Settings())
+    settings = Settings()
+    reg = build_registry(settings)
 
-    # The quick tier's provider id exists and honors per-call effort (same CLI as claude-max)...
-    assert reg.supports_chat("claude-max-sonnet")
-    assert reg.supports_effort("claude-max-sonnet")
-    assert reg.supports_effort("claude-max")
-    # ...while Nebius carries no reasoning-effort control.
-    assert not reg.supports_effort("nebius")
+    # Five providers (claude collapsed to one), and the two Claude models resolve to it.
+    assert set(reg._providers) == {"openai", "nebius", "groq", "claude", "ollama"}
+    assert reg._model_to_provider[settings.claude_opus_model].id == "claude"
+    assert reg._model_to_provider[settings.claude_sonnet_model].id == "claude"
+
+    # Both Claude models are pickable + effort-capable; the Nebius model is chat but effort-less.
+    assert reg.supports_chat(settings.claude_opus_model)
+    assert reg.supports_chat(settings.claude_sonnet_model)
+    assert reg.supports_effort(settings.claude_opus_model)
+    assert reg.supports_effort(settings.claude_sonnet_model)
+    assert reg.supports_chat(settings.nebius_chat_model)
+    assert not reg.supports_effort(settings.nebius_chat_model)
+
+    # The catalog carries the provider per model + a friendly, model-derived label (labels.py).
+    catalog = {m.id: m for m in reg.chat_models()}
+    assert catalog[settings.claude_opus_model].provider == "claude"
+    assert catalog[settings.claude_opus_model].label == "Claude Opus 4.8"
+    assert catalog[settings.claude_sonnet_model].label == "Claude Sonnet 4.6"
+
+
+async def test_build_registry_claude_routes_per_call_model(monkeypatch):
+    """A chain of Claude model ids hits the ONE claude provider with the resolved `--model` per call
+    (ADR-045): opus down → sonnet answers, both served by the same instance."""
+    from app.config import Settings
+    from app.providers.registry import build_registry
+
+    settings = Settings()
+    reg = build_registry(settings)
+    claude = reg._providers["claude"]
+
+    calls: list[str] = []
+
+    async def _fake_complete(messages, *, model=None, effort=None):
+        calls.append(model)
+        if model == settings.claude_opus_model:
+            raise ProviderUnavailable("opus down")
+        return f"answered by {model}"
+
+    monkeypatch.setattr(claude, "complete", _fake_complete)
+
+    result = await reg.run_chain(
+        MESSAGES, chain=[settings.claude_opus_model, settings.claude_sonnet_model]
+    )
+    assert result.model_used == settings.claude_sonnet_model
+    assert result.fallback_used is True
+    assert calls == [settings.claude_opus_model, settings.claude_sonnet_model]
 
 
 async def test_embed_delegates_to_embedding_provider():

@@ -50,7 +50,7 @@ async def save_models(
             payload.group,
             active=payload.active,
             fallback=payload.fallback,
-            effort_by_provider=payload.effort_by_provider,
+            effort_by_model=payload.effort_by_model,
         )
     except UnknownModel as exc:
         raise HTTPException(
@@ -64,7 +64,7 @@ def _group_model(g: GroupSettings) -> GroupRoutingModel:
         group=g.group,
         active=g.active,
         fallback=g.fallback,
-        effort_by_provider=g.effort_by_provider,
+        effort_by_model=g.effort_by_model,
         models=[
             RoutingModelItem(
                 id=m.id,

@@ -42,11 +42,15 @@ def _make(
     condense_reply: str = "condensed english query",
     hits: list[SearchHit] | None = None,
     retriever_down: bool = False,
+    extra: dict[str, FakeChatProvider] | None = None,
 ) -> tuple[ChatService, FakeChatStore, FakeRetriever, dict[str, FakeChatProvider]]:
+    # The registry snapshots its chat-model catalog + model→provider index at construction (ADR-045
+    # — providers are fixed at build), so any extra pickable/fallback model must be present here.
     providers = {
         "chat-p": FakeChatProvider("chat-p", reply=answer, available=chat_available),
         "conspect-p": FakeChatProvider("conspect-p", reply=condense_reply),
         "quick-p": FakeChatProvider("quick-p", reply="A Nice Title"),
+        **(extra or {}),
     }
     registry = ProviderRegistry(
         providers,
@@ -190,10 +194,9 @@ async def test_unknown_session_raises():
 
 
 async def test_requested_model_is_forwarded_to_the_picker():
-    # A second chat provider the picker can select per-conversation (ADR-025 §5).
-    service, _, _, providers = _make(answer="picked", hits=[])
+    # A second chat model the picker can select per-conversation (ADR-025 §5).
     other = FakeChatProvider("other-chat", reply="from other")
-    service._routing._registry._providers["other-chat"] = other  # type: ignore[attr-defined]
+    service, _, _, providers = _make(answer="picked", hits=[], extra={"other-chat": other})
 
     result = await service.send("hi", model="other-chat")
     await service.drain()
@@ -204,11 +207,10 @@ async def test_requested_model_is_forwarded_to_the_picker():
 
 
 async def test_fallback_used_is_surfaced_and_recorded():
-    service, store, _, _ = _make(answer="x", hits=[])
-    # Primary chat provider down, a fallback behind it answers → fallback_used True.
-    service._routing._registry._providers["chat-p"]._available = False  # type: ignore[attr-defined]
+    # A fallback model behind the (down) primary answers → fallback_used True.
     fallback = FakeChatProvider("chat-fallback", reply="from fallback")
-    service._routing._registry._providers["chat-fallback"] = fallback  # type: ignore[attr-defined]
+    service, store, _, providers = _make(answer="x", hits=[], extra={"chat-fallback": fallback})
+    providers["chat-p"]._available = False
     await service._routing.save(
         "chat", GroupRouting(active="chat-p", fallback="chat-fallback")
     )
@@ -287,10 +289,10 @@ async def test_get_session_detail_unknown_raises():
 
 async def test_chat_catalog_lists_models_and_active_default():
     service, _, _, providers = _make()
-    providers["chat-p"].label = "Claude Opus 4.8"
     catalog = await service._routing.chat_catalog()
     assert [m.id for m in catalog.models] == ["chat-p", "conspect-p", "quick-p"]
-    assert next(m.label for m in catalog.models if m.id == "chat-p") == "Claude Opus 4.8"
+    # Model-derived label (labels.py); an opaque non-vendor id falls back to the id itself.
+    assert next(m.label for m in catalog.models if m.id == "chat-p") == "chat-p"
     assert catalog.default == "chat-p"  # the Chat group's active model
 
 

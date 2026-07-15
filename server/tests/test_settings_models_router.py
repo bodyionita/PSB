@@ -1,5 +1,6 @@
-"""Settings model-routing router tests (M4 task 5, 03-api §Settings, ADR-025/043): GET /settings +
-PUT /settings/models over a real ModelRoutingService + registry of fakes — no DB, no LLM, auth off.
+"""Settings model-routing router tests (M4 task 5, 03-api §Settings, ADR-025/043/045): GET
+/settings + PUT /settings/models over a real ModelRoutingService + registry of fakes — no DB, no
+LLM, auth off. Routing keys on MODEL ids (ADR-045): a group's active/fallback + effort_by_model.
 """
 
 from __future__ import annotations
@@ -18,25 +19,31 @@ from .fakes import FakeChatProvider, FakeModelRoutingStore
 
 PREFIX = "/api/v1"
 
+OPUS = "claude-opus-4-8"
+SONNET = "claude-sonnet-4-6"
+LLAMA = "meta-llama/Llama-3.3-70B-Instruct"
+
 
 def _routing() -> ModelRoutingService:
     providers = {
-        "claude-max": FakeChatProvider("claude-max", supports_effort=True, label="Claude Opus"),
-        "nebius": FakeChatProvider("nebius", label="Llama 70B"),
+        # One `claude` provider serving BOTH Claude models (ADR-045); effort-capable.
+        "claude": FakeChatProvider(
+            "claude", supports_effort=True, provider_label="Claude", models=[OPUS, SONNET]
+        ),
+        # Nebius serves one chat model, no reasoning effort.
+        "nebius": FakeChatProvider("nebius", provider_label="Nebius", models=[LLAMA]),
         # STT/embedding-only: a ChatProvider by class but can_chat False → excluded from the picker.
         "stt-only": OpenAICompatibleProvider(id="stt-only", base_url="x", api_key="k"),
     }
     registry = ProviderRegistry(
         providers,
-        chat_chain=["claude-max", "nebius"],
-        distill_chain=["claude-max", "nebius"],
+        chat_chain=[OPUS, LLAMA],
+        distill_chain=[OPUS, LLAMA],
         embedding_provider_id="none",
         stt_chain=[],
     )
     settings = Settings(
-        chat_chain=["claude-max", "nebius"],
-        distill_chain=["claude-max", "nebius"],
-        quick_chain=["claude-max", "nebius"],
+        chat_chain=[OPUS, LLAMA], distill_chain=[OPUS, LLAMA], quick_chain=[SONNET, LLAMA]
     )
     return ModelRoutingService(
         settings=settings, store=FakeModelRoutingStore(), registry=registry
@@ -60,23 +67,24 @@ def test_get_settings_returns_all_three_groups_from_seed():
     groups = {g["group"]: g for g in resp.json()["groups"]}
     assert set(groups) == {"chat", "conspect", "quick"}
     chat = groups["chat"]
-    assert chat["active"] == "claude-max"
-    assert chat["fallback"] == "nebius"
-    # Effort seed lands only on the effort-capable provider (claude_max_effort default = medium).
-    assert chat["effort_by_provider"] == {"claude-max": "medium"}
-    # quick seeds its own cheaper effort (ADR-043).
-    assert groups["quick"]["effort_by_provider"] == {"claude-max": "low"}
+    assert chat["active"] == OPUS
+    assert chat["fallback"] == LLAMA
+    # Effort seed lands only on the effort-capable model (claude_effort default = medium).
+    assert chat["effort_by_model"] == {OPUS: "medium"}
+    # quick seeds the cheaper Sonnet MODEL at claude_effort (ADR-045 §5 — no per-tier effort).
+    assert groups["quick"]["effort_by_model"] == {SONNET: "medium"}
 
 
 def test_get_settings_models_carry_effort_capability_and_exclude_non_chat():
     resp = _client(_routing()).get(f"{PREFIX}/settings")
     models = {m["id"]: m for m in resp.json()["groups"][0]["models"]}
-    assert set(models) == {"claude-max", "nebius"}  # stt-only excluded
-    assert models["claude-max"]["supports_effort"] is True
-    assert models["claude-max"]["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
-    assert models["claude-max"]["label"] == "Claude Opus"
-    assert models["nebius"]["supports_effort"] is False
-    assert models["nebius"]["effort_levels"] == []
+    assert set(models) == {OPUS, SONNET, LLAMA}  # stt-only excluded
+    assert models[OPUS]["supports_effort"] is True
+    assert models[OPUS]["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
+    assert models[OPUS]["label"] == "Claude Opus 4.8"  # model-derived friendly label (labels.py)
+    assert models[LLAMA]["supports_effort"] is False
+    assert models[LLAMA]["effort_levels"] == []
+    assert models[LLAMA]["label"] == "Llama 3.3 70B"
 
 
 # --- PUT /settings/models -------------------------------------------------------------------------
@@ -89,35 +97,33 @@ def test_put_models_saves_and_is_forward_live():
         f"{PREFIX}/settings/models",
         json={
             "group": "chat",
-            "active": "nebius",
-            "fallback": "claude-max",
-            "effort_by_provider": {"claude-max": "high"},
+            "active": LLAMA,
+            "fallback": OPUS,
+            "effort_by_model": {OPUS: "high"},
         },
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["group"] == "chat"
-    assert (body["active"], body["fallback"]) == ("nebius", "claude-max")
-    assert body["effort_by_provider"] == {"claude-max": "high"}
+    assert (body["active"], body["fallback"]) == (LLAMA, OPUS)
+    assert body["effort_by_model"] == {OPUS: "high"}
     # Cache busted → a fresh GET reflects the saved routing (forward-live, no restart).
     chat = {g["group"]: g for g in client.get(f"{PREFIX}/settings").json()["groups"]}["chat"]
-    assert chat["active"] == "nebius"
-    assert chat["effort_by_provider"] == {"claude-max": "high"}
+    assert chat["active"] == LLAMA
+    assert chat["effort_by_model"] == {OPUS: "high"}
     # The PUT echoes the group's full editable state, incl. the pickable models list.
-    assert {m["id"] for m in body["models"]} == {"claude-max", "nebius"}
+    assert {m["id"] for m in body["models"]} == {OPUS, SONNET, LLAMA}
 
 
 def test_put_models_saves_a_non_chat_group():
     # Any of the 3 groups is savable, not just `chat` (conspect/quick share the machinery).
     routing = _routing()
     client = _client(routing)
-    resp = client.put(
-        f"{PREFIX}/settings/models", json={"group": "quick", "active": "nebius"}
-    )
+    resp = client.put(f"{PREFIX}/settings/models", json={"group": "quick", "active": LLAMA})
     assert resp.status_code == 200
     assert resp.json()["group"] == "quick"
     quick = {g["group"]: g for g in client.get(f"{PREFIX}/settings").json()["groups"]}["quick"]
-    assert quick["active"] == "nebius"
+    assert quick["active"] == LLAMA
 
 
 def test_put_models_unknown_active_is_422():
@@ -130,14 +136,14 @@ def test_put_models_unknown_active_is_422():
 def test_put_models_unknown_fallback_is_422():
     resp = _client(_routing()).put(
         f"{PREFIX}/settings/models",
-        json={"group": "chat", "active": "claude-max", "fallback": "ghost"},
+        json={"group": "chat", "active": OPUS, "fallback": "ghost"},
     )
     assert resp.status_code == 422
 
 
 def test_put_models_unknown_group_is_422():
     resp = _client(_routing()).put(
-        f"{PREFIX}/settings/models", json={"group": "bogus", "active": "claude-max"}
+        f"{PREFIX}/settings/models", json={"group": "bogus", "active": OPUS}
     )
     assert resp.status_code == 422  # Literal-constrained group
 
@@ -145,7 +151,7 @@ def test_put_models_unknown_group_is_422():
 def test_put_models_effort_on_non_effort_model_is_422():
     resp = _client(_routing()).put(
         f"{PREFIX}/settings/models",
-        json={"group": "chat", "active": "claude-max", "effort_by_provider": {"nebius": "high"}},
+        json={"group": "chat", "active": OPUS, "effort_by_model": {LLAMA: "high"}},
     )
     assert resp.status_code == 422
 
@@ -153,11 +159,7 @@ def test_put_models_effort_on_non_effort_model_is_422():
 def test_put_models_invalid_effort_level_is_422():
     resp = _client(_routing()).put(
         f"{PREFIX}/settings/models",
-        json={
-            "group": "chat",
-            "active": "claude-max",
-            "effort_by_provider": {"claude-max": "ultra"},
-        },
+        json={"group": "chat", "active": OPUS, "effort_by_model": {OPUS: "ultra"}},
     )
     assert resp.status_code == 422
 

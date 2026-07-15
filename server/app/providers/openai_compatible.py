@@ -16,7 +16,6 @@ from .base import (
     ProviderUnavailable,
     STTProvider,
 )
-from .labels import friendly_model_label
 
 _TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 
@@ -36,21 +35,22 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         default_chat_model: str = "",
         embedding_model: str = "",
         stt_model: str = "",
+        provider_label: str = "",
         requires_api_key: bool = True,
     ) -> None:
         self.id = id
+        # Friendly PROVIDER name for the ADR-044 Providers card (one row per provider — ADR-045 §6).
+        # Model display names are derived per model id by the registry (labels.py), not here.
+        self.provider_label = provider_label or id
         # This class also backs the STT/embedding providers (ADR-004); only an instance with a
         # configured chat model can actually chat, so it's excluded from GET /chat/models otherwise
-        # (base.ChatProvider.can_chat). The label = a friendly display name derived from that model
-        # (labels.py) — e.g. "meta-llama/Llama-3.3-70B-Instruct" -> "Llama 3.3 70B" (empty ⇒ not
-        # listed). Non-chat instances (STT/embedding) pass "" here, so the empty label is harmless.
+        # (base.ChatProvider.can_chat). Non-chat instances (STT/embedding) pass no chat model.
         self.can_chat = bool(default_chat_model)
         # Parallel to ``can_chat`` — an instance only transcribes/embeds if configured with the
         # matching model, so the ADR-044 ``capabilities`` row reflects configuration (openai/groq =
         # stt-only, ollama = embedding-only, nebius = chat-only), not the all-capabilities class.
         self.can_transcribe = bool(stt_model)
         self.can_embed = bool(embedding_model)
-        self.label = friendly_model_label(default_chat_model)
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._default_chat_model = default_chat_model
@@ -60,6 +60,11 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         # by network reachability — no key. When False, the key guard + Authorization header are
         # skipped; availability is reachability, not credentials.
         self._requires_api_key = requires_api_key
+
+    def chat_model_ids(self) -> tuple[str, ...]:
+        # One OpenAI-compatible endpoint serves one configured chat model (ADR-045). Non-chat
+        # instances (STT/embedding) serve none, so they never enter the chat catalog.
+        return (self._default_chat_model,) if self.can_chat else ()
 
     async def health(self) -> bool:
         # Cheap proxy — a configured key (or none required for a localhost provider). Real

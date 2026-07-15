@@ -59,6 +59,12 @@ class Provider(ABC):
 
     id: str = field(default="")
 
+    # Friendly PROVIDER display name for the ADR-044 Providers card (GET /admin/providers) — one
+    # row per provider, labeled here ("Claude"/"Nebius"/…), NOT per model (ADR-045 §6). This is
+    # distinct from a model label (which the registry derives per model id via labels.py); a
+    # provider now serves N models so it can't carry a single model label. Empty ⇒ fall back to id.
+    provider_label: str = field(default="")
+
     @abstractmethod
     async def health(self) -> bool:
         """Cheap availability check. Must never raise and must not perform a paid LLM call."""
@@ -71,9 +77,9 @@ class ChatProvider(Provider):
     # The registry filters ``GET /chat/models`` on this so the picker never offers a non-chat model.
     can_chat: bool = True
 
-    # Whether this provider honors a per-call reasoning ``effort`` (ADR-025 §4). Only models with
-    # a native effort control (the Claude Max CLI's ``--effort``) set this True; the registry uses
-    # it to route a group's effort only to providers that support one, and GET /settings to render
+    # Whether this provider honors a per-call reasoning ``effort`` (ADR-025 §4). Only providers with
+    # a native effort control (the Claude CLI's ``--effort``) set this True; the registry uses it to
+    # route a group's effort only to models whose provider supports one, and GET /settings to render
     # the effort control only where it applies. Providers without one ignore the arg.
     supports_effort: bool = False
 
@@ -82,10 +88,13 @@ class ChatProvider(Provider):
     # Empty when ``supports_effort`` is False.
     effort_levels: tuple[str, ...] = ()
 
-    # Human-readable display name for the model picker (GET /chat/models, GET /settings — 03-api
-    # §Chat/§Settings). Provider-sourced (like ``supports_effort``) so no router hardcodes a label;
-    # concrete providers set it to their configured model in ``__init__``. Empty ⇒ fall back to id.
-    label: str = ""
+    def chat_model_ids(self) -> tuple[str, ...]:
+        """The chat model ids this provider serves (empty when not chat-configured). One provider
+        may serve N models via per-call ``model=`` (ADR-045 — e.g. ``claude`` serves Opus+Sonnet);
+        the registry builds its chat-model catalog + model→provider index from this. The default
+        serves a single model whose id is the provider id (fits Nebius-style one-model providers and
+        test fakes); concrete multi-model providers override."""
+        return (self.id,) if self.can_chat else ()
 
     @abstractmethod
     async def complete(
@@ -93,6 +102,8 @@ class ChatProvider(Provider):
     ) -> str:
         """Return the assistant text, or raise ProviderUnavailable to trigger fallback.
 
+        ``model`` is the vendor model string to serve this call (ADR-045 — the registry passes the
+        resolved model id, so one provider can serve N models); ``None`` ⇒ the provider's default.
         ``effort`` is the per-call reasoning effort (ADR-025 §4); providers that don't support one
         (``supports_effort`` False) ignore it and fall back to their construction default."""
 

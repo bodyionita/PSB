@@ -15,7 +15,7 @@ app/
 ├── migration_check.py startup "are we behind head?" warning (no SQLAlchemy import)
 ├── routers/           health, auth  (validation + delegation only)
 ├── services/          auth_service, rate_limit, system_health (business logic)
-└── providers/         registry + fallback chain; openai-compatible + claude-max
+└── providers/         registry + fallback chain; openai-compatible + claude (CLI)
 migrations/            Alembic env + versions/001_initial_schema.py (full schema)
 scripts/hash_password.py
 tests/                 unit tests — fakes for providers, no live LLMs/DB
@@ -43,7 +43,7 @@ surface at M3 (see the root README's pivot note).
 
 - **Migrations are never applied in the request/boot path** (ADR-011). Run
   `alembic upgrade head` explicitly (CI / provision.sh); the service only warns if behind.
-- **claude-max is health-guarded** (ADR-012): with no local Claude CLI/login, the chat
+- **the `claude` provider is health-guarded** (ADR-012): with no local Claude CLI/login, the chat
   chain falls back to Nebius and records `fallback_used`. `claude login` on the VPS lights
   up the real path with zero code change.
 - `/health` never calls an LLM, so the service boots with no API keys.

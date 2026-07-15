@@ -45,12 +45,19 @@ class FakeChatProvider(ChatProvider):
         available: bool = True,
         supports_effort: bool = False,
         effort_levels: tuple[str, ...] = (),
-        label: str = "",
+        provider_label: str = "",
         can_chat: bool = True,
+        models: list[str] | None = None,
     ) -> None:
         self.id = id
-        self.label = label
+        # Friendly PROVIDER label for the ADR-044 card (ADR-045 §6). Model display labels are
+        # derived per model id by the registry (labels.py), not carried on the provider.
+        self.provider_label = provider_label
         self.can_chat = can_chat
+        # The chat model ids this fake serves (ADR-045). Default = a single model whose id is the
+        # provider id (fits most fallback/routing tests); pass ``models`` for the N-models-per-
+        # provider case or to exercise real vendor-string ids / friendly labels.
+        self._models = list(models) if models else None
         self._reply = reply if reply is not None else f"answer from {id}"
         self._responder = responder
         self._available = available
@@ -62,10 +69,18 @@ class FakeChatProvider(ChatProvider):
         )
         self.calls = 0
         # The per-call efforts this provider was asked for, in order (None when unset) — lets a
-        # routing test assert the group's effort reached the right provider (ADR-025 §4).
+        # routing test assert the group's effort reached the right model (ADR-025 §4).
         self.efforts: list[str | None] = []
+        # The per-call ``model=`` this provider was asked to serve, in order — lets a test assert
+        # the registry passed the resolved model id (ADR-045, one provider serving N models).
+        self.models_seen: list[str | None] = []
         # The messages of the most recent call (lets a test assert prompt/fencing content).
         self.last_messages: list[ChatMessage] = []
+
+    def chat_model_ids(self) -> tuple[str, ...]:
+        if not self.can_chat:
+            return ()
+        return tuple(self._models) if self._models else (self.id,)
 
     async def health(self) -> bool:
         return self._available
@@ -75,6 +90,7 @@ class FakeChatProvider(ChatProvider):
     ) -> str:
         self.calls += 1
         self.efforts.append(effort)
+        self.models_seen.append(model)
         self.last_messages = list(messages)
         if not self._available:
             raise ProviderUnavailable(f"{self.id} is down")

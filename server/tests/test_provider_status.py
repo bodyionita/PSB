@@ -83,9 +83,9 @@ def test_error_message_is_truncated():
 
 # --- registry call-site wiring -----------------------------------------------------------------
 class _FakeChat(ChatProvider):
-    def __init__(self, id: str, *, healthy: bool = True, label: str = "") -> None:
+    def __init__(self, id: str, *, healthy: bool = True, provider_label: str = "") -> None:
         self.id = id
-        self.label = label
+        self.provider_label = provider_label
         self.can_chat = True
         self.fail = False
         self._healthy = healthy
@@ -213,7 +213,7 @@ async def test_stt_records_success_and_failure():
 
 # --- provider_report ---------------------------------------------------------------------------
 async def test_provider_report_shape_and_status_fold():
-    healthy = _FakeChat("primary", label="Primary Model")
+    healthy = _FakeChat("primary", provider_label="Primary Model")
     unhealthy = _FakeChat("fallback", healthy=False)
     tracker = ProviderStatusTracker()
     reg = _registry([healthy, unhealthy], chat_chain=["primary", "fallback"], tracker=tracker)
@@ -222,7 +222,7 @@ async def test_provider_report_shape_and_status_fold():
     report = await reg.provider_report()
     by_id = {r.id: r for r in report}
 
-    assert by_id["primary"].label == "Primary Model"
+    assert by_id["primary"].label == "Primary Model"  # sourced from provider_label (ADR-045 §6)
     assert by_id["primary"].capabilities == ["chat"]
     assert by_id["primary"].reachable is True
     # Live health() probe is reachability, not success: the unhealthy provider reads not-reachable,
@@ -267,10 +267,14 @@ async def test_build_registry_reports_every_configured_provider():
     reg = build_registry(Settings())
     report = await reg.provider_report()
     caps = {r.id: r.capabilities for r in report}
-    # All six providers are enumerated with configuration-derived capabilities.
+    labels = {r.id: r.label for r in report}
+    # FIVE providers now — `claude` collapsed to one row (ADR-045 §6), no fake `-max`/`-sonnet`.
+    assert set(caps) == {"openai", "nebius", "groq", "claude", "ollama"}
     assert caps["nebius"] == ["chat"]
-    assert caps["claude-max"] == ["chat"]
-    assert caps["claude-max-sonnet"] == ["chat"]
+    assert caps["claude"] == ["chat"]  # one row serving both Opus + Sonnet
     assert caps["openai"] == ["stt"]
     assert caps["groq"] == ["stt"]
     assert caps["ollama"] == ["embedding"]
+    # Provider-name labels, not raw ids or model names (ADR-045 §6).
+    assert labels["claude"] == "Claude"
+    assert labels["nebius"] == "Nebius"

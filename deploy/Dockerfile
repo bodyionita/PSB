@@ -1,5 +1,5 @@
 # Braindan API image (ADR-003: single service = FastAPI + scheduler + agents).
-# Includes git (graph-store backup) and the Claude Code CLI (provider claude-max, ADR-004):
+# Includes git (graph-store backup) and the Claude Code CLI (the `claude` provider, ADR-004/045):
 # OAuth is done once on the VPS via `docker compose exec api claude login`, credentials
 # persisted on a volume (07-infrastructure.md).
 FROM python:3.12-slim
@@ -32,7 +32,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv /root/.local/bin/uv /usr/local/bin/uv
 
-# Claude Code CLI (the claude-max provider shells this; OAuth via a mounted volume).
+# Claude Code CLI (the `claude` provider shells this; OAuth via a mounted volume).
 RUN npm config set prefix /usr/local/share/npm-global \
     && npm install -g @anthropic-ai/claude-code
 

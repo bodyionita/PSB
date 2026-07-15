@@ -45,7 +45,6 @@ def _build(
     hits: list[SearchHit] | None = None,
 ) -> tuple[ChatService, ModelRoutingService, FakeChatStore]:
     chat_p = FakeChatProvider("chat-p", reply=answer, available=chat_available)
-    chat_p.label = "Claude Opus 4.8"  # provider-sourced label (GET /chat/models)
     providers = {
         "chat-p": chat_p,
         "conspect-p": FakeChatProvider("conspect-p", reply="condensed english query"),
@@ -172,8 +171,11 @@ def test_get_chat_models_lists_registry_ids_labels_and_default():
     assert ids == ["chat-p", "conspect-p", "quick-p"]
     assert "stt-only" not in ids
     labels = {m["id"]: m["label"] for m in body["models"]}
-    assert labels["chat-p"] == "Claude Opus 4.8"  # provider-sourced label
-    assert labels["conspect-p"] == "conspect-p"  # falls back to id when unset
+    # Labels are model-derived (labels.py); an opaque non-vendor id falls back to the id itself.
+    # The friendly-label path over real vendor ids is covered in test_labels + the registry/settings
+    # tests. Here the ids double as model ids (one-model fakes), so labels equal the ids.
+    assert labels["chat-p"] == "chat-p"
+    assert labels["conspect-p"] == "conspect-p"
     assert body["default"] == "chat-p"  # the Chat group's active model
 
 

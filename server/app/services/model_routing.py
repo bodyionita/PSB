@@ -1,7 +1,8 @@
-"""Model routing — the UI-editable routing brain (ADR-025 / ADR-043, M4 task 1).
+"""Model routing — the UI-editable routing brain (ADR-025 / ADR-043 / ADR-045, M4 task 1).
 
-Three routing groups map every LLM chat call onto a ``{active, fallback, effort_by_provider}``
-unit the user tunes from Settings:
+Three routing groups map every LLM chat call onto a ``{active, fallback, effort_by_model}`` unit
+the user tunes from Settings. ``active``/``fallback`` are **model ids** (the raw vendor strings,
+ADR-045 — the provider is derived by the registry); ``effort_by_model`` keys effort by model id:
 
   * ``chat``     — interactive chat (M4 task 3+).
   * ``conspect`` — organize/distill: capture organize, the follow-up nudge, chat query-condensation,
@@ -9,10 +10,10 @@ unit the user tunes from Settings:
   * ``quick``    — a cheap/fast lane for trivial calls (ADR-043; M4 caller = session titling).
 
 The **seed** for each group is config (:class:`~app.config.Settings` — ``chat_chain`` /
-``distill_chain`` / ``quick_chain`` + ``claude_max_effort`` / ``quick_effort``); the user's saved
-overrides live in ``app_settings`` under one ``model_routing`` jsonb key and are overlaid on top,
-cache-busted on save (ADR-025 §3). The registry stays pure provider-mechanics — this service owns
-*which* chain and *what* effort; :meth:`ProviderRegistry.run_chain` owns walking it (ADR-025 §3/§4).
+``distill_chain`` / ``quick_chain`` + ``claude_effort``); the user's saved overrides live in
+``app_settings`` under one ``model_routing`` jsonb key and are overlaid on top, cache-busted on
+save (ADR-025 §3). The registry stays pure provider-mechanics — this service owns *which* chain and
+*what* effort; :meth:`ProviderRegistry.run_chain` owns walking it (ADR-025 §3/§4).
 
 Plain SQL over asyncpg, no ORM (rule 5, ADR-011). The service depends on the
 :class:`ModelRoutingStore` protocol so it unit-tests against an in-memory fake (no live DB — 08
@@ -40,32 +41,33 @@ GROUPS = ("chat", "conspect", "quick")
 # The single ``app_settings`` key holding the saved per-group routing overrides.
 MODEL_ROUTING_KEY = "model_routing"
 
-# group → (settings chain attr, settings effort attr) — the config seed source per group.
+# group → (settings chain attr, settings effort attr) — the config seed source per group. All
+# three groups seed effort from the single ``claude_effort`` scalar (ADR-045 §5).
 _GROUP_SEED: dict[str, tuple[str, str]] = {
-    "chat": ("chat_chain", "claude_max_effort"),
-    "conspect": ("distill_chain", "claude_max_effort"),
-    "quick": ("quick_chain", "quick_effort"),
+    "chat": ("chat_chain", "claude_effort"),
+    "conspect": ("distill_chain", "claude_effort"),
+    "quick": ("quick_chain", "claude_effort"),
 }
 
 
 @dataclass(frozen=True)
 class GroupRouting:
-    """One group's saved routing: the active model, its fallback, and per-provider effort.
+    """One group's saved routing: the active model, its fallback, and per-model effort (ADR-045).
 
-    ``effort_by_provider`` maps a provider id → its reasoning effort; it only carries entries for
-    providers that support one (the Claude tiers). Everything else is effort-irrelevant."""
+    ``effort_by_model`` maps a model id → its reasoning effort; it only carries entries for models
+    whose provider supports one (the Claude models). Everything else is effort-irrelevant."""
 
     active: str = ""
     fallback: str = ""
-    effort_by_provider: dict[str, str] = field(default_factory=dict)
+    effort_by_model: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class RoutingDecision:
-    """A resolved group: the concrete provider chain to walk + the per-provider effort to thread."""
+    """A resolved group: the concrete model-id chain to walk + the per-model effort to thread."""
 
     chain: list[str]
-    effort_by_provider: dict[str, str]
+    effort_by_model: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -83,13 +85,13 @@ class ChatCatalog:
 @dataclass(frozen=True)
 class GroupSettings:
     """One routing group's editable state for Settings (GET /settings, 03-api §Settings): the
-    effective ``{active, fallback, effort_by_provider}`` (saved-over-seed) + the registry's pickable
+    effective ``{active, fallback, effort_by_model}`` (saved-over-seed) + the registry's pickable
     ``models`` (each carrying ``supports_effort``/``effort_levels``, ADR-025 §6)."""
 
     group: str
     active: str
     fallback: str
-    effort_by_provider: dict[str, str]
+    effort_by_model: dict[str, str]
     models: list[ChatModelOption]
 
 
@@ -173,18 +175,18 @@ class ModelRoutingService:
         self._cache = None
 
     def _seed(self, group: str) -> GroupRouting:
-        """The config-declared default routing for a group (ADR-025 §3, ADR-043 §2)."""
+        """The config-declared default routing for a group (ADR-025 §3, ADR-043 §2, ADR-045)."""
         chain_attr, effort_attr = _GROUP_SEED[group]
         chain = list(getattr(self._settings, chain_attr))
         effort = getattr(self._settings, effort_attr)
         active = chain[0] if chain else ""
         fallback = chain[1] if len(chain) > 1 else ""
-        ebp = {
-            pid: effort
-            for pid in _dedup([active, fallback])
-            if pid and self._registry.supports_effort(pid)
+        ebm = {
+            mid: effort
+            for mid in _dedup([active, fallback])
+            if mid and self._registry.supports_effort(mid)
         }
-        return GroupRouting(active=active, fallback=fallback, effort_by_provider=ebp)
+        return GroupRouting(active=active, fallback=fallback, effort_by_model=ebm)
 
     async def all_settings(self) -> list[GroupSettings]:
         """Every group's editable routing for GET /settings, in ``GROUPS`` order (saved-over-seed);
@@ -194,7 +196,7 @@ class ModelRoutingService:
         return [self._group_settings(g, saved.get(g) or self._seed(g), models) for g in GROUPS]
 
     async def save_group(
-        self, group: str, *, active: str, fallback: str, effort_by_provider: dict[str, str]
+        self, group: str, *, active: str, fallback: str, effort_by_model: dict[str, str]
     ) -> GroupSettings:
         """Validate + persist one group's routing (PUT /settings/models), busting the cache so it's
         forward-live (ADR-025 §3). ``active``/``fallback`` must be pickable chat models and every
@@ -206,14 +208,14 @@ class ModelRoutingService:
             raise UnknownModel(f"unknown active model: {active!r}")
         if fallback and fallback not in options:
             raise UnknownModel(f"unknown fallback model: {fallback!r}")
-        for pid, level in effort_by_provider.items():
-            opt = options.get(pid)
+        for mid, level in effort_by_model.items():
+            opt = options.get(mid)
             if opt is None or not opt.supports_effort:
-                raise UnknownModel(f"model does not support effort: {pid!r}")
+                raise UnknownModel(f"model does not support effort: {mid!r}")
             if level not in opt.effort_levels:
-                raise UnknownModel(f"invalid effort {level!r} for model {pid!r}")
+                raise UnknownModel(f"invalid effort {level!r} for model {mid!r}")
         routing = GroupRouting(
-            active=active, fallback=fallback, effort_by_provider=dict(effort_by_provider)
+            active=active, fallback=fallback, effort_by_model=dict(effort_by_model)
         )
         await self.save(group, routing)  # persist + invalidate (forward-live)
         return self._group_settings(group, routing, list(options.values()))
@@ -225,7 +227,7 @@ class ModelRoutingService:
             group=group,
             active=routing.active,
             fallback=routing.fallback,
-            effort_by_provider=dict(routing.effort_by_provider),
+            effort_by_model=dict(routing.effort_by_model),
             models=list(models),
         )
 
@@ -238,11 +240,11 @@ class ModelRoutingService:
         return ChatCatalog(
             models=self._registry.chat_models(),
             default=default,
-            efforts=dict(decision.effort_by_provider),
+            efforts=dict(decision.effort_by_model),
         )
 
     async def resolve(self, group: str) -> RoutingDecision:
-        """Resolve a group to a chain + per-provider effort (saved over seed; rule-7 safe)."""
+        """Resolve a group to a chain + per-model effort (saved over seed; rule-7 safe)."""
         if group not in GROUPS:
             raise ValueError(f"unknown routing group: {group!r}")
         seed = self._seed(group)
@@ -255,11 +257,11 @@ class ModelRoutingService:
             source = seed
             chain = self._valid_chain(seed.active, seed.fallback)
         effort = {
-            pid: level
-            for pid, level in source.effort_by_provider.items()
-            if self._registry.supports_effort(pid)
+            mid: level
+            for mid, level in source.effort_by_model.items()
+            if self._registry.supports_effort(mid)
         }
-        return RoutingDecision(chain=chain, effort_by_provider=effort)
+        return RoutingDecision(chain=chain, effort_by_model=effort)
 
     def _valid_chain(self, active: str, fallback: str) -> list[str]:
         return [
@@ -278,7 +280,7 @@ class ModelRoutingService:
         return await self._registry.run_chain(
             messages,
             chain=decision.chain,
-            effort_by_provider=decision.effort_by_provider,
+            effort_by_model=decision.effort_by_model,
             requested_model=requested_model,
         )
 
@@ -324,16 +326,16 @@ def _decode_all(value: Any) -> dict[str, GroupRouting]:
 def _decode_group(raw: dict[str, Any]) -> GroupRouting:
     active = raw.get("active")
     fallback = raw.get("fallback")
-    ebp_raw = raw.get("effort_by_provider")
-    ebp: dict[str, str] = {}
-    if isinstance(ebp_raw, dict):
-        for pid, level in ebp_raw.items():
-            if isinstance(pid, str) and isinstance(level, str) and pid and level:
-                ebp[pid] = level
+    ebm_raw = raw.get("effort_by_model")
+    ebm: dict[str, str] = {}
+    if isinstance(ebm_raw, dict):
+        for mid, level in ebm_raw.items():
+            if isinstance(mid, str) and isinstance(level, str) and mid and level:
+                ebm[mid] = level
     return GroupRouting(
         active=active if isinstance(active, str) else "",
         fallback=fallback if isinstance(fallback, str) else "",
-        effort_by_provider=ebp,
+        effort_by_model=ebm,
     )
 
 
@@ -341,5 +343,5 @@ def _encode_group(routing: GroupRouting) -> dict[str, Any]:
     return {
         "active": routing.active,
         "fallback": routing.fallback,
-        "effort_by_provider": dict(routing.effort_by_provider),
+        "effort_by_model": dict(routing.effort_by_model),
     }

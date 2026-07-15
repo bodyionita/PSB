@@ -247,12 +247,13 @@ class RoutingModelItem(BaseModel):
 
 class GroupRoutingModel(BaseModel):
     """One routing group's editable state (GET /settings): the effective active/fallback + per-
-    provider effort (saved-over-seed) and the models the dropdowns choose from."""
+    model effort (saved-over-seed, ADR-045) and the models the dropdowns choose from. ``active``/
+    ``fallback`` and every ``effort_by_model`` key are MODEL ids (the raw vendor strings)."""
 
     group: str
     active: str
     fallback: str
-    effort_by_provider: dict[str, str] = Field(default_factory=dict)
+    effort_by_model: dict[str, str] = Field(default_factory=dict)
     models: list[RoutingModelItem] = Field(default_factory=list)
 
 
@@ -264,12 +265,13 @@ class SettingsResponse(BaseModel):
 
 class ModelRoutingUpdate(BaseModel):
     """Save one group's routing (PUT /settings/models). ``group`` is constrained to the 3 known
-    groups (422 otherwise); unknown model ids / bad effort levels are a 422 from the service."""
+    groups (422 otherwise); ``active``/``fallback``/``effort_by_model`` keys are model ids (ADR-045)
+    — unknown model ids / bad effort levels are a 422 from the service."""
 
     group: Literal["chat", "conspect", "quick"]
     active: str = Field(min_length=1)
     fallback: str = ""
-    effort_by_provider: dict[str, str] = Field(default_factory=dict)
+    effort_by_model: dict[str, str] = Field(default_factory=dict)
 
 
 # --- Meta (03-api.md §Meta) ---

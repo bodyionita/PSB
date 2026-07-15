@@ -337,7 +337,7 @@ async def main() -> int:
              "title": "Alex", "snippet": "met at the office", "score": 0.031, "planes": ["Work"]},
         ]
         await chat.add_message(
-            sid, role="assistant", content="You raised prices [1].", model="claude-max",
+            sid, role="assistant", content="You raised prices [1].", model="claude-opus-4-8",
             sources=srcs,
         )
         msgs = await chat.session_messages(sid)

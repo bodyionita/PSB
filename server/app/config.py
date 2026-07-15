@@ -217,28 +217,39 @@ class Settings(BaseSettings):
     # OpenAI's STT model — used when the chain falls back to the "openai" provider.
     stt_model: str = "whisper-1"
 
-    # Chat/distill fallback chains, by provider id. First entry is primary. These are the config
-    # SEEDS for the `chat`/`conspect` routing groups (ADR-025): the ModelRoutingService overlays
-    # any user-saved `app_settings.model_routing`, falling back to these when a group is unset.
-    chat_chain: CsvList = Field(default=["claude-max", "nebius"])
-    distill_chain: CsvList = Field(default=["claude-max", "nebius"])
-    # `quick` routing-group seed (ADR-043): a cheap/fast lane for trivial calls (M4 = session
-    # titling). Sonnet-primary via the `claude-max-sonnet` provider id; Nebius fallback.
-    quick_chain: CsvList = Field(default=["claude-max-sonnet", "nebius"])
+    # Chat/distill fallback chains, by MODEL ID (the raw vendor string — ADR-045). First entry is
+    # primary. These are the config SEEDS for the `chat`/`conspect` routing groups (ADR-025): the
+    # ModelRoutingService overlays any user-saved `app_settings.model_routing`, falling back to
+    # these when a group is unset. A model id resolves to its provider via the registry's
+    # model→provider index (ADR-045); the vendor-string change cost is documented in
+    # `claude_opus_model` below.
+    chat_chain: CsvList = Field(default=["claude-opus-4-8", "meta-llama/Llama-3.3-70B-Instruct"])
+    distill_chain: CsvList = Field(
+        default=["claude-opus-4-8", "meta-llama/Llama-3.3-70B-Instruct"]
+    )
+    # `quick` routing-group seed (ADR-043, ADR-045): a cheap/fast lane for trivial calls (M4 =
+    # session titling). The cheaper Sonnet model (served by the same `claude` provider) is primary;
+    # the Nebius model is the fallback.
+    quick_chain: CsvList = Field(
+        default=["claude-sonnet-4-6", "meta-llama/Llama-3.3-70B-Instruct"]
+    )
     # STT fallback chain (ADR-020): Groq (whisper-large-v3) primary, OpenAI (whisper-1) fallback.
     stt_chain: CsvList = Field(default=["groq", "openai"])
-    # Model the claude-max provider drives through the Agent SDK / CLI.
-    claude_max_model: str = "claude-opus-4-8"
-    # Model the `claude-max-sonnet` provider drives through the SAME `claude` CLI (ADR-043 §3): a
-    # cheaper Sonnet tier for the `quick` group. Initially Sonnet 4.6; a one-line swap to Sonnet 5
-    # or any CLI alias later, no code change (the exact alias is confirmed at deploy).
-    claude_max_sonnet_model: str = "claude-sonnet-4-6"
-    # Reasoning-effort level passed to every claude-max CLI call (`--effort`) when a routing group
-    # doesn't set its own. This is the effort SEED for `chat`/`conspect`; `quick` seeds its own
-    # `quick_effort` (ADR-025 §2, ADR-043 §2). low|medium|high|xhigh|max.
-    claude_max_effort: str = "medium"
-    # `quick`-group effort seed (ADR-043 §2): cheap by default for trivia.
-    quick_effort: str = "low"
+    # The two models the single `claude` provider serves through the Agent SDK / CLI via per-call
+    # `--model` (ADR-045 — provider≠model). A model id is the RAW VENDOR STRING (no short-key
+    # indirection): the accepted cost is that a vendor-string change (e.g. Sonnet 4.6→5) is a config
+    # AND a saved-routing migration touch (ADR-045 §3), not a transparent remap. These feed the
+    # registry's chat-model catalog; the `*_chain` seeds above reference them by that same string.
+    claude_opus_model: str = "claude-opus-4-8"
+    # The cheaper Sonnet model on the SAME `claude` provider (ADR-045 collapsed the former separate
+    # Sonnet-tier fake provider into this). A one-line swap to Sonnet 5 or any CLI alias later — but
+    # per ADR-045 §3 it must also be updated in the seed chains that name it.
+    claude_sonnet_model: str = "claude-sonnet-4-6"
+    # Reasoning-effort level passed to every `claude` CLI call (`--effort`) when a routing group
+    # doesn't set its own — the single effort SEED for all groups (ADR-045 §5, replacing the former
+    # per-tier effort scalars). Per-group/per-model effort is still tuned in Settings → Models
+    # (saved routing wins). low|medium|high|xhigh|max.
+    claude_effort: str = "medium"
 
     # --- Chunking (02-data-model §4) ---
     chunk_size: int = 1200

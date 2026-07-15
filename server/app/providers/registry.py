@@ -1,9 +1,12 @@
-"""Provider registry + fallback routing (ADR-004).
+"""Provider registry + fallback routing (ADR-004 / ADR-045).
 
-Config declares named providers and per-task chains. The registry walks a chain, advancing
-past any provider that raises :class:`ProviderUnavailable`, and reports which model actually
-answered (``model_used``) and whether a fallback fired (``fallback_used``) — the resolution
-is never swallowed (CLAUDE.md rule 3).
+Config declares named providers and per-task chains **of model ids** (the raw vendor strings,
+ADR-045). A provider serves N models; the registry keeps a **model→provider index** so a chain
+resolves each model id to its provider instance + the vendor string to pass. It walks a chain,
+advancing past any provider that raises :class:`ProviderUnavailable`, and reports which model
+actually answered (``model_used``) and whether a fallback fired (``fallback_used``) — the
+resolution is never swallowed (CLAUDE.md rule 3). Runtime status is keyed by **provider** id (a
+fallback/error is a provider event — ADR-044/045 §6).
 """
 
 from __future__ import annotations
@@ -25,7 +28,8 @@ from .base import (
     STTProvider,
     TranscriptResult,
 )
-from .claude_max import ClaudeMaxProvider
+from .claude import ClaudeProvider
+from .labels import friendly_model_label
 from .openai_compatible import OpenAICompatibleProvider
 from .status import ProviderError, ProviderStatusTracker
 
@@ -67,13 +71,15 @@ class ProviderReport:
 
 @dataclass(frozen=True)
 class ChatModelOption:
-    """A pickable chat model for the composer/settings pickers (03-api §Chat/§Settings).
+    """A pickable chat MODEL for the composer/settings pickers (03-api §Chat/§Settings, ADR-045).
 
-    ``GET /chat/models`` uses ``id``/``label``; ``GET /settings`` also renders ``supports_effort``
-    and ``effort_levels`` so the effort selector appears only where it applies, with the levels
-    registry-sourced (ADR-025 §6, no hardcoded enums in the web)."""
+    ``id`` is the raw vendor model string (the routable unit); ``provider`` is the id of the
+    provider that serves it (derived, ADR-045 §1); ``label`` is the model-derived display name
+    (labels.py). ``GET /settings`` also renders ``supports_effort`` + ``effort_levels`` so the
+    effort selector appears only where it applies, levels registry-sourced (ADR-025 §6)."""
 
     id: str
+    provider: str
     label: str
     supports_effort: bool = False
     effort_levels: list[str] = field(default_factory=list)
@@ -95,52 +101,64 @@ class ProviderRegistry:
         self._distill_chain = distill_chain
         self._embedding_provider_id = embedding_provider_id
         self._stt_chain = stt_chain
-        # In-memory per-provider runtime status (ADR-044), recorded at every provider call site.
-        # Process-lifetime singleton on the registry (single uvicorn worker), so consistent across
-        # requests; resets on redeploy (accepted — the failure mode is persistent, it repopulates).
+        # In-memory per-PROVIDER runtime status (ADR-044/045 §6), recorded at every provider call
+        # site keyed by provider id. Process-lifetime singleton on the registry (single uvicorn
+        # worker), so consistent across requests; resets on redeploy (accepted — the failure mode
+        # is persistent, it repopulates).
         self._status = status_tracker or ProviderStatusTracker()
+        # Chat-model catalog + model→provider index (ADR-045): each chat-capable provider serves
+        # N model ids; the catalog is the pickable universe and the index resolves a chain's model
+        # id → its provider instance. Built once at construction, in registration order.
+        self._chat_catalog: list[ChatModelOption] = []
+        self._model_to_provider: dict[str, Provider] = {}
+        for pid, provider in providers.items():
+            if not (isinstance(provider, ChatProvider) and provider.can_chat):
+                continue
+            for model_id in provider.chat_model_ids():
+                if not model_id or model_id in self._model_to_provider:
+                    continue  # skip unconfigured / duplicate model ids
+                self._chat_catalog.append(
+                    ChatModelOption(
+                        id=model_id,
+                        provider=pid,
+                        label=friendly_model_label(model_id),
+                        supports_effort=provider.supports_effort,
+                        effort_levels=list(provider.effort_levels),
+                    )
+                )
+                self._model_to_provider[model_id] = provider
 
     # --- introspection (feeds GET /chat/models & GET /settings) ---
     def chat_models(self) -> list[ChatModelOption]:
-        """Every genuinely chat-capable provider as ``{id, label}`` (registration order) — the
-        pickable universe for the chat composer + Settings model dropdowns (03-api §Chat). Filters
-        on ``can_chat`` (not merely the ``ChatProvider`` class), so the shared OpenAI-compatible
-        STT/embedding instances are excluded. The label is provider-sourced (its configured model),
-        falling back to the id."""
-        return [
-            ChatModelOption(
-                id=pid,
-                label=provider.label or pid,
-                supports_effort=provider.supports_effort,
-                effort_levels=list(provider.effort_levels),
-            )
-            for pid, provider in self._providers.items()
-            if isinstance(provider, ChatProvider) and provider.can_chat
-        ]
+        """Every pickable chat MODEL as ``{id, provider, label, …}`` (registration order) — the
+        universe for the chat composer + Settings model dropdowns (03-api §Chat, ADR-045). Built
+        from each chat-capable provider's ``chat_model_ids()`` (``can_chat`` filtered, so the shared
+        OpenAI-compatible STT/embedding instances are excluded), the label derived per model id."""
+        return list(self._chat_catalog)
 
     def available_chat_models(self) -> list[str]:
-        return [pid for pid in self._chat_chain if pid in self._providers]
+        return [mid for mid in self._chat_chain if mid in self._model_to_provider]
 
     def default_chat_model(self) -> str:
         chain = self.available_chat_models()
         return chain[0] if chain else ""
 
-    def supports_chat(self, provider_id: str) -> bool:
-        """True if ``provider_id`` maps to a registered chat provider — the ModelRoutingService's
-        rule-7 guard: an unknown/stale saved model id is filtered before a chain is walked."""
-        return isinstance(self._providers.get(provider_id), ChatProvider)
+    def supports_chat(self, model_id: str) -> bool:
+        """True if ``model_id`` is a registered chat model — the ModelRoutingService's rule-7 guard:
+        an unknown/stale saved model id is filtered before a chain is walked."""
+        return model_id in self._model_to_provider
 
-    def supports_effort(self, provider_id: str) -> bool:
-        """True if ``provider_id``'s chat provider honors a per-call ``effort`` (ADR-025 §4).
-        Sourced from the provider, so the routing service + GET /settings never hardcode which
-        models take effort."""
-        provider = self._providers.get(provider_id)
+    def supports_effort(self, model_id: str) -> bool:
+        """True if ``model_id``'s provider honors a per-call ``effort`` (ADR-025 §4). Sourced from
+        the provider, so the routing service + GET /settings never hardcode which models take
+        effort."""
+        provider = self._model_to_provider.get(model_id)
         return isinstance(provider, ChatProvider) and provider.supports_effort
 
     def _resolve_chain(self, requested: str | None, default_chain: list[str]) -> list[str]:
-        """A requested provider is tried first, then the remaining configured fallbacks."""
-        if requested and requested in self._providers:
-            rest = [pid for pid in default_chain if pid != requested]
+        """A requested model is tried first, then the remaining configured fallbacks."""
+        if requested and requested in self._model_to_provider:
+            rest = [mid for mid in default_chain if mid != requested]
             return [requested, *rest]
         return list(default_chain)
 
@@ -148,47 +166,51 @@ class ProviderRegistry:
         self,
         messages: list[ChatMessage],
         chain: list[str],
-        effort_by_provider: dict[str, str] | None = None,
+        effort_by_model: dict[str, str] | None = None,
     ) -> ChatResult:
-        efforts = effort_by_provider or {}
+        efforts = effort_by_model or {}
         errors: list[str] = []
-        for index, provider_id in enumerate(chain):
-            provider = self._providers.get(provider_id)
+        for index, model_id in enumerate(chain):
+            provider = self._model_to_provider.get(model_id)
             if not isinstance(provider, ChatProvider):
-                errors.append(f"{provider_id}: not a chat provider")
+                errors.append(f"{model_id}: not a chat model")
                 continue
             try:
-                # Per-provider effort (ADR-025 §4): only providers that support one get a value;
-                # the rest receive None and use their construction default.
-                text = await provider.complete(messages, effort=efforts.get(provider_id))
+                # Per-model effort (ADR-025 §4): only models whose provider supports one get a
+                # value; the rest receive None and use the provider default. The resolved model id
+                # is passed so the one provider serves the right model (ADR-045).
+                text = await provider.complete(
+                    messages, model=model_id, effort=efforts.get(model_id)
+                )
             except ProviderUnavailable as exc:
-                logger.warning("chat provider %s unavailable: %s", provider_id, exc)
-                self._status.record_failure(provider_id, str(exc))
+                logger.warning("chat model %s (%s) unavailable: %s", model_id, provider.id, exc)
+                # Status is a PROVIDER signal (ADR-045 §6) — keyed by provider id, not model id.
+                self._status.record_failure(provider.id, str(exc))
                 errors.append(str(exc))
                 continue
-            self._status.record_success(provider_id)
+            self._status.record_success(provider.id)
             return ChatResult(
                 text=text,
-                model_used=provider_id,
+                model_used=model_id,
                 fallback_used=index > 0,
-                effort_used=efforts.get(provider_id),
+                effort_used=efforts.get(model_id),
             )
-        raise RegistryExhausted("all chat providers unavailable: " + "; ".join(errors))
+        raise RegistryExhausted("all chat models unavailable: " + "; ".join(errors))
 
     async def run_chain(
         self,
         messages: list[ChatMessage],
         *,
         chain: list[str],
-        effort_by_provider: dict[str, str] | None = None,
+        effort_by_model: dict[str, str] | None = None,
         requested_model: str | None = None,
     ) -> ChatResult:
-        """Mechanics for the ModelRoutingService (ADR-025 §3): walk an explicit provider ``chain``
-        (a requested model tried first), threading each provider's ``effort``, recording
+        """Mechanics for the ModelRoutingService (ADR-025 §3): walk an explicit ``chain`` of model
+        ids (a requested model tried first), threading each model's ``effort``, recording
         ``model_used``/``fallback_used``. The routing *brain* (which chain, what effort) lives in
         the service; the registry stays pure provider mechanics."""
         resolved = self._resolve_chain(requested_model, chain)
-        return await self._chat_over_chain(messages, resolved, effort_by_provider)
+        return await self._chat_over_chain(messages, resolved, effort_by_model)
 
     async def chat(
         self, messages: list[ChatMessage], *, requested_model: str | None = None
@@ -258,7 +280,7 @@ class ProviderRegistry:
             reports.append(
                 ProviderReport(
                     id=pid,
-                    label=getattr(provider, "label", "") or pid,
+                    label=getattr(provider, "provider_label", "") or pid,
                     capabilities=_provider_capabilities(provider),
                     reachable=reachable,
                     last_error=status.last_error,
@@ -288,12 +310,14 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key,
         stt_model=settings.stt_model,
+        provider_label="OpenAI",
     )
     nebius = OpenAICompatibleProvider(
         id="nebius",
         base_url=settings.nebius_base_url,
         api_key=settings.nebius_api_key,
         default_chat_model=settings.nebius_chat_model,
+        provider_label="Nebius",
     )
     # Groq — STT primary (ADR-020). Same OpenAI-compatible class, different endpoint/key/model.
     groq = OpenAICompatibleProvider(
@@ -301,21 +325,18 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         base_url=settings.groq_base_url,
         api_key=settings.groq_api_key,
         stt_model=settings.groq_stt_model,
+        provider_label="Groq",
     )
-    claude_max = ClaudeMaxProvider(
-        id="claude-max",
-        model=settings.claude_max_model,
-        effort=settings.claude_max_effort,
-    )
-    # A second ClaudeMaxProvider over the SAME `claude` CLI, driving a cheaper Sonnet tier for the
-    # `quick` routing group (ADR-043 §3): one provider id = one configured model, so the chain /
-    # requested_model / Settings machinery needs no new concept. The `quick` group supplies its
-    # effort per call; the constructor effort is the no-per-call-effort default, seeded to the
-    # cheap-tier `quick_effort` (low) to match the tier intent.
-    claude_max_sonnet = ClaudeMaxProvider(
-        id="claude-max-sonnet",
-        model=settings.claude_max_sonnet_model,
-        effort=settings.quick_effort,
+    # ONE `claude` provider serving BOTH Opus + Sonnet over the same CLI via per-call `--model`
+    # (ADR-045 — collapses the former two fake single-model provider ids). The `quick` group routes
+    # to the Sonnet model; `chat`/`conspect` to Opus. A per-call effort still overrides the
+    # `claude_effort` seed.
+    claude = ClaudeProvider(
+        id="claude",
+        models=[settings.claude_opus_model, settings.claude_sonnet_model],
+        default_model=settings.claude_opus_model,
+        effort=settings.claude_effort,
+        provider_label="Claude",
     )
     # Self-hosted nomic embeddings (ADR-022): OpenAI-compatible /v1/embeddings on the on-box
     # Ollama sidecar, no API key (localhost). Single embedding provider — one index, one space.
@@ -325,14 +346,14 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         api_key="",
         embedding_model=settings.embedding_model,
         requires_api_key=False,
+        provider_label="Ollama",
     )
 
     providers: dict[str, Provider] = {
         "openai": openai,
         "nebius": nebius,
         "groq": groq,
-        "claude-max": claude_max,
-        "claude-max-sonnet": claude_max_sonnet,
+        "claude": claude,
         "ollama": ollama,
     }
     return ProviderRegistry(

@@ -1,8 +1,13 @@
-"""Claude Max provider — primary mind, driven through the headless Claude CLI (ADR-004).
+"""Claude provider — primary mind, driven through the headless Claude CLI (ADR-004 / ADR-045).
 
 A Max subscription is not an API key: programmatic use goes through the Claude Agent SDK /
 CLI (OAuth), whose credentials live on a Docker volume and are established once with
 ``claude login`` (07-infrastructure.md).
+
+**One provider, N models (ADR-045).** The CLI takes a per-call ``--model`` flag, so a single
+provider instance serves every Claude model (Opus, Sonnet, …) — the registry passes the resolved
+model id per call. This replaces the former two fake provider ids over the one CLI: provider ≠
+model, and a fallback/error is a single ``claude`` provider event.
 
 **Health-guarded (ADR-012):** if the CLI is absent or not logged in, ``health()`` reports
 False and ``complete()`` raises :class:`ProviderUnavailable`, so the chain falls back to
@@ -17,7 +22,6 @@ import shutil
 import subprocess
 
 from .base import ChatMessage, ChatProvider, ProviderUnavailable
-from .labels import friendly_model_label
 
 
 def _render_prompt(messages: list[ChatMessage]) -> str:
@@ -33,27 +37,37 @@ def _render_prompt(messages: list[ChatMessage]) -> str:
     return "\n\n".join(parts)
 
 
-class ClaudeMaxProvider(ChatProvider):
+class ClaudeProvider(ChatProvider):
     # The CLI takes ``--effort`` natively, so a per-call effort (ADR-025 §4) is honored.
     supports_effort = True
-    # The CLI's ``--effort`` scale (ADR-025 §6, config comment on ``claude_max_effort``).
+    # The CLI's ``--effort`` scale (ADR-025 §6, config comment on ``claude_effort``).
     effort_levels = ("low", "medium", "high", "xhigh", "max")
 
     def __init__(
         self,
         *,
-        id: str = "claude-max",
-        model: str,
+        id: str = "claude",
+        models: list[str],
+        default_model: str | None = None,
         effort: str = "medium",
+        provider_label: str = "Claude",
         cli_path: str = "claude",
     ) -> None:
+        if not models:
+            raise ValueError("ClaudeProvider requires at least one model")
         self.id = id
-        # Friendly display name derived from the configured model (labels.py) — e.g.
-        # "claude-opus-4-8" -> "Claude Opus 4.8" (base.ChatProvider.label; 03-api §Chat/§Settings).
-        self.label = friendly_model_label(model)
-        self._model = model
+        # Friendly PROVIDER name for the ADR-044 Providers card (one row per provider — ADR-045 §6).
+        # Model display names are derived per model id by the registry (labels.py), not here.
+        self.provider_label = provider_label
+        # The vendor model strings this one provider serves via per-call ``--model`` (ADR-045).
+        self._models = list(models)
+        # The model used when a call passes no explicit ``model=`` (defaults to the first).
+        self._default_model = default_model or self._models[0]
         self._effort = effort
         self._cli_name = cli_path
+
+    def chat_model_ids(self) -> tuple[str, ...]:
+        return tuple(self._models)
 
     def _resolve_cli(self) -> str | None:
         return shutil.which(self._cli_name)
@@ -88,22 +102,22 @@ class ClaudeMaxProvider(ChatProvider):
     ) -> str:
         cli = self._resolve_cli()
         if cli is None:
-            raise ProviderUnavailable("claude-max: CLI not found on PATH")
+            raise ProviderUnavailable("claude: CLI not found on PATH")
         prompt = _render_prompt(messages)
         try:
             result = await asyncio.to_thread(
-                self._run_cli, cli, prompt, model or self._model, effort or self._effort
+                self._run_cli, cli, prompt, model or self._default_model, effort or self._effort
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise ProviderUnavailable(f"claude-max invocation failed: {exc}") from exc
+            raise ProviderUnavailable(f"claude invocation failed: {exc}") from exc
         if result.returncode != 0:
             # Most commonly: not logged in, or usage window exhausted. Fall back.
             raise ProviderUnavailable(
-                f"claude-max returned {result.returncode}: {result.stderr.strip()[:200]}"
+                f"claude returned {result.returncode}: {result.stderr.strip()[:200]}"
             )
         text = result.stdout.strip()
         if not text:
-            raise ProviderUnavailable("claude-max returned empty output")
+            raise ProviderUnavailable("claude returned empty output")
         return text
 
     @staticmethod

@@ -11,22 +11,33 @@ from app.migration_check import compute_head
 def test_planes_and_chains_parse_from_csv():
     s = Settings(
         planes="Professional, Personal , Ideas",
-        chat_chain="claude-max,nebius",
+        # Chains are MODEL ids now (ADR-045); CSV coercion is the same.
+        chat_chain="claude-opus-4-8,meta-llama/Llama-3.3-70B-Instruct",
         stt_chain="groq, openai",
         cors_origins="http://localhost:5173",
     )
     assert s.planes == ["Professional", "Personal", "Ideas"]
-    assert s.chat_chain == ["claude-max", "nebius"]
+    assert s.chat_chain == ["claude-opus-4-8", "meta-llama/Llama-3.3-70B-Instruct"]
     assert s.stt_chain == ["groq", "openai"]
     assert s.cors_origins == ["http://localhost:5173"]
 
 
 def test_stt_chain_and_effort_defaults():
-    # ADR-020 / M1 replan: Groq-primary STT chain + medium claude-max effort ship as defaults.
+    # ADR-020 / M1 replan: Groq-primary STT chain ships as default; ADR-045: one `claude_effort`
+    # scalar (medium) seeds effort for every routing group.
     s = Settings()
     assert s.stt_chain == ["groq", "openai"]
     assert s.groq_stt_model == "whisper-large-v3"
-    assert s.claude_max_effort == "medium"
+    assert s.claude_effort == "medium"
+
+
+def test_claude_model_scalars_and_chains_are_model_ids():
+    # ADR-045: named model scalars + seed chains hold the raw vendor model strings.
+    s = Settings()
+    assert s.claude_opus_model == "claude-opus-4-8"
+    assert s.claude_sonnet_model == "claude-sonnet-4-6"
+    assert s.chat_chain == ["claude-opus-4-8", "meta-llama/Llama-3.3-70B-Instruct"]
+    assert s.quick_chain == ["claude-sonnet-4-6", "meta-llama/Llama-3.3-70B-Instruct"]
 
 
 def test_list_values_pass_through_unchanged():
