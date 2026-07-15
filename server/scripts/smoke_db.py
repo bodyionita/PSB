@@ -165,6 +165,12 @@ async def check_model_routing_migration(db: Database) -> None:
                 "fallback": "nebius",
                 "effort_by_provider": {"claude-max": "high"},
             },
+            # conspect exercises a group where BOTH active and fallback remap (Claude→Claude).
+            "conspect": {
+                "active": "claude-max",
+                "fallback": "claude-max-sonnet",
+                "effort_by_provider": {"claude-max": "medium", "claude-max-sonnet": "low"},
+            },
             "quick": {
                 "active": "claude-max-sonnet",
                 "fallback": "nebius",
@@ -190,6 +196,11 @@ async def check_model_routing_migration(db: Database) -> None:
               got["chat"].get("effort_by_model") == {"claude-opus-4-8": "high"}
               and "effort_by_provider" not in got["chat"]
               and got["quick"]["effort_by_model"] == {"claude-sonnet-4-6": "low"}, str(got))
+        check("both active + fallback remap in one group (conspect)",
+              got["conspect"]["active"] == "claude-opus-4-8"
+              and got["conspect"]["fallback"] == "claude-sonnet-4-6"
+              and got["conspect"]["effort_by_model"]
+              == {"claude-opus-4-8": "medium", "claude-sonnet-4-6": "low"}, str(got))
 
         # Idempotent: a second pass over the already-migrated row changes nothing.
         async with db.transaction() as c:
@@ -236,6 +247,8 @@ async def check_model_routing_migration(db: Database) -> None:
         async with db.transaction() as c:
             await c.execute("DELETE FROM app_settings WHERE key = 'model_routing'")
             if backup is not None:
+                # backup is the text asyncpg returns for a jsonb column (no jsonb codec is
+                # registered) — cast back explicitly so the NOT NULL jsonb column accepts it.
                 await c.execute(
                     "INSERT INTO app_settings (key, value) VALUES ('model_routing', $1::jsonb)",
                     backup,
