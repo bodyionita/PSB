@@ -432,11 +432,16 @@ def _is_allowed_redirect(uri: str) -> bool:
         parts = urlsplit(uri)
     except ValueError:
         return False
-    if not parts.scheme or parts.scheme.lower() in _FORBIDDEN_REDIRECT_SCHEMES:
+    scheme = parts.scheme.lower() if parts.scheme else ""
+    if not scheme or scheme in _FORBIDDEN_REDIRECT_SCHEMES:
         return False
-    # An http/https redirect needs a host; a native custom scheme (com.app://cb) needs a body.
-    if parts.scheme.lower() in ("http", "https"):
+    if scheme == "https":
         return bool(parts.netloc)
+    if scheme == "http":
+        # OAuth 2.1: non-loopback redirects MUST use https. Plaintext http is allowed only for
+        # loopback (native/dev clients) so an intercepted redirect can't leak the code in the clear.
+        return (parts.hostname or "").lower() in ("localhost", "127.0.0.1", "::1")
+    # A native custom scheme (com.app://cb) needs a body.
     return bool(parts.netloc or parts.path)
 
 

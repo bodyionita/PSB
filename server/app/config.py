@@ -12,6 +12,10 @@ from typing import Annotated
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+# The shipped dev default for HMAC secrets. Fine for local dev; rejected at boot in production
+# (see Settings._check_production_secrets) so it can never silently protect a live surface.
+_INSECURE_SECRET_DEFAULT = "dev-insecure-change-me"
+
 
 def _split_csv(value: str | list[str]) -> list[str]:
     if isinstance(value, list):
@@ -42,7 +46,7 @@ class Settings(BaseSettings):
     # argon2id hash of the single login password. Generate via scripts/hash_password.py.
     api_password_hash: str = ""
     # Secret used to derive the stored (hashed) session token. Rotate => all sessions drop.
-    session_secret: str = "dev-insecure-change-me"
+    session_secret: str = _INSECURE_SECRET_DEFAULT
     session_ttl_days: int = 30
     session_cookie_name: str = "braindan_session"
     # Secure cookie flag. False for plain-http local dev; True behind Cloudflare/Caddy TLS.
@@ -360,7 +364,7 @@ class Settings(BaseSettings):
     # HMAC secret that hashes MCP access/refresh tokens + auth codes before DB storage — the MCP
     # analogue of `session_secret` (replaces 07-infra's static "MCP bearer-token secret"; the agent
     # never handles the real value, it lives only in deploy/.env). Rotating it drops all MCP tokens.
-    mcp_token_hmac_secret: str = "dev-insecure-change-me"
+    mcp_token_hmac_secret: str = _INSECURE_SECRET_DEFAULT
     # The single full-access scope an MCP connector is granted in M5 (read/write scope split is
     # deferred — ADR-046 §2). Advertised in discovery + bound onto every issued token.
     mcp_oauth_scope: str = "brain"
@@ -444,6 +448,30 @@ class Settings(BaseSettings):
         unknown = set(self.entity_like_types) - set(self.node_types)
         if unknown:
             raise ValueError(f"ENTITY_LIKE_TYPES not present in NODE_TYPES: {sorted(unknown)}")
+        return self
+
+    @model_validator(mode="after")
+    def _check_production_secrets(self) -> Settings:
+        # Fail-fast in production if a secret was never provisioned: an empty or the shipped
+        # dev-default value would otherwise boot silently and hash sessions / MCP tokens with a
+        # public, guessable key on an internet-facing surface (ADR-046 §2 security review). The
+        # real values live only in deploy/.env (CI-rendered) / env — never in git.
+        if self.environment == "production":
+            insecure = {"", _INSECURE_SECRET_DEFAULT}
+            offenders = [
+                name
+                for name, value in (
+                    ("SESSION_SECRET", self.session_secret),
+                    ("MCP_TOKEN_HMAC_SECRET", self.mcp_token_hmac_secret),
+                )
+                if value in insecure
+            ]
+            if offenders:
+                raise ValueError(
+                    "Refusing to boot in production with unset/insecure default secret(s): "
+                    + ", ".join(offenders)
+                    + " — set real values in deploy/.env (GitHub Actions secrets)."
+                )
         return self
 
 

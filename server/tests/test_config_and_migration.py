@@ -102,6 +102,20 @@ def test_vocabulary_guards_reject_bad_config():
         Settings(node_types="memory,person", entity_like_types="person,ghost")
 
 
+def test_production_rejects_insecure_default_secrets():
+    # Fail-fast guard (ADR-046 §2 security review): a prod boot on the shipped dev-default or an
+    # empty HMAC secret would hash sessions/MCP tokens with a public key — refuse it.
+    with pytest.raises(ValueError, match="SESSION_SECRET"):
+        Settings(environment="production", mcp_token_hmac_secret="real-secret")
+    with pytest.raises(ValueError, match="MCP_TOKEN_HMAC_SECRET"):
+        Settings(environment="production", session_secret="real-secret")
+    with pytest.raises(ValueError, match="MCP_TOKEN_HMAC_SECRET"):
+        Settings(environment="production", session_secret="real-secret", mcp_token_hmac_secret="")
+    # Real values in production, and the dev default outside production, both boot fine.
+    Settings(environment="production", session_secret="s3cret", mcp_token_hmac_secret="h4mac")
+    Settings(environment="development")
+
+
 def test_compute_head_is_migration_011():
     # M5 task 4 adds revision 011 (captures.source column, ADR-046 §4); head advances to it from
     # 010 (the MCP OAuth client/token tables).

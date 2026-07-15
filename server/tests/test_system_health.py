@@ -29,7 +29,14 @@ def _drill(status: str, *, age_days: float = 0.0) -> AgentRun:
 
 
 def _health(tmp_path: Path, store, *, environment: str = "production") -> SystemHealth:
-    settings = Settings(graph_store_path=str(tmp_path), environment=environment)
+    # session_secret/mcp_token_hmac_secret must be real in production (config boot guard); this
+    # test is about the backups health leg, so any non-default value suffices.
+    settings = Settings(
+        graph_store_path=str(tmp_path),
+        environment=environment,
+        session_secret="test-secret",
+        mcp_token_hmac_secret="test-secret",
+    )
     return SystemHealth(FakeDB(), settings, agent_runs=store)
 
 

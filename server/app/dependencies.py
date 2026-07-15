@@ -30,6 +30,21 @@ from .vocab.edge_consolidation import EdgeConsolidationService
 from .vocab.service import VocabularyService
 
 
+def client_ip(request: Request) -> str:
+    """Best-effort client IP for rate-limit keying.
+
+    Behind Cloudflare the trusted client address is ``CF-Connecting-IP`` — Cloudflare overwrites
+    it on every request, so a client cannot forge it. ``X-Forwarded-For`` is client-*appendable*
+    (the leftmost hop is attacker-controlled), so it is deliberately NOT used as the key: trusting
+    it would let an attacker mint a fresh rate-limit bucket per request and defeat the brute-force
+    guard on the login/consent password. Falls back to the peer socket for direct/dev access.
+    """
+    cf = request.headers.get("cf-connecting-ip")
+    if cf:
+        return cf.strip()
+    return request.client.host if request.client else "unknown"
+
+
 def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 

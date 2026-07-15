@@ -214,6 +214,23 @@ async def test_register_allows_native_custom_scheme(ctx):
     assert reg.client_id
 
 
+async def test_register_rejects_non_loopback_http(ctx):
+    # OAuth 2.1: non-loopback redirects must use https — plaintext http to a public host would
+    # leak the code in the clear (ADR-046 §2 security review).
+    service, _, _ = ctx
+    with pytest.raises(InvalidClientMetadata):
+        await service.register_client({"redirect_uris": ["http://evil.example/cb"]})
+
+
+async def test_register_allows_loopback_http(ctx):
+    # Loopback http stays valid for native/dev clients (nothing on the wire to intercept).
+    service, _, _ = ctx
+    reg = await service.register_client(
+        {"redirect_uris": ["http://127.0.0.1:8765/cb", "http://localhost/cb"]}
+    )
+    assert reg.client_id
+
+
 # --- /authorize validation -------------------------------------------------------------------
 
 

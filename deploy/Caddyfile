@@ -38,6 +38,11 @@
 		# Sensible security defaults; refine at provisioning if needed.
 		Referrer-Policy strict-origin-when-cross-origin
 		X-Content-Type-Options nosniff
+		# Clickjacking defense-in-depth for the whole origin — the OAuth consent/password page is
+		# the design's explicit choke point (ADR-046 §2 security review); nothing here is meant to
+		# be framed. SameSite=Lax already forces the password path in a cross-site frame.
+		X-Frame-Options DENY
+		Content-Security-Policy "frame-ancestors 'none'"
 		-Server
 	}
 }

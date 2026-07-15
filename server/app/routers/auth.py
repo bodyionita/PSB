@@ -5,19 +5,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from ..config import Settings
-from ..dependencies import get_auth_service, get_settings, require_session
+from ..dependencies import client_ip, get_auth_service, get_settings, require_session
 from ..models import LoginRequest, LoginResponse, MeResponse
 from ..services.auth_service import AuthService, InvalidCredentials, SessionInfo
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-
-def _client_ip(request: Request) -> str:
-    # Behind Cloudflare/Caddy the real client is in X-Forwarded-For; fall back to peer.
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
 
 
 def _set_session_cookie(response: Response, token: str, settings: Settings) -> None:
@@ -41,7 +33,7 @@ async def login(
     auth: AuthService = Depends(get_auth_service),
 ) -> LoginResponse:
     limiter = request.app.state.login_rate_limiter
-    if not limiter.allow(_client_ip(request)):
+    if not limiter.allow(client_ip(request)):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts. Try again shortly.",

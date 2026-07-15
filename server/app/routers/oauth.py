@@ -12,6 +12,7 @@ crypto, and DB touch is the service's.
 
 from __future__ import annotations
 
+import hmac
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from authlib.common.security import generate_token
@@ -19,7 +20,7 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ..config import Settings
-from ..dependencies import get_auth_service, get_oauth_service, get_settings
+from ..dependencies import client_ip, get_auth_service, get_oauth_service, get_settings
 from ..oauth.consent import render_consent_page, render_error_page
 from ..oauth.errors import AccessDenied, AuthorizeError, AuthorizeRedirectError, OAuthError
 from ..oauth.metadata import authorization_server_metadata, protected_resource_metadata
@@ -125,7 +126,7 @@ async def authorize_post(
     # CSRF: the double-submit cookie must match the hidden field (blocks cross-site auto-submit).
     cookie = request.cookies.get(CSRF_COOKIE)
     field = str(form.get("csrf_token") or "")
-    if not cookie or not field or cookie != field:
+    if not cookie or not field or not hmac.compare_digest(cookie, field):
         return HTMLResponse(
             render_error_page("Session expired", "Please restart the authorization from your app."),
             status_code=400,
@@ -149,7 +150,7 @@ async def authorize_post(
         )
 
     # Rate-limit the authenticated decision (reuses the login limiter — ADR-046 §2).
-    if not request.app.state.login_rate_limiter.allow(_client_ip(request)):
+    if not request.app.state.login_rate_limiter.allow(client_ip(request)):
         return HTMLResponse(
             render_error_page("Too many attempts", "Please wait a moment and try again."),
             status_code=429,
@@ -260,10 +261,3 @@ def _append_query(uri: str, extra: dict[str, str]) -> str:
     query = parse_qsl(parts.query, keep_blank_values=True)
     query.extend(extra.items())
     return urlunsplit(parts._replace(query=urlencode(query)))
-
-
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
