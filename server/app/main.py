@@ -25,8 +25,8 @@ from .entities.profile_store import PgProfileStore
 from .entities.resolver import EntityResolver
 from .entities.store import PgAliasStore
 from .graph.node_writer import NodeWriter
-from .graph.service import DerivedEdgeGraph
-from .graph.store import PgGraphStore
+from .graph.service import DerivedEdgeGraph, GraphService
+from .graph.store import PgGraphStore, PgNeighborStore
 from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
 from .migration_check import warn_if_behind_head
@@ -119,6 +119,13 @@ async def lifespan(app: FastAPI):
     # Search (ADR-022/026): the read side — node-grouped cosine over chunks + node detail w/ edges.
     app.state.search_service = SearchService(
         settings=settings, store=PgSearchStore(db), registry=app.state.registry
+    )
+
+    # Graph reads (M5 task 1, ADR-046/028/032): the cursor-paginated one-hop `traverse` primitive +
+    # `build_context` bundle. Thin over the edges table; reuses the search service for get_node. The
+    # MCP tools (task 4) + the M7 map endpoint delegate here — no traversal logic of their own.
+    app.state.graph_service = GraphService(
+        settings=settings, store=PgNeighborStore(db), nodes=app.state.search_service
     )
 
     # Chat (M4 task 3, ADR-025): grounded chat over the graph — condense → hybrid retrieval (via the

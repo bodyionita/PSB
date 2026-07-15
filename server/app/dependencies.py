@@ -12,7 +12,7 @@ from .chat.service import ChatService
 from .config import Settings
 from .db import Database
 from .entities.merge import MergeService
-from .graph.service import DerivedEdgeGraph
+from .graph.service import DerivedEdgeGraph, GraphService
 from .providers.registry import ProviderRegistry
 from .search.service import SearchService
 from .services.agent_runs import AgentRunStore
@@ -66,6 +66,10 @@ def get_chat_service(request: Request) -> ChatService:
 
 def get_derived_edge_graph(request: Request) -> DerivedEdgeGraph:
     return request.app.state.derived_edge_graph
+
+
+def get_graph_service(request: Request) -> GraphService:
+    return request.app.state.graph_service
 
 
 def get_reindex_service(request: Request) -> ReindexService:

@@ -25,6 +25,7 @@ from app.db import Database
 from app.entities.entity_store import PgEntityStore
 from app.entities.profile_store import PgProfileStore
 from app.entities.store import PgAliasStore
+from app.graph.store import PgNeighborStore
 from app.search.store import PgSearchStore, RetrievalParams
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
@@ -425,6 +426,37 @@ async def main() -> int:
               ALEX in [h.node_id for h in asof_hits]
               and MEM1 not in [h.node_id for h in asof_hits]
               and MEM2 not in [h.node_id for h in asof_hits], str([h.node_id for h in asof_hits]))
+
+        print("\n== PgNeighborStore (M5 task 1 — one-hop traverse: union/keyset/tombstone SQL) ==")
+        # Seeded graph: MEM1 -involves-> ALEX (canonical), ALEX -at-> PLACE (canonical),
+        # GHOST -similar-> MEM2 (derived; GHOST is tombstoned → its endpoints are hidden).
+        nbr = PgNeighborStore(db)
+        both = await nbr.neighbors(ALEX, rel=None, direction=None, after=None, limit=50)
+        # Ordered by (origin, rel, dir, node_id): PLACE (canonical/at/out) then MEM1 (involves/in).
+        check("neighbors(ALEX) both dirs, ordered, tombstone/derived-endpoint excluded",
+              [(e.node_id, e.dir, e.rel) for e in both]
+              == [(PLACE, "out", "at"), (MEM1, "in", "involves")], str(both))
+        check("neighbor carries endpoint type/plane (M7 render, no second fetch)",
+              both[0].type == "place" and both[0].plane == "personal", str(both[0]))
+        only_at = await nbr.neighbors(ALEX, rel="at", direction=None, after=None, limit=50)
+        check("rel filter 'at' -> PLACE only",
+              [e.node_id for e in only_at] == [PLACE], str(only_at))
+        inbound = await nbr.neighbors(ALEX, rel=None, direction="in", after=None, limit=50)
+        check("direction 'in' -> MEM1 only", [e.node_id for e in inbound] == [MEM1], str(inbound))
+        outbound = await nbr.neighbors(ALEX, rel=None, direction="out", after=None, limit=50)
+        check("direction 'out' -> PLACE only",
+              [e.node_id for e in outbound] == [PLACE], str(outbound))
+        # Tombstone exclusion on the OTHER end: MEM2's only edge comes from GHOST (merged) → hidden.
+        mem2 = await nbr.neighbors(MEM2, rel=None, direction=None, after=None, limit=50)
+        check("neighbors(MEM2) empty — derived edge's tombstoned src excluded", mem2 == [],
+              str(mem2))
+        # Keyset pagination drives the real (origin,rel,dir,node_id) > (…::uuid) tuple comparison.
+        pg1 = await nbr.neighbors(ALEX, rel=None, direction=None, after=None, limit=1)
+        check("page 1 (limit 1) -> PLACE", [e.node_id for e in pg1] == [PLACE], str(pg1))
+        after = (pg1[0].origin, pg1[0].rel, pg1[0].dir, pg1[0].node_id)
+        pg2 = await nbr.neighbors(ALEX, rel=None, direction=None, after=after, limit=1)
+        check("page 2 (keyset after PLACE) -> MEM1, no overlap",
+              [e.node_id for e in pg2] == [MEM1], str(pg2))
 
         print("\n== PgVocabularyStore (task-7a app_settings jsonb) ==")
         check("get_additions empty initially",

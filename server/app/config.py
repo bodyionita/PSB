@@ -303,6 +303,21 @@ class Settings(BaseSettings):
     # Bounded [0,1]: 1.0 disables the prior (every node at full recency), 0 lets it decay fully.
     search_recency_floor: float = Field(default=0.9, ge=0, le=1)
 
+    # --- Graph traverse / build_context (M5 task 1, 03-api §MCP, ADR-046/028/032). The one-hop
+    # `GraphService.neighbors` primitive backs MCP `traverse` + `GET /nodes/{id}/neighbors` (M7);
+    # `build_context` bundles get_node + a bounded neighbor tree. LLM context is finite, so reads
+    # are page- and fanout-capped. ---
+    # Default page size for a `neighbors`/`traverse` call when the request omits a limit; clamped to
+    # the ceiling below (a hub can have hundreds of edges — one page must never dump them all).
+    graph_neighbors_page_default: int = 25
+    graph_neighbors_page_max: int = 100
+    # `build_context` traversal caps: depth is hard-bounded at 2 (ADR-032, Basic-Memory pattern) and
+    # each visited node contributes at most `build_context_fanout` neighbors (the rest are flagged
+    # truncated, reachable via `traverse`). Depth 0 = the node + capsule only.
+    build_context_default_depth: int = 1
+    build_context_max_depth: int = 2
+    build_context_fanout: int = 10
+
     # --- Chat (M4 task 3, 04-pipelines §5, ADR-025). Interactive grounded chat over the graph. ---
     # Turns condensed into a standalone English query on turn ≥2 (04 §5). Also bounds how much
     # prior history is replayed into the answer prompt, so a long session can't bloat the context.

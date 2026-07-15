@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 from app.config import Settings
 from app.entities.store import EntityCandidate, normalize_alias
-from app.graph.store import SimilarEdge
+from app.graph.store import NeighborCursor, NeighborEdge, SimilarEdge
 from app.indexing.indexer import IndexOutcome
 from app.indexing.store import CanonicalEdge, IndexState, NodeUpsert
 from app.providers.base import (
@@ -21,6 +21,7 @@ from app.providers.base import (
     STTProvider,
 )
 from app.providers.registry import ProviderRegistry
+from app.search.service import NodePreview
 from app.search.store import NodeRow, RetrievalParams, SearchHit
 from app.services.agent_runs import RUNNING, AgentRun
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
@@ -296,6 +297,59 @@ class FakeGraphStore:
     async def replace_derived_edges(self, edges: list[SimilarEdge]) -> int:
         self.written = list(edges)
         return len(edges)
+
+
+class FakeNeighborStore:
+    """In-memory NeighborStore for GraphService tests — no live DB (08 testing policy).
+
+    ``edges`` maps a center node id to its 1-hop neighbors. It replicates the real store's
+    ``(origin, rel, dir, node_id)`` ordering + keyset paging + ``rel``/``direction`` filters so the
+    service's pagination/fanout logic is exercised end-to-end; ``calls`` records each invocation's
+    args for assertions."""
+
+    def __init__(self, *, edges: dict[str, list[NeighborEdge]] | None = None) -> None:
+        self._edges = edges or {}
+        self.calls: list[dict] = []
+
+    async def neighbors(
+        self,
+        node_id: str,
+        *,
+        rel: str | None,
+        direction: str | None,
+        after: NeighborCursor | None,
+        limit: int,
+    ) -> list[NeighborEdge]:
+        self.calls.append(
+            {
+                "node_id": node_id,
+                "rel": rel,
+                "direction": direction,
+                "after": after,
+                "limit": limit,
+            }
+        )
+        rows = sorted(
+            self._edges.get(node_id, []),
+            key=lambda e: (e.origin, e.rel, e.dir, e.node_id),
+        )
+        if rel is not None:
+            rows = [e for e in rows if e.rel == rel]
+        if direction is not None:
+            rows = [e for e in rows if e.dir == direction]
+        if after is not None:
+            rows = [e for e in rows if (e.origin, e.rel, e.dir, e.node_id) > after]
+        return rows[:limit]
+
+
+class FakeNodeReader:
+    """In-memory NodeReader for build_context tests — a preset NodePreview by id, else None."""
+
+    def __init__(self, *, nodes: dict[str, NodePreview] | None = None) -> None:
+        self._nodes = nodes or {}
+
+    async def get_node(self, node_id: str) -> NodePreview | None:
+        return self._nodes.get(node_id)
 
 
 class FakeTagStore:
