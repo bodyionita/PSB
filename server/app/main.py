@@ -31,6 +31,7 @@ from .identity.service import IdentityCapsuleService
 from .identity.store import PgCapsuleSourceStore, PgIdentityCapsuleStore
 from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
+from .mcp.server import build_mcp_server
 from .migration_check import warn_if_behind_head
 from .oauth.service import OAuthService
 from .oauth.store import PgOAuthStore
@@ -134,6 +135,9 @@ async def lifespan(app: FastAPI):
     # is" blob. The store is the cheap read side (build_context L0 + the chat system prompt below);
     # the distiller service owns the nightly/on-demand refresh (wired into the scheduler below).
     capsule_store = PgIdentityCapsuleStore(db)
+    # Exposed on app.state so the MCP `identity://me` resource (task 4) can read the capsule blob
+    # directly (up-front grounding without picking a node).
+    app.state.identity_capsule_store = capsule_store
     app.state.identity_capsule_service = IdentityCapsuleService(
         settings=settings,
         capsule_store=capsule_store,
@@ -321,25 +325,31 @@ async def lifespan(app: FastAPI):
         scheduler.start()
     app.state.scheduler = scheduler
 
-    try:
-        yield
-    finally:
-        # Stop scheduling new jobs first (a job may enqueue a vault commit), then drain any
-        # in-flight manual reindex + captures, flush the last pending commit, and drop the DB pool.
-        # (A nightly reindex runs in the scheduler executor like the other jobs — best-effort on a
-        # wait=False shutdown; it is idempotent and rule-7 wrapped, so a mid-flight one is safe.)
-        if scheduler is not None:
-            scheduler.shutdown()
-        await reindex_service.drain()
-        await reprocess_service.drain()
-        await app.state.tag_consolidation_service.drain()
-        await app.state.edge_consolidation_service.drain()
-        await app.state.merge_service.drain()
-        await app.state.chat_service.drain()
-        await app.state.identity_capsule_service.drain()
-        await pipeline.drain()
-        await store_backup.flush()
-        await db.disconnect()
+    # The MCP Streamable HTTP session manager (task 4) must run for the app's lifetime — it owns the
+    # transport's task group. Built + mounted in create_app; here we just enter its run() context so
+    # `/mcp` is live, and exit it on shutdown (before draining the rest).
+    mcp_manager = app.state.mcp_server.session_manager
+    async with mcp_manager.run():
+        try:
+            yield
+        finally:
+            # Stop scheduling new jobs first (a job may enqueue a vault commit), then drain any
+            # in-flight manual reindex + captures, flush the last pending commit, drop the DB pool.
+            # (A nightly reindex runs in the scheduler executor like the other jobs — best-effort on
+            # a wait=False shutdown; it is idempotent and rule-7 wrapped, so a mid-flight one is
+            # safe.)
+            if scheduler is not None:
+                scheduler.shutdown()
+            await reindex_service.drain()
+            await reprocess_service.drain()
+            await app.state.tag_consolidation_service.drain()
+            await app.state.edge_consolidation_service.drain()
+            await app.state.merge_service.drain()
+            await app.state.chat_service.drain()
+            await app.state.identity_capsule_service.drain()
+            await pipeline.drain()
+            await store_backup.flush()
+            await db.disconnect()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -379,6 +389,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # connector expects `/.well-known/oauth-*`, `/authorize`, `/token`, `/register` at the origin
     # (ADR-046 §2 / 03-api §MCP; Caddy proxies them to the api app — task 5).
     app.include_router(oauth.router)
+
+    # MCP server (task 4): Streamable HTTP mounted at the ROOT so the spec path `/mcp` resolves
+    # exactly (the SDK registers a Route at `/mcp`, avoiding a trailing-slash redirect that breaks
+    # connectors). Built here so the route is static; its tools + token verifier read services from
+    # app.state lazily (wired in the lifespan, which also runs the transport's session manager).
+    # Mounted LAST so the API/OAuth routes above take precedence; only `/mcp` + its
+    # `/.well-known/oauth-protected-resource/mcp` fall through to the sub-app.
+    mcp_server = build_mcp_server(app, settings)
+    app.state.mcp_server = mcp_server
+    app.mount("/", mcp_server.streamable_http_app())
 
     return app
 

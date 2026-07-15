@@ -21,6 +21,9 @@ dependencies = [
     # security-critical primitives; the flow orchestration lives over our own asyncpg store
     # (rule 5 / async), mirroring how session tokens are already handled by hand (security.py).
     "authlib>=1.3",
+    # Official MCP Python SDK (M5, ADR-046): the remote MCP server (FastMCP + Streamable HTTP
+    # transport) mounted under /mcp, gated by our OAuth resource server via its TokenVerifier.
+    "mcp>=1.28",
     # IANA tz database for zoneinfo (vault-facing local-time formatting) on platforms
     # without a system tzdata (e.g. Windows dev). Deterministic across dev/CI/prod.
     "tzdata>=2024.1",

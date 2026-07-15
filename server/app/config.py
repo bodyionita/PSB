@@ -373,6 +373,9 @@ class Settings(BaseSettings):
     # Authorization-code lifetime: very short + single-use (OAuth 2.1 SHOULD ≤ 10 min). The code is
     # exchanged for tokens within seconds of the redirect.
     mcp_auth_code_ttl_seconds: int = 300
+    # Max edges rendered inline on one node/neighbor in an MCP tool result (ADR-046 §3 hub guard) —
+    # beyond this a "N more; use traverse" pointer is emitted so a hub can't flood the LLM context.
+    mcp_inline_edge_cap: int = 20
 
     # --- Connectors ---
     slack_user_token: str = ""

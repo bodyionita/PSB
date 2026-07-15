@@ -84,6 +84,10 @@ from .store_backup import StoreBackup
 
 logger = logging.getLogger(__name__)
 
+# Node-frontmatter `source` for a capture created via the MCP `capture` tool (ADR-046 §4). The web
+# surfaces leave the capture `source` NULL and fall back to the kind (`text`/`voice`).
+SOURCE_MCP = "mcp"
+
 # Audio container extensions accepted by POST /capture/voice (03-api.md).
 ALLOWED_AUDIO_EXTS = frozenset({"m4a", "webm", "ogg", "mp3", "wav"})
 _ORPHAN_ERROR = "interrupted by restart"
@@ -202,6 +206,10 @@ class CapturePipeline:
         self._tz = ZoneInfo(settings.scheduler_tz)
         # Strong refs to in-flight background tasks so they are not GC'd mid-run.
         self._tasks: set[asyncio.Task] = set()
+        # MCP burst queue (ADR-046 §4 / ADR-031 #1): bounds how many MCP-source captures organize
+        # concurrently — beyond N the background processors wait their turn (the fast ack is
+        # unaffected). Web captures never take this semaphore, so the UI stays immediate.
+        self._mcp_burst = asyncio.Semaphore(max(1, settings.mcp_capture_max_inflight))
 
     # --- public API ---------------------------------------------------------------------
 
@@ -216,6 +224,34 @@ class CapturePipeline:
         )
         self._spawn(self._process(capture_id))
         return capture_id
+
+    async def create_mcp_capture(self, text: str) -> str:
+        """Create a capture from the MCP `capture` tool (ADR-046 §4): persist the raw text
+        (never-lose) tagged ``source=mcp``, then spawn a **burst-limited** background organize and
+        return the id immediately (fast ack — the tool tells the LLM to `search` to confirm). The
+        semaphore bounds concurrent MCP organizes without delaying the ack."""
+        capture_id = str(uuid.uuid4())
+        await self._store.create(
+            capture_id=capture_id,
+            kind=KIND_TEXT,
+            status=RECEIVED,
+            raw_text=text,
+            source=SOURCE_MCP,
+        )
+        self._spawn(self._process_burst_limited(capture_id))
+        return capture_id
+
+    async def _process_burst_limited(self, capture_id: str) -> None:
+        """Run ``_process`` under the MCP burst semaphore (ADR-031 #1) — the Nth+1 concurrent MCP
+        capture waits here for a slot, so a burst can't stampede the organizer."""
+        async with self._mcp_burst:
+            await self._process(capture_id)
+
+    @staticmethod
+    def _effective_source(record: CaptureRecord) -> str:
+        """The node-frontmatter ``source`` for a capture: its explicit ``source`` (``mcp``) if set,
+        else the capture kind (``text``/``voice``) — preserving the pre-M5 web behaviour."""
+        return record.source or record.kind
 
     async def create_voice_capture(self, audio: bytes, *, filename: str) -> str:
         if len(audio) > self._settings.audio_max_bytes:
@@ -277,7 +313,7 @@ class CapturePipeline:
             created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
                 organize, capture_id=capture_id, created_local=created_local,
-                source=record.kind, inter=inter,
+                source=self._effective_source(record), inter=inter,
             )
             await self._store.set_node_paths(capture_id, paths)
             await self._index_nodes(paths)
@@ -420,7 +456,7 @@ class CapturePipeline:
             created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
                 organize, capture_id=capture_id, created_local=created_local,
-                source=record.kind, inter=inter,
+                source=self._effective_source(record), inter=inter,
             )
             await self._store.set_node_paths(capture_id, paths)
             # `written` reflects nodes actually on disk (matters for a future retry-resume).
@@ -537,7 +573,7 @@ class CapturePipeline:
             created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
                 organize, capture_id=capture_id, created_local=created_local,
-                source=record.kind, inter=inter,
+                source=self._effective_source(record), inter=inter,
             )
             await self._store.set_node_paths(capture_id, paths)
             await self._store.mark_status(capture_id, WRITTEN)

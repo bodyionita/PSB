@@ -378,17 +378,6 @@ async def check_oauth(db: Database) -> None:
         )
         check("expired code -> None", (await store.consume_code("smoke_code_expired")) is None)
 
-        # invalidate_all_codes (revoke-all's code leg — review finding 2): a live code is consumed.
-        await store.create_code(
-            code_hash="smoke_code_pending", client_id=cid, redirect_uri="https://claude.ai/cb",
-            code_challenge="c", code_challenge_method="S256", scope="brain", resource=None,
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        )
-        invalidated = await store.invalidate_all_codes()
-        check("invalidate_all_codes consumes live codes", invalidated >= 1, f"n={invalidated}")
-        check("code no longer consumable after invalidate",
-              (await store.consume_code("smoke_code_pending")) is None)
-
         access_exp = datetime.now(UTC) + timedelta(hours=1)
         refresh_exp = datetime.now(UTC) + timedelta(days=60)
         tid = await store.create_token(
@@ -413,14 +402,13 @@ async def check_oauth(db: Database) -> None:
         check("revoke_token returns 1 then 0 (idempotent rowcount)",
               (await store.revoke_token("smoke_throwaway")) == 1
               and (await store.revoke_token("smoke_throwaway")) == 0)
-
-        n = await store.revoke_all()
-        check("revoke_all flags every live token (count = 2)", n == 2, f"revoked={n}")
-        after = await store.get_token("smoke_access")
-        check("token shows revoked_at after revoke-all", after is not None and after.revoked_at,
-              str(after))
-        again = await store.revoke_all()
-        check("revoke_all is idempotent (already-revoked not re-counted)", again == 0, f"n={again}")
+        gone = await store.get_token("smoke_throwaway")
+        check("revoked token carries revoked_at", gone is not None and gone.revoked_at is not None,
+              str(gone))
+        # NOTE: revoke_all() + invalidate_all_codes() are intentionally GLOBAL writes (the
+        # "revoke all MCP access" switch), so they are NOT smoked here against the shared dev DB —
+        # a global sweep would revoke real dev tokens. They share the `_rowcount` helper (exercised
+        # by revoke_token above) and trivial SQL, and are covered by the OAuth unit tests + E2E.
 
         # FK cascade: dropping the client removes its codes + tokens.
         await db.pool.execute("DELETE FROM mcp_oauth_clients WHERE client_id = $1", cid)

@@ -904,6 +904,7 @@ class FakeCaptureStore:
         raw_text: str | None = None,
         audio_path: str | None = None,
         created_at: datetime | None = None,
+        source: str | None = None,
     ) -> CaptureRecord:
         now = created_at or datetime.now(UTC)
         record = CaptureRecord(
@@ -914,6 +915,7 @@ class FakeCaptureStore:
             audio_path=audio_path,
             created_at=now,
             updated_at=now,
+            source=source,
         )
         self.records[capture_id] = record
         return record

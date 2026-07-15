@@ -153,6 +153,20 @@ async def test_text_capture_happy_path(tmp_path: Path):
     assert backup.reasons == [f"capture {cid}"]
 
 
+async def test_mcp_capture_tags_source_and_processes(tmp_path: Path):
+    # M5 task 4: create_mcp_capture stamps source=mcp on the capture + the written node frontmatter
+    # (so an MCP-driven capture is distinguishable), and still runs the full organize pipeline.
+    pipeline, store, _, _, root = _make_pipeline(tmp_path)
+    cid = await pipeline.create_mcp_capture("I had a calm, productive day.")
+    await pipeline.drain()
+
+    rec = store.records[cid]
+    assert rec.source == "mcp"
+    assert rec.status == INDEXED
+    node_text = (root / rec.node_paths[0]).read_text(encoding="utf-8")
+    assert "source: mcp" in node_text
+
+
 async def test_written_nodes_are_indexed_and_outcome_logged(tmp_path: Path):
     indexer = FakeIndexer()
     runs = FakeAgentRunStore()
