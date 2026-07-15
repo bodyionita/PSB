@@ -18,6 +18,7 @@ import type {
   ModelRoutingUpdate,
   NodeDetailResponse,
   PlanesResponse,
+  ProvidersResponse,
   ReviewChoice,
   ReviewItemResponse,
   ReviewVerdict,
@@ -153,6 +154,7 @@ export const api = {
     request<AgentRunResponse>(`/activity/runs/${encodeURIComponent(id)}`),
 
   // --- Admin (03-api.md §Agents & admin) ---
+  providers: () => request<ProvidersResponse>('/admin/providers'),
   reindex: () => request<RunAcceptedResponse>('/admin/reindex', { method: 'POST' }),
   backup: () => request<BackupResponse>('/admin/backup', { method: 'POST' }),
   proposeTags: () =>

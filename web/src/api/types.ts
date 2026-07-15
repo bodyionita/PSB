@@ -305,6 +305,31 @@ export interface BackupResponse {
   pushed: boolean;
 }
 
+// --- Provider observability (03-api.md §Admin, GET /admin/providers — M4 follow-up / ADR-044) ---
+export type ProviderCapability = 'chat' | 'stt' | 'embedding';
+
+// The last runtime failure for a provider — sticky (a later success does not clear it).
+export interface ProviderError {
+  message: string;
+  at: string;
+}
+
+// One provider row. `reachable` is a live `health()` probe — config-reachability, NOT a success
+// guarantee; the runtime truth is `last_error` (sticky) + `last_success_at` + `consecutive_failures`.
+export interface ProviderStatusItem {
+  id: string;
+  label: string;
+  capabilities: ProviderCapability[];
+  reachable: boolean;
+  last_error: ProviderError | null;
+  last_success_at: string | null;
+  consecutive_failures: number;
+}
+
+export interface ProvidersResponse {
+  providers: ProviderStatusItem[];
+}
+
 // One tag-merge group: fold `variants` into `canonical` (ADR-024). Shared by propose + apply.
 export interface TagMergeItem {
   canonical: string;

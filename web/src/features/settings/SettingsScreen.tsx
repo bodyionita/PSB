@@ -5,6 +5,7 @@ import { useTheme } from '../../theme/theme-context';
 import { THEME_ORDER, THEMES } from '../../theme/themes';
 import { useLogout, useMe } from '../auth/useAuth';
 import { ModelsPanel } from './ModelsPanel';
+import { ProvidersPanel } from './ProvidersPanel';
 import { VocabularyPanel } from './VocabularyPanel';
 
 function ThemeSwitcher() {
@@ -75,6 +76,8 @@ export function SettingsScreen() {
       <VocabularyPanel />
 
       <ModelsPanel />
+
+      <ProvidersPanel />
 
       <Surface>
         <h2 style={{ margin: '0 0 6px', fontSize: 16 }}>Session</h2>

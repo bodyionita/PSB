@@ -3,6 +3,7 @@ import { useState, type FormEvent } from 'react';
 import type { CaptureStatus, CaptureView } from '../../api/types';
 import { Surface } from '../../ui/Surface';
 import { typeIcon } from '../../ui/nodeTypes';
+import { relativeTime } from '../../ui/relativeTime';
 import { useCaptures, useRetryCapture, useSubmitFollowUp } from './useCaptures';
 
 // Recent captures strip with live pipeline status (06 §Capture). Polling lives in useCaptures.
@@ -22,18 +23,6 @@ const FAIL_COLOR = '#ff6b6b';
 
 function metaFor(status: CaptureStatus): { label: string; tone: Tone } {
   return STATUS_META[status] ?? { label: status, tone: 'progress' };
-}
-
-function relativeTime(iso: string | null): string {
-  if (!iso) return '';
-  const ms = Date.now() - new Date(iso).getTime();
-  const s = Math.round(ms / 1000);
-  if (s < 60) return 'just now';
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
 }
 
 // A store path is `<type>/<slug>--<shortid>.md` (an inbox-fallback node lives under `inbox/`).
