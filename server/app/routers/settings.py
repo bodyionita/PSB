@@ -68,6 +68,7 @@ def _group_model(g: GroupSettings) -> GroupRoutingModel:
         models=[
             RoutingModelItem(
                 id=m.id,
+                provider=m.provider,
                 label=m.label,
                 supports_effort=m.supports_effort,
                 effort_levels=m.effort_levels,

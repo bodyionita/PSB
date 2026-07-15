@@ -85,6 +85,11 @@ def test_get_settings_models_carry_effort_capability_and_exclude_non_chat():
     assert models[LLAMA]["supports_effort"] is False
     assert models[LLAMA]["effort_levels"] == []
     assert models[LLAMA]["label"] == "Llama 3.3 70B"
+    # Each model option carries its serving PROVIDER (derived — ADR-045 §1); both Claude models
+    # resolve to the one `claude` provider, Llama to `nebius`.
+    assert models[OPUS]["provider"] == "claude"
+    assert models[SONNET]["provider"] == "claude"
+    assert models[LLAMA]["provider"] == "nebius"
 
 
 # --- PUT /settings/models -------------------------------------------------------------------------

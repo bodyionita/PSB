@@ -235,11 +235,14 @@ class ChatSessionDetail(BaseModel):
 
 # --- Settings: model routing (03-api.md §Settings, ADR-025 / ADR-043) ---
 class RoutingModelItem(BaseModel):
-    """A pickable chat model for a routing group's dropdowns (GET /settings). ``effort_levels`` is
+    """A pickable chat model for a routing group's dropdowns (GET /settings). ``id`` is the MODEL id
+    (the raw vendor string) and ``provider`` is the id of the provider that serves it (derived —
+    ADR-045 §1; the routable unit is the model, the provider is an attribute). ``effort_levels`` is
     empty unless ``supports_effort`` — the web renders the effort selector only where it applies,
     from these registry-sourced levels (no hardcoded enums)."""
 
     id: str
+    provider: str
     label: str
     supports_effort: bool = False
     effort_levels: list[str] = Field(default_factory=list)
