@@ -464,7 +464,7 @@ class Settings(BaseSettings):
                     ("SESSION_SECRET", self.session_secret),
                     ("MCP_TOKEN_HMAC_SECRET", self.mcp_token_hmac_secret),
                 )
-                if value in insecure
+                if value.strip() in insecure  # strip so a whitespace-only value can't slip through
             ]
             if offenders:
                 raise ValueError(

@@ -126,7 +126,9 @@ async def authorize_post(
     # CSRF: the double-submit cookie must match the hidden field (blocks cross-site auto-submit).
     cookie = request.cookies.get(CSRF_COOKIE)
     field = str(form.get("csrf_token") or "")
-    if not cookie or not field or not hmac.compare_digest(cookie, field):
+    # Compare as bytes: hmac.compare_digest raises TypeError on non-ASCII str (a malformed cookie
+    # would then 500 instead of a clean 400). Still fail-closed + constant-time.
+    if not cookie or not field or not hmac.compare_digest(cookie.encode(), field.encode()):
         return HTMLResponse(
             render_error_page("Session expired", "Please restart the authorization from your app."),
             status_code=400,
