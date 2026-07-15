@@ -10,10 +10,12 @@ at the boundary, and never hold logic of their own. Auth is the task-3 OAuth res
 from __future__ import annotations
 
 from datetime import date
+from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl
 
@@ -67,6 +69,19 @@ def _parse_date(value: str | None, field: str) -> date | None:
 def build_mcp_server(app: FastAPI, settings: Settings) -> FastMCP:
     edge_cap = settings.mcp_inline_edge_cap
 
+    # DNS-rebinding protection (SDK default): FastMCP auto-allows only localhost, so behind the
+    # Caddy/Cloudflare edge the real `Host: <domain>` header is rejected with 421 Misdirected
+    # Request *after* a successful OAuth handshake. Allow the public host+origin derived from
+    # public_base_url (rule 9 — no hardcoded host); the `:*` port wildcards tolerate an explicit
+    # port on the Host/Origin. Protection stays ON (the edge fixes Host, but defense-in-depth).
+    _netloc = urlparse(settings.public_base_url).netloc  # e.g. braindan.cc / localhost:8000
+    _origin = settings.public_base_url.rstrip("/")
+    transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[_netloc, f"{_netloc}:*"],
+        allowed_origins=[_origin, f"{_origin}:*"],
+    )
+
     mcp = FastMCP(
         name=f"{settings.app_name} Brain",
         instructions=SERVER_INSTRUCTIONS,
@@ -76,6 +91,7 @@ def build_mcp_server(app: FastAPI, settings: Settings) -> FastMCP:
             resource_server_url=AnyHttpUrl(mcp_resource_id(settings)),
             required_scopes=[settings.mcp_oauth_scope],
         ),
+        transport_security=transport_security,
         stateless_http=True,
     )
 

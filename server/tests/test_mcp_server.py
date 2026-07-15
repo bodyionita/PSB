@@ -221,3 +221,19 @@ async def test_traverse_maps_invalid_direction():
     async with create_connected_server_and_client_session(mcp) as client:
         res = _text(await client.call_tool("traverse", {"id": NID, "direction": "sideways"}))
     assert "out, in, both" in res
+
+
+def test_transport_security_allows_the_public_host():
+    # Regression (M5 live deploy): FastMCP's default DNS-rebinding guard allows only localhost, so
+    # behind the Caddy/Cloudflare edge the real `Host: <domain>` was rejected with 421 *after* a
+    # successful OAuth handshake. build_mcp_server must derive allowed host+origin from
+    # public_base_url so the deployed surface accepts its own domain.
+    settings = Settings(public_base_url="https://braindan.cc", mcp_token_hmac_secret="x")
+    app = SimpleNamespace(state=SimpleNamespace(settings=settings, oauth_service=None))
+    mcp = build_mcp_server(app, settings)
+
+    sec = mcp.settings.transport_security
+    assert sec is not None and sec.enable_dns_rebinding_protection is True
+    assert "braindan.cc" in sec.allowed_hosts          # bare Host (edge sends no port)
+    assert "braindan.cc:*" in sec.allowed_hosts         # tolerate an explicit port
+    assert "https://braindan.cc" in sec.allowed_origins
