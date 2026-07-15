@@ -538,7 +538,8 @@ export function ChatScreen() {
   const allPlanes = planesQuery.data ? [...planesQuery.data.planes, planesQuery.data.inbox] : [];
 
   // A model id (persisted `chat_messages.model` / live `model_used`) → its friendly display label
-  // from the catalog (e.g. `claude-max` → "Claude Opus 4.8"); falls back to the raw id if unknown.
+  // from the catalog (e.g. `claude-opus-4-8` → "Claude Opus 4.8"; ADR-045); falls back to the raw
+  // id if unknown (incl. legacy provider-id rows the server folds server-side).
   const modelLabel = (id: string | null | undefined): string =>
     (id ? models?.models.find((m) => m.id === id)?.label : undefined) ?? id ?? '';
 

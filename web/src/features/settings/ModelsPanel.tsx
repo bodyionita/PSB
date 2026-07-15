@@ -140,28 +140,28 @@ function GroupCard({ group }: { group: GroupRoutingModel }) {
 
   const [active, setActive] = useState(group.active);
   const [fallback, setFallback] = useState(group.fallback);
-  const [effort, setEffort] = useState<Record<string, string>>(group.effort_by_provider);
+  const [effort, setEffort] = useState<Record<string, string>>(group.effort_by_model);
 
   // Re-seed the draft when the server value actually changes (after a save, or an external
   // refetch) — but not on every background refetch, so in-progress edits are never clobbered.
-  const signature = JSON.stringify([group.active, group.fallback, group.effort_by_provider]);
+  const signature = JSON.stringify([group.active, group.fallback, group.effort_by_model]);
   const lastSig = useRef<string | null>(null);
   useEffect(() => {
     if (lastSig.current === signature) return;
     lastSig.current = signature;
     setActive(group.active);
     setFallback(group.fallback);
-    setEffort(group.effort_by_provider);
+    setEffort(group.effort_by_model);
   }, [signature, group]);
 
   const payload = effortPayload(active, fallback, effort, byId);
   const dirty =
     active !== group.active ||
     fallback !== group.fallback ||
-    !recordsEqual(payload, group.effort_by_provider);
+    !recordsEqual(payload, group.effort_by_model);
 
   // The distinct selected models that carry an effort selector (usually just the active model;
-  // the fallback appears too when it's a second effort-capable model like claude-max-sonnet).
+  // the fallback appears too when it's a second effort-capable model like claude-sonnet-4-6).
   const effortModels = dedup([active, fallback])
     .map((id) => byId.get(id))
     .filter((m): m is RoutingModelItem => !!m && m.supports_effort);
@@ -171,7 +171,7 @@ function GroupCard({ group }: { group: GroupRoutingModel }) {
       group: group.group as ModelRoutingUpdate['group'],
       active,
       fallback,
-      effort_by_provider: payload,
+      effort_by_model: payload,
     };
     save.mutate(update);
   }

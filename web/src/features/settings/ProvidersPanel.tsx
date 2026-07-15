@@ -56,8 +56,8 @@ function ProviderRow({ provider }: { provider: ProviderStatusItem }) {
             flex: 'none',
           }}
         />
+        {/* Friendly provider name only — one row per provider, no raw id in the UI (ADR-045 §6). */}
         <span style={{ fontSize: 15, fontWeight: 700 }}>{provider.label}</span>
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>{provider.id}</span>
         <div style={{ display: 'flex', gap: 6, marginLeft: 'auto', flexWrap: 'wrap' }}>
           {provider.capabilities.map((c) => (
             <span key={c} style={chipStyle}>

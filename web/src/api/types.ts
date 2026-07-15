@@ -194,25 +194,29 @@ export interface ChatSessionDetail {
   messages: ChatMessageItem[];
 }
 
-// --- Settings → Models (03-api.md §Settings, M4 / ADR-025 / ADR-043) ---
-// One pickable chat model for a routing group's dropdowns. `effort_levels` is empty unless
-// `supports_effort` — the effort selector renders only where it applies, from these
+// --- Settings → Models (03-api.md §Settings, M4 / ADR-025 / ADR-043 / ADR-045) ---
+// One pickable chat model for a routing group's dropdowns. `id` is the MODEL id (the raw vendor
+// string, e.g. `claude-opus-4-8`) and `provider` is the id of the provider that serves it (derived
+// — ADR-045 §1; the routable unit is the model, the provider is an attribute). `effort_levels` is
+// empty unless `supports_effort` — the effort selector renders only where it applies, from these
 // registry-sourced levels (no hardcoded enums, ADR-025 §6).
 export interface RoutingModelItem {
   id: string;
+  provider: string;
   label: string;
   supports_effort: boolean;
   effort_levels: string[];
 }
 
 // One routing group's editable state (GET /settings): the effective active/fallback + per-model
-// effort (saved-over-seed) and the models the dropdowns choose from. `effort_by_provider` is keyed
-// by model id and carries an entry only for the effort-supporting models in {active, fallback}.
+// effort (saved-over-seed) and the models the dropdowns choose from. `active`/`fallback` and every
+// `effort_by_model` key are MODEL ids (ADR-045; carries an entry only for the effort-supporting
+// models in {active, fallback}).
 export interface GroupRoutingModel {
   group: string;
   active: string;
   fallback: string;
-  effort_by_provider: Record<string, string>;
+  effort_by_model: Record<string, string>;
   models: RoutingModelItem[];
 }
 
@@ -221,13 +225,14 @@ export interface SettingsResponse {
   groups: GroupRoutingModel[];
 }
 
-// PUT /settings/models — save one group's routing. `fallback` "" = none; `effort_by_provider`
+// PUT /settings/models — save one group's routing. `active`/`fallback`/`effort_by_model` keys are
+// model ids (ADR-045; was `effort_by_provider`/provider ids). `fallback` "" = none; `effort_by_model`
 // must carry a valid level for each effort-supporting model in {active, fallback} (422 otherwise).
 export interface ModelRoutingUpdate {
   group: 'chat' | 'conspect' | 'quick';
   active: string;
   fallback: string;
-  effort_by_provider: Record<string, string>;
+  effort_by_model: Record<string, string>;
 }
 
 // --- Types / vocabulary (03-api.md §Search & graph, §Settings, M3 / ADR-027) ---
