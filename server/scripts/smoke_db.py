@@ -275,6 +275,11 @@ async def cleanup(db: Database) -> None:
 
 
 async def main() -> int:
+    # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
+    # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     settings = Settings()
     db = Database(settings)
     await db.connect()
@@ -321,13 +326,18 @@ async def main() -> int:
         inbound = await ent.inbound_canonical_edges(ALEX)
         check("inbound_canonical_edges excludes tombstone src + derived",
               [e.src_id for e in inbound] == [MEM1], str(inbound))
-        listed = await ent.list_entities(types=["person", "place"])
-        check("list_entities excludes tombstone",
-              sorted(e.id for e in listed) == sorted([ALEX, PLACE]), str([e.id for e in listed]))
-        touched = await ent.entities_touched_since(
+        # list_entities / entities_touched_since are GLOBAL reads (not smoke-scoped), so assert the
+        # invariants as subsets — smoke live entities present, tombstone excluded — rather than
+        # exact equality, keeping the check honest against a dev DB that holds real entities
+        # (isolation promise in the module docstring).
+        listed = {e.id for e in await ent.list_entities(types=["person", "place"])}
+        check("list_entities includes live smoke entities, excludes tombstone",
+              {ALEX, PLACE} <= listed and GHOST not in listed, str(listed))
+        touched = {e.id for e in await ent.entities_touched_since(
             types=["person"], since=datetime.now(UTC) - timedelta(days=1)
-        )
-        check("entities_touched_since recent", [e.id for e in touched] == [ALEX], str(touched))
+        )}
+        check("entities_touched_since includes recent ALEX, excludes tombstone",
+              ALEX in touched and GHOST not in touched, str(touched))
         hood = await ent.neighborhood(ALEX)
         rels = sorted((h.dir, h.rel, h.node_id) for h in hood)
         check("neighborhood = in:involves(MEM1) + out:at(PLACE), tombstone/derived excluded",
