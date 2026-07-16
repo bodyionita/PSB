@@ -327,9 +327,7 @@ async def lifespan(app: FastAPI):
     # Auto-recorded registry (M6 task 4, ADR-048 §11/§12): backs the chat-scoped "recently auto-
     # recorded" audit list + the one-tap-remove op. The distiller's endorsed branch records into it;
     # the remove op tombstones the capture + deletes the content nodes (hubs preserved, ADR-038).
-    auto_recorded_store = PgAutoRecordedStore(
-        db, snippet_max=settings.search_snippet_max_chars
-    )
+    auto_recorded_store = PgAutoRecordedStore(db, snippet_max=settings.search_snippet_max_chars)
     app.state.auto_recorded_service = AutoRecordedService(
         settings=settings,
         store=auto_recorded_store,

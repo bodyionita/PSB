@@ -61,8 +61,7 @@ def upgrade() -> None:
     )
     # HNSW cosine index for similarity search (embedding dim fixed at 1536, ADR-004).
     op.execute(
-        "CREATE INDEX chunks_embedding_hnsw ON chunks "
-        "USING hnsw (embedding vector_cosine_ops)"
+        "CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops)"
     )
 
     # --- Operational state (not rebuildable) ---

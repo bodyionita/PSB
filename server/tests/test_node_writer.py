@@ -365,7 +365,8 @@ def test_writer_merge_methods_atomic(tmp_path: Path):
         loser.store_path, node_id="loser-1", node_type="person", survivor_id="survivor-2"
     )
     tomb = (tmp_path / Path(*loser.store_path.split("/"))).read_text(encoding="utf-8")
-    assert parse_node_metadata(
-        tomb, store_path=loser.store_path, fallback_created=CREATED
-    ).merged_into == "survivor-2"
+    assert (
+        parse_node_metadata(tomb, store_path=loser.store_path, fallback_created=CREATED).merged_into
+        == "survivor-2"
+    )
     assert not list((tmp_path / "person").glob(".*.tmp"))

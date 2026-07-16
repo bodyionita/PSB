@@ -57,12 +57,10 @@ def upgrade() -> None:
 
     # HNSW cosine indexes at the new 768 dimension (embedding_dim is a setting, ADR-022).
     op.execute(
-        "CREATE INDEX chunks_embedding_hnsw ON chunks "
-        "USING hnsw (embedding vector_cosine_ops)"
+        "CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops)"
     )
     op.execute(
-        "CREATE INDEX notes_embedding_hnsw ON notes "
-        "USING hnsw (embedding vector_cosine_ops)"
+        "CREATE INDEX notes_embedding_hnsw ON notes USING hnsw (embedding vector_cosine_ops)"
     )
 
 
@@ -74,6 +72,5 @@ def downgrade() -> None:
     op.execute("ALTER TABLE notes DROP COLUMN IF EXISTS embedding")
     op.execute("ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(1536)")
     op.execute(
-        "CREATE INDEX chunks_embedding_hnsw ON chunks "
-        "USING hnsw (embedding vector_cosine_ops)"
+        "CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops)"
     )

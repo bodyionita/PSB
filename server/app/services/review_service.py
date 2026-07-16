@@ -234,9 +234,7 @@ class ReviewService:
             except ReviewNotFound:
                 results.append(BatchItemResult(id=review_id, ok=False, error="not found"))
             except ReviewNotPending:
-                results.append(
-                    BatchItemResult(id=review_id, ok=False, error="already resolved")
-                )
+                results.append(BatchItemResult(id=review_id, ok=False, error="already resolved"))
             except BadResolution as exc:
                 results.append(BatchItemResult(id=review_id, ok=False, error=str(exc)))
             except Exception as exc:  # noqa: BLE001 — one bad item never aborts the batch (rule 7)
@@ -248,9 +246,7 @@ class ReviewService:
 
     # --- entity-ambiguity ---------------------------------------------------------------
 
-    async def _resolve_entity(
-        self, record: ReviewRecord, choice: str | None
-    ) -> tuple[str, dict]:
+    async def _resolve_entity(self, record: ReviewRecord, choice: str | None) -> tuple[str, dict]:
         if not choice:
             raise BadResolution("entity-ambiguity requires a 'choice'")
         if choice == "maybe":
@@ -407,10 +403,12 @@ class ReviewService:
         # substrate); cross-content-type merges are allowed (a near-dup the organizer typed memory
         # vs insight is still a dup — ADR-049 §6), so no type-equality check.
         await self._merge_core.fold(
-            loser=MergeTarget(id=loser.id, type=loser.type, title=loser.title,
-                              store_path=loser.store_path),
-            survivor=MergeTarget(id=surv.id, type=surv.type, title=surv.title,
-                                 store_path=surv.store_path),
+            loser=MergeTarget(
+                id=loser.id, type=loser.type, title=loser.title, store_path=loser.store_path
+            ),
+            survivor=MergeTarget(
+                id=surv.id, type=surv.type, title=surv.title, store_path=surv.store_path
+            ),
             reason=f"dedup merge {loser.id} → {surv.id}",
         )
         return STATUS_RESOLVED, {"action": "merge", "survivor": survivor_id, "loser": loser_id}

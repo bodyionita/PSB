@@ -131,9 +131,7 @@ class PipelineScheduler:
                 logger.warning("pipeline %s: no wired steps, not scheduled", defn.name)
                 continue
             effective = replace(defn, steps=present)
-            runner = PipelineRunner(
-                definition=effective, step_funcs=funcs, run_store=self._runs
-            )
+            runner = PipelineRunner(definition=effective, step_funcs=funcs, run_store=self._runs)
             runners.append((effective, runner))
         return runners
 

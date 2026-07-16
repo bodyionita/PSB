@@ -77,9 +77,7 @@ class CaptureStore(Protocol):
 
     async def list_recent(self, limit: int) -> list[CaptureRecord]: ...
 
-    async def list_inbox_materialized(
-        self, *, folder: str, limit: int
-    ) -> list[CaptureRecord]:
+    async def list_inbox_materialized(self, *, folder: str, limit: int) -> list[CaptureRecord]:
         """Captures still materialized as an ``inbox/`` fallback — any ``node_paths`` element under
         ``<folder>/`` — and NOT one-tap-removed (``removed_at IS NULL``). The nightly inbox drainer
         (ADR-048 §10) re-organizes these; oldest-first + ``limit`` bound one run. Status-agnostic: a
@@ -183,9 +181,7 @@ class PgCaptureStore:
             )
         return [_record(r) for r in rows]
 
-    async def list_inbox_materialized(
-        self, *, folder: str, limit: int
-    ) -> list[CaptureRecord]:
+    async def list_inbox_materialized(self, *, folder: str, limit: int) -> list[CaptureRecord]:
         # `EXISTS (unnest … LIKE folder/%)`: any node_path under the inbox folder marks an
         # organize-fallback capture. `removed_at IS NULL` excludes one-tap-removed captures (the
         # same replay exclusion reprocess applies). Oldest-first so the longest-waiting drain first.

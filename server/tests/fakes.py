@@ -231,9 +231,7 @@ class FakeSearchStore:
     """In-memory SearchStore for search-service tests — no live DB. Returns preset hits/node and
     records the exact search arguments so a test can assert clamping / filter handling."""
 
-    def __init__(
-        self, *, hits: list[SearchHit] | None = None, node: NodeRow | None = None
-    ) -> None:
+    def __init__(self, *, hits: list[SearchHit] | None = None, node: NodeRow | None = None) -> None:
         self._hits = hits or []
         self._node = node
         self.search_args: dict | None = None
@@ -781,9 +779,7 @@ class FakeChatStore:
         msgs = list(self.messages.get(session_id, []))
         return msgs[-limit:] if limit is not None else msgs
 
-    async def add_message(
-        self, session_id, *, role, content, model=None, sources=None
-    ) -> str:
+    async def add_message(self, session_id, *, role, content, model=None, sources=None) -> str:
         mid = self._next("msg")
         self.messages.setdefault(session_id, []).append(
             self._ChatMessageRecord(
@@ -818,9 +814,7 @@ class FakeRetriever:
         self._down = down
         self.calls: list[dict] = []
 
-    async def search(
-        self, query, *, top_k=None, planes=None, min_score=None
-    ) -> list[SearchHit]:
+    async def search(self, query, *, top_k=None, planes=None, min_score=None) -> list[SearchHit]:
         self.calls.append(
             {"query": query, "top_k": top_k, "planes": planes, "min_score": min_score}
         )
@@ -942,9 +936,7 @@ class FakeCaptureStore:
         )
         return ordered[:limit]
 
-    async def list_inbox_materialized(
-        self, *, folder: str, limit: int
-    ) -> list[CaptureRecord]:
+    async def list_inbox_materialized(self, *, folder: str, limit: int) -> list[CaptureRecord]:
         prefix = f"{folder}/"
         matching = [
             r
@@ -995,9 +987,7 @@ class FakeCapsuleStore:
     ``raise_on_read`` flips ``current`` into a raising read so the build_context / chat best-effort
     (rule 7) paths can be exercised. Starts empty (``current`` → None) unless ``blob`` is preset."""
 
-    def __init__(
-        self, *, blob: CapsuleBlob | None = None, raise_on_read: bool = False
-    ) -> None:
+    def __init__(self, *, blob: CapsuleBlob | None = None, raise_on_read: bool = False) -> None:
         self.blob = blob
         self.saved: list[CapsuleBlob] = []
         self.raise_on_read = raise_on_read
@@ -1031,9 +1021,9 @@ class FakeChatDistillStore:
         self._messages = dict(messages or {})  # session_id -> list[ChatMessageRecord]
         # Which session ids exist (for `session_state` → None means 404). Defaults to the union of
         # the preset roster + any session with messages, so most tests need not pass it explicitly.
-        self._known = set(known or set()) | set(self._messages) | {
-            s.session_id for s in self._sessions
-        }
+        self._known = (
+            set(known or set()) | set(self._messages) | {s.session_id for s in self._sessions}
+        )
         # Per-session watermark for the on-demand `session_state` path; `advance_watermark` updates
         # it in place so a remember-then-remember test sees the delta shrink (idempotency).
         self._watermarks: dict = dict(watermarks or {})
@@ -1053,9 +1043,7 @@ class FakeChatDistillStore:
         if session_id not in self._known:
             return None
         msgs = self._messages.get(session_id, [])
-        newest = max(
-            (m.created_at for m in msgs if m.created_at is not None), default=None
-        )
+        newest = max((m.created_at for m in msgs if m.created_at is not None), default=None)
         return SessionDistillState(
             session_id=session_id,
             watermark=self._watermarks.get(session_id),

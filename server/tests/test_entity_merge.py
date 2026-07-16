@@ -175,11 +175,14 @@ async def test_apply_skips_missing_source_file(tmp_path: Path):
     assert runs.runs[run_id].status == "succeeded"
     assert runs.runs[run_id].details["sources_skipped"] == 1
     # The loser is still tombstoned even though a source was skipped.
-    assert parse_node_metadata(
-        (tmp_path / Path(*loser_path.split("/"))).read_text("utf-8"),
-        store_path=loser_path,
-        fallback_created=CREATED,
-    ).merged_into == "surv-2"
+    assert (
+        parse_node_metadata(
+            (tmp_path / Path(*loser_path.split("/"))).read_text("utf-8"),
+            store_path=loser_path,
+            fallback_created=CREATED,
+        ).merged_into
+        == "surv-2"
+    )
 
 
 @pytest.mark.asyncio

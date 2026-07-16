@@ -51,10 +51,10 @@ _STYLE = """
 
 def _page(title: str, body: str) -> str:
     return (
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{escape(title)}</title><style>{_STYLE}</style></head>"
-        f"<body><div class=\"card\">{body}</div></body></html>"
+        f'<body><div class="card">{body}</div></body></html>'
     )
 
 
@@ -63,7 +63,7 @@ def render_error_page(title: str, message: str) -> str:
     ``redirect_uri`` / unknown client)."""
     return _page(
         title,
-        f"<h1>{escape(title)}</h1><p class=\"sub\">{escape(message)}</p>",
+        f'<h1>{escape(title)}</h1><p class="sub">{escape(message)}</p>',
     )
 
 
@@ -80,35 +80,34 @@ def render_consent_page(
     """The Approve/Deny consent form. ``fields`` are the carried authorization-request params;
     ``needs_password`` adds the password field when there is no valid PWA session."""
     hidden = "".join(
-        f"<input type=\"hidden\" name=\"{escape(name)}\" "
-        f"value=\"{escape(fields.get(name, '') or '')}\">"
+        f'<input type="hidden" name="{escape(name)}" value="{escape(fields.get(name, "") or "")}">'
         for name in CARRIED_FIELDS
     )
-    hidden += f"<input type=\"hidden\" name=\"csrf_token\" value=\"{escape(csrf_token)}\">"
+    hidden += f'<input type="hidden" name="csrf_token" value="{escape(csrf_token)}">'
 
-    error_html = f"<p class=\"err\">{escape(error)}</p>" if error else ""
+    error_html = f'<p class="err">{escape(error)}</p>' if error else ""
     password_html = ""
     if needs_password:
         password_html = (
-            "<label for=\"password\">Password</label>"
-            "<input id=\"password\" type=\"password\" name=\"password\" "
-            "autocomplete=\"current-password\" autofocus>"
+            '<label for="password">Password</label>'
+            '<input id="password" type="password" name="password" '
+            'autocomplete="current-password" autofocus>'
         )
 
     body = (
         f"<h1>Connect to {escape(app_name)}</h1>"
-        f"<p class=\"sub\"><strong>{escape(client_name)}</strong> is requesting access to your "
+        f'<p class="sub"><strong>{escape(client_name)}</strong> is requesting access to your '
         f"second brain.</p>"
-        f"<div class=\"scope\">Grants: <strong>{escape(scope)}</strong> — read your graph and "
+        f'<div class="scope">Grants: <strong>{escape(scope)}</strong> — read your graph and '
         f"capture new memories.</div>"
         f"{error_html}"
-        "<form method=\"post\" action=\"/authorize\">"
+        '<form method="post" action="/authorize">'
         f"{hidden}"
         f"{password_html}"
-        "<div class=\"row\">"
-        "<button class=\"deny\" type=\"submit\" name=\"decision\" value=\"deny\">Deny</button>"
-        "<button class=\"approve\" type=\"submit\" name=\"decision\" "
-        "value=\"approve\">Approve</button>"
+        '<div class="row">'
+        '<button class="deny" type="submit" name="decision" value="deny">Deny</button>'
+        '<button class="approve" type="submit" name="decision" '
+        'value="approve">Approve</button>'
         "</div>"
         "</form>"
     )

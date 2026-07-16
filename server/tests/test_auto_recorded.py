@@ -100,8 +100,11 @@ async def test_remove_deletes_content_node_preserves_hub_and_tombstones(tmp_path
     backup = FakeStoreBackup()
     svc = _service(
         tmp_path,
-        captures={cid: _capture(cid, node_paths=["memory/2026-07-16--decided--m1.md",
-                                                 "person/andrei--p1.md"])},
+        captures={
+            cid: _capture(
+                cid, node_paths=["memory/2026-07-16--decided--m1.md", "person/andrei--p1.md"]
+            )
+        },
         store=store,
         delete=delete,
         backup=backup,
@@ -143,8 +146,11 @@ async def test_remove_tombstones_after_deleting(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_remove_unknown_capture_is_404(tmp_path: Path):
     svc = _service(
-        tmp_path, captures={}, store=FakeAutoRecordedStore(),
-        delete=_FakeDeleteStore(), backup=FakeStoreBackup(),
+        tmp_path,
+        captures={},
+        store=FakeAutoRecordedStore(),
+        delete=_FakeDeleteStore(),
+        backup=FakeStoreBackup(),
     )
     with pytest.raises(AutoRecordNotFound):
         await svc.remove("nope")
@@ -158,7 +164,9 @@ async def test_remove_already_removed_is_404(tmp_path: Path):
     svc = _service(
         tmp_path,
         captures={cid: _capture(cid, node_paths=["memory/m3.md"], removed=True)},
-        store=store, delete=_FakeDeleteStore(), backup=FakeStoreBackup(),
+        store=store,
+        delete=_FakeDeleteStore(),
+        backup=FakeStoreBackup(),
     )
     with pytest.raises(AutoRecordNotFound):
         await svc.remove(cid)
@@ -173,7 +181,8 @@ async def test_remove_non_auto_recorded_is_404(tmp_path: Path):
         tmp_path,
         captures={cid: _capture(cid, node_paths=["memory/m4.md"])},
         store=FakeAutoRecordedStore(),  # empty registry → not recorded
-        delete=_FakeDeleteStore(), backup=FakeStoreBackup(),
+        delete=_FakeDeleteStore(),
+        backup=FakeStoreBackup(),
     )
     with pytest.raises(AutoRecordNotFound):
         await svc.remove(cid)
@@ -191,7 +200,9 @@ async def test_remove_still_prunes_db_rows_when_files_already_gone(tmp_path: Pat
     svc = _service(
         tmp_path,
         captures={cid: _capture(cid, node_paths=["memory/gone.md"])},
-        store=store, delete=delete, backup=FakeStoreBackup(),
+        store=store,
+        delete=delete,
+        backup=FakeStoreBackup(),
     )
     await svc.remove(cid)
     assert delete.deleted == [["memory/gone.md"]]  # DB delete runs even though the file was absent
@@ -206,9 +217,13 @@ async def test_list_recent_caps_limit_and_forwards_entity_types(tmp_path: Path):
     store = FakeAutoRecordedStore()
     settings = Settings(entity_like_types=["person", "idea"], chat_auto_recorded_list_max=100)
     svc = AutoRecordedService(
-        settings=settings, store=store, captures=_FakeCaptures({}),
-        index_store=_FakeDeleteStore(), node_writer=NodeWriter(str(tmp_path / "s")),
-        store_backup=FakeStoreBackup(), vocab=None,
+        settings=settings,
+        store=store,
+        captures=_FakeCaptures({}),
+        index_store=_FakeDeleteStore(),
+        node_writer=NodeWriter(str(tmp_path / "s")),
+        store_backup=FakeStoreBackup(),
+        vocab=None,
     )
     await svc.list_recent(9999)  # over the cap → clamped
     await svc.list_recent(None)  # default → the cap

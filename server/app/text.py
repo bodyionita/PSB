@@ -20,13 +20,20 @@ import unicodedata
 # through, and documents the intended target letters (ADR-041 §1).
 _ROMANIAN_FOLD = str.maketrans(
     {
-        "ă": "a", "Ă": "A",
-        "â": "a", "Â": "A",
-        "î": "i", "Î": "I",
-        "ș": "s", "Ș": "S",
-        "ț": "t", "Ț": "T",
-        "ş": "s", "Ş": "S",  # cedilla variants (legacy Unicode)
-        "ţ": "t", "Ţ": "T",
+        "ă": "a",
+        "Ă": "A",
+        "â": "a",
+        "Â": "A",
+        "î": "i",
+        "Î": "I",
+        "ș": "s",
+        "Ș": "S",
+        "ț": "t",
+        "Ț": "T",
+        "ş": "s",
+        "Ş": "S",  # cedilla variants (legacy Unicode)
+        "ţ": "t",
+        "Ţ": "T",
     }
 )
 

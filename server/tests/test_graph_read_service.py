@@ -262,9 +262,7 @@ async def test_build_context_cycle_guard_does_not_reexpand():
 async def test_build_context_serves_identity_capsule_as_l0():
 
     capsule = FakeCapsuleStore(blob=CapsuleBlob(text="The user builds a second brain."))
-    service, _, _ = _service(
-        nodes={"c1": _preview()}, edges={"c1": [_edge("p2")]}, capsule=capsule
-    )
+    service, _, _ = _service(nodes={"c1": _preview()}, edges={"c1": [_edge("p2")]}, capsule=capsule)
     # Present at depth 0 (node + capsule only) and when the tree is expanded.
     ctx0 = await service.build_context("c1", depth=0)
     assert ctx0 is not None and ctx0.identity_capsule == "The user builds a second brain."
@@ -283,9 +281,7 @@ async def test_build_context_omits_capsule_when_absent():
 async def test_build_context_survives_a_failing_capsule_read():
 
     capsule = FakeCapsuleStore(raise_on_read=True)  # read boom — must not fail the bundle (rule 7)
-    service, _, _ = _service(
-        nodes={"c1": _preview()}, edges={"c1": [_edge("p2")]}, capsule=capsule
-    )
+    service, _, _ = _service(nodes={"c1": _preview()}, edges={"c1": [_edge("p2")]}, capsule=capsule)
     ctx = await service.build_context("c1", depth=1)
     assert ctx is not None
     assert ctx.identity_capsule is None  # omitted, best-effort

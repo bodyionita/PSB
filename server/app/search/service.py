@@ -92,9 +92,7 @@ class SearchService:
             rrf_k=self._settings.search_rrf_k,
             recency_half_life_days=self._settings.search_recency_half_life_days,
             recency_floor=self._settings.search_recency_floor,
-            min_score=(
-                min_score if min_score is not None else self._settings.search_min_score
-            ),
+            min_score=(min_score if min_score is not None else self._settings.search_min_score),
             planes=planes or None,  # an empty filter list means "no filter"
             types=types or None,
             since=since,

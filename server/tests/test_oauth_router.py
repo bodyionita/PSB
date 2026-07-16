@@ -52,7 +52,7 @@ def _build(*, auth: FakeAuth | None = None, limiter: RateLimiter | None = None):
     app.state.login_rate_limiter = limiter or RateLimiter(max_events=100, window_seconds=60.0)
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_oauth_service] = lambda: service
-    app.dependency_overrides[get_auth_service] = lambda: (auth or FakeAuth())
+    app.dependency_overrides[get_auth_service] = lambda: auth or FakeAuth()
     return TestClient(app), service
 
 

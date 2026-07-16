@@ -38,9 +38,7 @@ class InboxCaptureReader(Protocol):
     """The narrow slice of the capture store the drainer reads: the inbox-materialized captures to
     re-organize, plus a by-id re-fetch to see whether a reorganize resolved out of ``inbox/``."""
 
-    async def list_inbox_materialized(
-        self, *, folder: str, limit: int
-    ) -> list[CaptureRecord]: ...
+    async def list_inbox_materialized(self, *, folder: str, limit: int) -> list[CaptureRecord]: ...
 
     async def get(self, capture_id: str) -> CaptureRecord | None: ...
 

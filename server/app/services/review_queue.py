@@ -129,9 +129,7 @@ class ReviewReadStore(Protocol):
         """One review item by id, or ``None`` if unknown."""
         ...
 
-    async def resolve(
-        self, review_id: str, *, status: str, resolution: dict[str, Any]
-    ) -> bool:
+    async def resolve(self, review_id: str, *, status: str, resolution: dict[str, Any]) -> bool:
         """Transition a still-**decidable** item (``pending`` or the re-openable ``maybe`` — ADR-048
         §7) to ``status`` + record ``resolution``. Guarded on those two, so a decide on a terminal
         (``resolved``/``discarded``) row is a no-op; returns whether a row transitioned."""
@@ -209,13 +207,10 @@ class PgReviewQueue:
                 STATUS_MAYBE,
             )
         return [
-            MaybeKindStat(kind=r["kind"], count=r["n"], oldest_created_at=r["oldest"])
-            for r in rows
+            MaybeKindStat(kind=r["kind"], count=r["n"], oldest_created_at=r["oldest"]) for r in rows
         ]
 
-    async def resolve(
-        self, review_id: str, *, status: str, resolution: dict[str, Any]
-    ) -> bool:
+    async def resolve(self, review_id: str, *, status: str, resolution: dict[str, Any]) -> bool:
         async with self._db.acquire() as conn:
             # Decidable = pending ∪ maybe (ADR-048 §7): a parked `maybe` re-opens to agree/disagree.
             # resolved/discarded are terminal — a decide on one matches no row (no-op → 409 above).

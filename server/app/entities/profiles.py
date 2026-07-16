@@ -123,8 +123,8 @@ Write in this shape:
 Keep it tight and factual. Reply with the profile text only, no preamble."""
 
 _FULL_EXTRA = (
-    "\n- then a short \"Themes:\" line (recurring threads across the observations);\n"
-    "- then an \"Open threads:\" line (anything unresolved or in progress)."
+    '\n- then a short "Themes:" line (recurring threads across the observations);\n'
+    '- then an "Open threads:" line (anything unresolved or in progress).'
 )
 
 
@@ -163,9 +163,7 @@ class ProfilePlan:
         return self.tier in (TIER_SNAPSHOT, TIER_FULL)
 
 
-def plan_profile(
-    neighbors: list[Neighbor], *, snapshot_min: int, full_min: int
-) -> ProfilePlan:
+def plan_profile(neighbors: list[Neighbor], *, snapshot_min: int, full_min: int) -> ProfilePlan:
     """Tier + mechanical observations + neighborhood hash for an entity (no I/O). Degree = the count
     of distinct connected neighbors."""
     observations = mechanical_observations(neighbors)

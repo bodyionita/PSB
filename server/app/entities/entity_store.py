@@ -137,9 +137,7 @@ class PgEntityStore:
                 node_id,
             )
         return [
-            InboundEdge(
-                src_id=str(r["src_id"]), src_store_path=r["src_store_path"], rel=r["rel"]
-            )
+            InboundEdge(src_id=str(r["src_id"]), src_store_path=r["src_store_path"], rel=r["rel"])
             for r in rows
         ]
 
@@ -158,9 +156,7 @@ class PgEntityStore:
             )
         return [_to_ref(r) for r in rows]
 
-    async def entities_touched_since(
-        self, *, types: list[str], since: datetime
-    ) -> list[EntityRef]:
+    async def entities_touched_since(self, *, types: list[str], since: datetime) -> list[EntityRef]:
         if not types:
             return []
         async with self._db.acquire() as conn:

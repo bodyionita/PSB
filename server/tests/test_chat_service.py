@@ -212,9 +212,7 @@ async def test_fallback_used_is_surfaced_and_recorded():
     fallback = FakeChatProvider("chat-fallback", reply="from fallback")
     service, store, _, providers = _make(answer="x", hits=[], extra={"chat-fallback": fallback})
     providers["chat-p"]._available = False
-    await service._routing.save(
-        "chat", GroupRouting(active="chat-p", fallback="chat-fallback")
-    )
+    await service._routing.save("chat", GroupRouting(active="chat-p", fallback="chat-fallback"))
 
     result = await service.send("hi")
     await service.drain()

@@ -62,13 +62,26 @@ class FakeStore:
         return self.clients.get(client_id)
 
     async def create_code(
-        self, *, code_hash, client_id, redirect_uri, code_challenge,
-        code_challenge_method, scope, resource, expires_at,
+        self,
+        *,
+        code_hash,
+        client_id,
+        redirect_uri,
+        code_challenge,
+        code_challenge_method,
+        scope,
+        resource,
+        expires_at,
     ) -> None:
         self.codes[code_hash] = dict(
-            client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-            code_challenge_method=code_challenge_method, scope=scope, resource=resource,
-            expires_at=expires_at, consumed_at=None,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+            scope=scope,
+            resource=resource,
+            expires_at=expires_at,
+            consumed_at=None,
         )
 
     async def consume_code(self, code_hash):
@@ -77,10 +90,12 @@ class FakeStore:
             return None
         row["consumed_at"] = self._now()
         return AuthCodeRecord(
-            client_id=row["client_id"], redirect_uri=row["redirect_uri"],
+            client_id=row["client_id"],
+            redirect_uri=row["redirect_uri"],
             code_challenge=row["code_challenge"],
             code_challenge_method=row["code_challenge_method"],
-            scope=row["scope"], resource=row["resource"],
+            scope=row["scope"],
+            resource=row["resource"],
         )
 
     async def consumed_code_client(self, code_hash):
@@ -91,8 +106,13 @@ class FakeStore:
         self._seq += 1
         tid = f"tok-{self._seq}"
         self.tokens[token_hash] = dict(
-            id=tid, client_id=client_id, kind=kind, scope=scope, resource=resource,
-            expires_at=expires_at, revoked_at=None,
+            id=tid,
+            client_id=client_id,
+            kind=kind,
+            scope=scope,
+            resource=resource,
+            expires_at=expires_at,
+            revoked_at=None,
         )
         return tid
 
@@ -101,8 +121,13 @@ class FakeStore:
         if row is None:
             return None
         return TokenRecord(
-            id=row["id"], client_id=row["client_id"], kind=row["kind"], scope=row["scope"],
-            resource=row["resource"], expires_at=row["expires_at"], revoked_at=row["revoked_at"],
+            id=row["id"],
+            client_id=row["client_id"],
+            kind=row["kind"],
+            scope=row["scope"],
+            resource=row["resource"],
+            expires_at=row["expires_at"],
+            revoked_at=row["revoked_at"],
         )
 
     async def touch_token(self, token_hash) -> None:
@@ -384,8 +409,10 @@ async def test_code_redirect_mismatch(ctx):
     code = await _issue_code(service, reg.client_id)
     with pytest.raises(InvalidGrant):
         await service.exchange_code(
-            code=code, client_id=reg.client_id,
-            redirect_uri="https://claude.ai/other", code_verifier=VERIFIER,
+            code=code,
+            client_id=reg.client_id,
+            redirect_uri="https://claude.ai/other",
+            code_verifier=VERIFIER,
         )
 
 
@@ -406,8 +433,11 @@ async def test_confidential_client_requires_secret(ctx):
     code = await _issue_code(service, reg.client_id)
     with pytest.raises(InvalidClient):
         await service.exchange_code(
-            code=code, client_id=reg.client_id, redirect_uri=REDIRECT,
-            code_verifier=VERIFIER, client_secret=None,
+            code=code,
+            client_id=reg.client_id,
+            redirect_uri=REDIRECT,
+            code_verifier=VERIFIER,
+            client_secret=None,
         )
 
 
@@ -416,8 +446,11 @@ async def test_confidential_client_accepts_secret(ctx):
     reg = await _register(service, confidential=True)
     code = await _issue_code(service, reg.client_id)
     grant = await service.exchange_code(
-        code=code, client_id=reg.client_id, redirect_uri=REDIRECT,
-        code_verifier=VERIFIER, client_secret=reg.client_secret,
+        code=code,
+        client_id=reg.client_id,
+        redirect_uri=REDIRECT,
+        code_verifier=VERIFIER,
+        client_secret=reg.client_secret,
     )
     assert grant.access_token
 
@@ -554,7 +587,12 @@ async def test_register_rejects_client_secret_basic(ctx):
 async def test_token_record_replace_is_frozen(ctx):
     # Guards the frozen dataclass contract the store returns (defensive; cheap).
     rec = TokenRecord(
-        id="1", client_id="c", kind="access", scope="brain", resource=None,
-        expires_at=datetime.now(UTC), revoked_at=None,
+        id="1",
+        client_id="c",
+        kind="access",
+        scope="brain",
+        resource=None,
+        expires_at=datetime.now(UTC),
+        revoked_at=None,
     )
     assert replace(rec, kind="refresh").kind == "refresh"

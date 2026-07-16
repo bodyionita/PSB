@@ -186,9 +186,7 @@ class GraphService:
             direction=direction,
         )
 
-    async def build_context(
-        self, node_id: str, *, depth: int | None = None
-    ) -> NodeContext | None:
+    async def build_context(self, node_id: str, *, depth: int | None = None) -> NodeContext | None:
         """``get_node`` + a bounded neighbor tree in one call (03-api §MCP ``build_context``).
 
         Returns ``None`` if the node is unknown. ``depth`` is clamped to
@@ -202,12 +200,18 @@ class GraphService:
         effective_depth = self._clamp_depth(depth)
         if effective_depth <= 0:
             return NodeContext(
-                node=center, neighbors=[], depth=effective_depth, truncated=False,
+                node=center,
+                neighbors=[],
+                depth=effective_depth,
+                truncated=False,
                 identity_capsule=capsule,
             )
         tree, truncated = await self._expand(node_id, effective_depth, {node_id})
         return NodeContext(
-            node=center, neighbors=tree, depth=effective_depth, truncated=truncated,
+            node=center,
+            neighbors=tree,
+            depth=effective_depth,
+            truncated=truncated,
             identity_capsule=capsule,
         )
 
@@ -241,9 +245,7 @@ class GraphService:
                 sub, sub_truncated = await self._expand(
                     edge.node_id, remaining - 1, seen | {edge.node_id}
                 )
-            children.append(
-                ContextNeighbor(edge=edge, neighbors=sub, truncated=sub_truncated)
-            )
+            children.append(ContextNeighbor(edge=edge, neighbors=sub, truncated=sub_truncated))
         return children, page.next_cursor is not None
 
     def _clamp_limit(self, limit: int | None) -> int:
@@ -270,10 +272,6 @@ def _decode_cursor(cursor: str) -> NeighborCursor:
         parts = json.loads(raw)
     except (binascii.Error, ValueError, UnicodeError) as exc:
         raise InvalidCursor(cursor) from exc
-    if (
-        not isinstance(parts, list)
-        or len(parts) != 4
-        or not all(isinstance(p, str) for p in parts)
-    ):
+    if not isinstance(parts, list) or len(parts) != 4 or not all(isinstance(p, str) for p in parts):
         raise InvalidCursor(cursor)
     return (parts[0], parts[1], parts[2], parts[3])

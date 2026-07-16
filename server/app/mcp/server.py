@@ -162,20 +162,36 @@ def build_mcp_server(app: FastAPI, settings: Settings) -> FastMCP:
         capture_id = await app.state.capture_pipeline.create_mcp_capture(text)
         return render_capture_ack(capture_id)
 
-    mcp.add_tool(search, description=SEARCH_DESCRIPTION, annotations=_READ_ONLY,
-                 structured_output=False)
-    mcp.add_tool(get_node, description=GET_NODE_DESCRIPTION, annotations=_READ_ONLY,
-                 structured_output=False)
-    mcp.add_tool(traverse, description=TRAVERSE_DESCRIPTION, annotations=_READ_ONLY,
-                 structured_output=False)
-    mcp.add_tool(build_context, description=BUILD_CONTEXT_DESCRIPTION, annotations=_READ_ONLY,
-                 structured_output=False)
-    mcp.add_tool(list_planes, description=LIST_PLANES_DESCRIPTION, annotations=_READ_ONLY,
-                 structured_output=False)
-    mcp.add_tool(list_types, description=LIST_TYPES_DESCRIPTION, annotations=_READ_ONLY,
-                 structured_output=False)
-    mcp.add_tool(capture, description=CAPTURE_DESCRIPTION, annotations=_WRITE,
-                 structured_output=False)
+    mcp.add_tool(
+        search, description=SEARCH_DESCRIPTION, annotations=_READ_ONLY, structured_output=False
+    )
+    mcp.add_tool(
+        get_node, description=GET_NODE_DESCRIPTION, annotations=_READ_ONLY, structured_output=False
+    )
+    mcp.add_tool(
+        traverse, description=TRAVERSE_DESCRIPTION, annotations=_READ_ONLY, structured_output=False
+    )
+    mcp.add_tool(
+        build_context,
+        description=BUILD_CONTEXT_DESCRIPTION,
+        annotations=_READ_ONLY,
+        structured_output=False,
+    )
+    mcp.add_tool(
+        list_planes,
+        description=LIST_PLANES_DESCRIPTION,
+        annotations=_READ_ONLY,
+        structured_output=False,
+    )
+    mcp.add_tool(
+        list_types,
+        description=LIST_TYPES_DESCRIPTION,
+        annotations=_READ_ONLY,
+        structured_output=False,
+    )
+    mcp.add_tool(
+        capture, description=CAPTURE_DESCRIPTION, annotations=_WRITE, structured_output=False
+    )
 
     # --- resource: the derived identity capsule, up-front, no node needed (ADR-046 §5) ------
 

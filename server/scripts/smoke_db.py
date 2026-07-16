@@ -55,11 +55,11 @@ from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
 
 # --- fixed test ids (uuid) -------------------------------------------------
-ALEX = "aaaaaaaa-0000-0000-0000-000000000001"      # person, aliases Alex/Alexandru
-GHOST = "aaaaaaaa-0000-0000-0000-0000000000ff"     # person, tombstoned (merged into ALEX)
-PLACE = "aaaaaaaa-0000-0000-0000-000000000002"     # place
-MEM1 = "aaaaaaaa-0000-0000-0000-000000000010"      # memory (edge -> ALEX)
-MEM2 = "aaaaaaaa-0000-0000-0000-000000000011"      # memory (mentions Alex, no edge -> backfill)
+ALEX = "aaaaaaaa-0000-0000-0000-000000000001"  # person, aliases Alex/Alexandru
+GHOST = "aaaaaaaa-0000-0000-0000-0000000000ff"  # person, tombstoned (merged into ALEX)
+PLACE = "aaaaaaaa-0000-0000-0000-000000000002"  # place
+MEM1 = "aaaaaaaa-0000-0000-0000-000000000010"  # memory (edge -> ALEX)
+MEM2 = "aaaaaaaa-0000-0000-0000-000000000011"  # memory (mentions Alex, no edge -> backfill)
 ALL_IDS = [ALEX, GHOST, PLACE, MEM1, MEM2]
 VOCAB_KEY = "vocabulary"
 
@@ -126,7 +126,15 @@ async def seed(db: Database) -> None:
              ($5,'smoke::memory/m2.md','memory','Alexandru called again','personal',
               '{personal}','{}','{}', NULL, '2026-03-01', NULL, 'h_m2', $9, $7, $7)
             """,
-            ALEX, GHOST, PLACE, MEM1, MEM2, vec(0.10), now, vec(0.20), vec(0.21),
+            ALEX,
+            GHOST,
+            PLACE,
+            MEM1,
+            MEM2,
+            vec(0.10),
+            now,
+            vec(0.20),
+            vec(0.21),
         )
         # edges: MEM1 -involves-> ALEX (canonical), ALEX -at-> PLACE (canonical),
         #        GHOST -similar-> MEM2 (derived, from tombstone src → hidden from canonical reads),
@@ -139,7 +147,11 @@ async def seed(db: Database) -> None:
              ($4,$5,'similar','derived',0.87,NULL,NULL),
              ($1,$4,'knows','canonical',NULL,NULL,NULL)
             """,
-            MEM1, ALEX, PLACE, GHOST, MEM2,
+            MEM1,
+            ALEX,
+            PLACE,
+            GHOST,
+            MEM2,
         )
         # chunk for MEM2 mentioning the alias (backfill candidate + search hit)
         await c.execute(
@@ -147,7 +159,8 @@ async def seed(db: Database) -> None:
             INSERT INTO chunks (node_id, chunk_index, content, embedding)
             VALUES ($1, 0, 'Alexandru called again about the office project', $2)
             """,
-            MEM2, vec(0.21),
+            MEM2,
+            vec(0.21),
         )
         # chunk for MEM1 (edge inventory src excerpt)
         await c.execute(
@@ -155,7 +168,8 @@ async def seed(db: Database) -> None:
             INSERT INTO chunks (node_id, chunk_index, content, embedding)
             VALUES ($1, 0, 'Met Alex at the office today', $2)
             """,
-            MEM1, vec(0.20),
+            MEM1,
+            vec(0.20),
         )
 
 
@@ -163,7 +177,9 @@ def _load_migration_sql() -> tuple[str, str]:
     """The EXACT upgrade/downgrade SQL from migration 009 (numeric module name → load by path)."""
     path = (
         Path(__file__).resolve().parent.parent
-        / "migrations" / "versions" / "009_model_routing_id_migration.py"
+        / "migrations"
+        / "versions"
+        / "009_model_routing_id_migration.py"
     )
     spec = importlib.util.spec_from_file_location("_mig009", path)
     assert spec and spec.loader
@@ -181,9 +197,7 @@ async def check_model_routing_migration(db: Database) -> None:
     up_sql, down_sql = _load_migration_sql()
     print("\n== migration 009 (saved model_routing → model ids, ADR-045 §4) ==")
     async with db.acquire() as conn:
-        backup = await conn.fetchval(
-            "SELECT value FROM app_settings WHERE key = 'model_routing'"
-        )
+        backup = await conn.fetchval("SELECT value FROM app_settings WHERE key = 'model_routing'")
     try:
         old = {
             "chat": {
@@ -211,41 +225,53 @@ async def check_model_routing_migration(db: Database) -> None:
             )
             await c.execute(up_sql)
         async with db.acquire() as conn:
-            got = json.loads(await conn.fetchval(
-                "SELECT value FROM app_settings WHERE key = 'model_routing'"
-            ))
-        check("active/fallback remapped to model ids",
-              got["chat"]["active"] == "claude-opus-4-8"
-              and got["chat"]["fallback"] == "meta-llama/Llama-3.3-70B-Instruct"
-              and got["quick"]["active"] == "claude-sonnet-4-6", str(got))
-        check("effort_by_provider → effort_by_model (key renamed, keys remapped)",
-              got["chat"].get("effort_by_model") == {"claude-opus-4-8": "high"}
-              and "effort_by_provider" not in got["chat"]
-              and got["quick"]["effort_by_model"] == {"claude-sonnet-4-6": "low"}, str(got))
-        check("both active + fallback remap in one group (conspect)",
-              got["conspect"]["active"] == "claude-opus-4-8"
-              and got["conspect"]["fallback"] == "claude-sonnet-4-6"
-              and got["conspect"]["effort_by_model"]
-              == {"claude-opus-4-8": "medium", "claude-sonnet-4-6": "low"}, str(got))
+            got = json.loads(
+                await conn.fetchval("SELECT value FROM app_settings WHERE key = 'model_routing'")
+            )
+        check(
+            "active/fallback remapped to model ids",
+            got["chat"]["active"] == "claude-opus-4-8"
+            and got["chat"]["fallback"] == "meta-llama/Llama-3.3-70B-Instruct"
+            and got["quick"]["active"] == "claude-sonnet-4-6",
+            str(got),
+        )
+        check(
+            "effort_by_provider → effort_by_model (key renamed, keys remapped)",
+            got["chat"].get("effort_by_model") == {"claude-opus-4-8": "high"}
+            and "effort_by_provider" not in got["chat"]
+            and got["quick"]["effort_by_model"] == {"claude-sonnet-4-6": "low"},
+            str(got),
+        )
+        check(
+            "both active + fallback remap in one group (conspect)",
+            got["conspect"]["active"] == "claude-opus-4-8"
+            and got["conspect"]["fallback"] == "claude-sonnet-4-6"
+            and got["conspect"]["effort_by_model"]
+            == {"claude-opus-4-8": "medium", "claude-sonnet-4-6": "low"},
+            str(got),
+        )
 
         # Idempotent: a second pass over the already-migrated row changes nothing.
         async with db.transaction() as c:
             await c.execute(up_sql)
         async with db.acquire() as conn:
-            again = json.loads(await conn.fetchval(
-                "SELECT value FROM app_settings WHERE key = 'model_routing'"
-            ))
+            again = json.loads(
+                await conn.fetchval("SELECT value FROM app_settings WHERE key = 'model_routing'")
+            )
         check("re-running upgrade is idempotent (no double-remap)", again == got, str(again))
 
         # Downgrade round-trip: new ids/keys map back to the old provider vocabulary (best-effort).
         async with db.transaction() as c:
             await c.execute(down_sql)
         async with db.acquire() as conn:
-            reverted = json.loads(await conn.fetchval(
-                "SELECT value FROM app_settings WHERE key = 'model_routing'"
-            ))
-        check("downgrade round-trip restores old provider ids + effort_by_provider",
-              reverted == old, str(reverted))
+            reverted = json.loads(
+                await conn.fetchval("SELECT value FROM app_settings WHERE key = 'model_routing'")
+            )
+        check(
+            "downgrade round-trip restores old provider ids + effort_by_provider",
+            reverted == old,
+            str(reverted),
+        )
 
         # No-op on an empty object: the guard skips a row with no old tokens.
         async with db.transaction() as c:
@@ -257,17 +283,18 @@ async def check_model_routing_migration(db: Database) -> None:
             empty = await conn.fetchval(
                 "SELECT value FROM app_settings WHERE key = 'model_routing'"
             )
-        check("empty {} row is a no-op (guard skips, never NULLed)",
-              json.loads(empty) == {}, str(empty))
+        check(
+            "empty {} row is a no-op (guard skips, never NULLed)",
+            json.loads(empty) == {},
+            str(empty),
+        )
 
         # No-op on an absent row: nothing to migrate, no error, no row created.
         async with db.transaction() as c:
             await c.execute("DELETE FROM app_settings WHERE key = 'model_routing'")
             await c.execute(up_sql)
         async with db.acquire() as conn:
-            absent = await conn.fetchval(
-                "SELECT 1 FROM app_settings WHERE key = 'model_routing'"
-            )
+            absent = await conn.fetchval("SELECT 1 FROM app_settings WHERE key = 'model_routing'")
         check("absent row stays absent (no-op, no error)", absent is None, str(absent))
     finally:
         async with db.transaction() as c:
@@ -295,46 +322,65 @@ async def check_identity_capsule(db: Database) -> None:
     # top_profile_hubs: ALEX has a profile + canonical degree 2 (involves-in + at-out); GHOST has a
     # profile too but is tombstoned (merged into ALEX) → excluded; PLACE has no profile → not a hub.
     hubs = {h.node_id: h for h in await src.top_profile_hubs(500)}
-    check("top_profile_hubs includes ALEX at canonical degree 2, excludes tombstone GHOST",
-          ALEX in hubs and hubs[ALEX].degree == 2 and GHOST not in hubs,
-          str({k: v.degree for k, v in hubs.items()}))
+    check(
+        "top_profile_hubs includes ALEX at canonical degree 2, excludes tombstone GHOST",
+        ALEX in hubs and hubs[ALEX].degree == 2 and GHOST not in hubs,
+        str({k: v.degree for k, v in hubs.items()}),
+    )
 
     # recent_memories: MEM2 (occurred 2026-03) before MEM1 (2026-02), first-chunk excerpt rides.
     mems = await src.recent_memories(500)
     smoke_order = [m.node_id for m in mems if m.node_id in (MEM1, MEM2)]
     mem1 = next((m for m in mems if m.node_id == MEM1), None)
-    check("recent_memories orders MEM2 before MEM1 (occurred desc) + carries a chunk excerpt",
-          smoke_order == [MEM2, MEM1]
-          and mem1 is not None and "Alex" in (mem1.excerpt or ""), str(smoke_order))
+    check(
+        "recent_memories orders MEM2 before MEM1 (occurred desc) + carries a chunk excerpt",
+        smoke_order == [MEM2, MEM1] and mem1 is not None and "Alex" in (mem1.excerpt or ""),
+        str(smoke_order),
+    )
     # recent_insights: none of the smoke nodes are insights (memory/person/place) → excluded.
     ins = await src.recent_insights(500)
     smoke_ids = (MEM1, MEM2, ALEX, PLACE, GHOST)
-    check("recent_insights excludes the smoke non-insight nodes",
-          all(i.node_id not in smoke_ids for i in ins), str([i.node_id for i in ins]))
+    check(
+        "recent_insights excludes the smoke non-insight nodes",
+        all(i.node_id not in smoke_ids for i in ins),
+        str([i.node_id for i in ins]),
+    )
 
     # Blob round-trip, isolated: back up any real capsule row, exercise save/current, restore.
     async with db.acquire() as conn:
         backup = await conn.fetchval("SELECT value FROM app_settings WHERE key = $1", CAPSULE_KEY)
     try:
-        await caps.save(CapsuleBlob(
-            text="smoke capsule text", generated_at=datetime.now(UTC),
-            source_refs=[{"node_id": ALEX, "title": "Alex", "kind": "hub"}],
-        ))
+        await caps.save(
+            CapsuleBlob(
+                text="smoke capsule text",
+                generated_at=datetime.now(UTC),
+                source_refs=[{"node_id": ALEX, "title": "Alex", "kind": "hub"}],
+            )
+        )
         got = await caps.current()
-        check("capsule save/current round-trips text + generated_at + refs",
-              got is not None and got.text == "smoke capsule text"
-              and got.generated_at is not None and got.source_refs[0]["node_id"] == ALEX, str(got))
+        check(
+            "capsule save/current round-trips text + generated_at + refs",
+            got is not None
+            and got.text == "smoke capsule text"
+            and got.generated_at is not None
+            and got.source_refs[0]["node_id"] == ALEX,
+            str(got),
+        )
         await caps.save(CapsuleBlob(text="smoke capsule updated"))  # ON CONFLICT update path
         got2 = await caps.current()
-        check("capsule save upserts (ON CONFLICT)",
-              got2 is not None and got2.text == "smoke capsule updated", str(got2))
+        check(
+            "capsule save upserts (ON CONFLICT)",
+            got2 is not None and got2.text == "smoke capsule updated",
+            str(got2),
+        )
     finally:
         async with db.transaction() as c:
             await c.execute("DELETE FROM app_settings WHERE key = $1", CAPSULE_KEY)
             if backup is not None:
                 await c.execute(
                     "INSERT INTO app_settings (key, value) VALUES ($1, $2::jsonb)",
-                    CAPSULE_KEY, backup,
+                    CAPSULE_KEY,
+                    backup,
                 )
 
 
@@ -364,33 +410,52 @@ async def check_oauth(db: Database) -> None:
     cid = "smoke_oauth_client"
     try:
         await store.create_client(
-            client_id=cid, client_secret_hash=None,
+            client_id=cid,
+            client_secret_hash=None,
             metadata={"redirect_uris": ["https://claude.ai/cb"], "client_name": "Smoke"},
         )
         got = await store.get_client(cid)
-        check("get_client round-trips metadata jsonb",
-              got is not None and got.metadata["redirect_uris"] == ["https://claude.ai/cb"],
-              str(got))
+        check(
+            "get_client round-trips metadata jsonb",
+            got is not None and got.metadata["redirect_uris"] == ["https://claude.ai/cb"],
+            str(got),
+        )
 
         soon = datetime.now(UTC) + timedelta(minutes=5)
         await store.create_code(
-            code_hash="smoke_code_hash", client_id=cid, redirect_uri="https://claude.ai/cb",
-            code_challenge="chal", code_challenge_method="S256", scope="brain",
-            resource="https://x/mcp", expires_at=soon,
+            code_hash="smoke_code_hash",
+            client_id=cid,
+            redirect_uri="https://claude.ai/cb",
+            code_challenge="chal",
+            code_challenge_method="S256",
+            scope="brain",
+            resource="https://x/mcp",
+            expires_at=soon,
         )
         first = await store.consume_code("smoke_code_hash")
-        check("consume_code returns the bound params once",
-              first is not None and first.scope == "brain" and first.client_id == cid, str(first))
+        check(
+            "consume_code returns the bound params once",
+            first is not None and first.scope == "brain" and first.client_id == cid,
+            str(first),
+        )
         second = await store.consume_code("smoke_code_hash")
         check("consume_code is single-use (2nd time -> None)", second is None, str(second))
         replay_owner = await store.consumed_code_client("smoke_code_hash")
-        check("consumed_code_client flags the replay (returns owner)", replay_owner == cid,
-              str(replay_owner))
+        check(
+            "consumed_code_client flags the replay (returns owner)",
+            replay_owner == cid,
+            str(replay_owner),
+        )
 
         # An expired code never consumes (real now()-vs-expires_at comparison).
         await store.create_code(
-            code_hash="smoke_code_expired", client_id=cid, redirect_uri="https://claude.ai/cb",
-            code_challenge="c", code_challenge_method="S256", scope="brain", resource=None,
+            code_hash="smoke_code_expired",
+            client_id=cid,
+            redirect_uri="https://claude.ai/cb",
+            code_challenge="c",
+            code_challenge_method="S256",
+            scope="brain",
+            resource=None,
             expires_at=datetime.now(UTC) - timedelta(seconds=1),
         )
         check("expired code -> None", (await store.consume_code("smoke_code_expired")) is None)
@@ -398,30 +463,50 @@ async def check_oauth(db: Database) -> None:
         access_exp = datetime.now(UTC) + timedelta(hours=1)
         refresh_exp = datetime.now(UTC) + timedelta(days=60)
         tid = await store.create_token(
-            client_id=cid, token_hash="smoke_access", kind="access", scope="brain",
-            resource=None, expires_at=access_exp,
+            client_id=cid,
+            token_hash="smoke_access",
+            kind="access",
+            scope="brain",
+            resource=None,
+            expires_at=access_exp,
         )
         check("create_token returns an id", bool(tid))
         await store.create_token(
-            client_id=cid, token_hash="smoke_refresh", kind="refresh", scope="brain",
-            resource=None, expires_at=refresh_exp,
+            client_id=cid,
+            token_hash="smoke_refresh",
+            kind="refresh",
+            scope="brain",
+            resource=None,
+            expires_at=refresh_exp,
         )
         rec = await store.get_token("smoke_access")
-        check("get_token round-trips kind/scope/liveness",
-              rec is not None and rec.kind == "access" and rec.revoked_at is None, str(rec))
+        check(
+            "get_token round-trips kind/scope/liveness",
+            rec is not None and rec.kind == "access" and rec.revoked_at is None,
+            str(rec),
+        )
 
         # revoke_token returns the affected-row count — the refresh-rotation race-decider (finding
         # 1). Use a throwaway token so the revoke_all count below stays 2 (access + refresh).
         await store.create_token(
-            client_id=cid, token_hash="smoke_throwaway", kind="access", scope="brain",
-            resource=None, expires_at=access_exp,
+            client_id=cid,
+            token_hash="smoke_throwaway",
+            kind="access",
+            scope="brain",
+            resource=None,
+            expires_at=access_exp,
         )
-        check("revoke_token returns 1 then 0 (idempotent rowcount)",
-              (await store.revoke_token("smoke_throwaway")) == 1
-              and (await store.revoke_token("smoke_throwaway")) == 0)
+        check(
+            "revoke_token returns 1 then 0 (idempotent rowcount)",
+            (await store.revoke_token("smoke_throwaway")) == 1
+            and (await store.revoke_token("smoke_throwaway")) == 0,
+        )
         gone = await store.get_token("smoke_throwaway")
-        check("revoked token carries revoked_at", gone is not None and gone.revoked_at is not None,
-              str(gone))
+        check(
+            "revoked token carries revoked_at",
+            gone is not None and gone.revoked_at is not None,
+            str(gone),
+        )
         # NOTE: revoke_all() + invalidate_all_codes() are intentionally GLOBAL writes (the
         # "revoke all MCP access" switch), so they are NOT smoked here against the shared dev DB —
         # a global sweep would revoke real dev tokens. They share the `_rowcount` helper (exercised
@@ -435,8 +520,11 @@ async def check_oauth(db: Database) -> None:
         orphan_codes = await db.pool.fetchval(
             "SELECT count(*) FROM mcp_auth_codes WHERE client_id = $1", cid
         )
-        check("client delete cascades to tokens + codes",
-              orphan_tokens == 0 and orphan_codes == 0, f"tok={orphan_tokens} code={orphan_codes}")
+        check(
+            "client delete cascades to tokens + codes",
+            orphan_tokens == 0 and orphan_codes == 0,
+            f"tok={orphan_tokens} code={orphan_codes}",
+        )
     finally:
         await db.pool.execute("DELETE FROM mcp_oauth_clients WHERE client_id = $1", cid)
 
@@ -453,8 +541,11 @@ async def check_agent_runs_linkage(db: Database) -> None:
         bare = await runs.start("smoke-bare")
         opened.append(bare)
         bare_row = await runs.get(bare)
-        check("bare run is parentless", bare_row is not None and bare_row.parent_run_id is None,
-              str(bare_row))
+        check(
+            "bare run is parentless",
+            bare_row is not None and bare_row.parent_run_id is None,
+            str(bare_row),
+        )
 
         # A pipeline parent + two child steps opened inside child_run_scope.
         parent = await runs.start("smoke-nightly")
@@ -470,25 +561,37 @@ async def check_agent_runs_linkage(db: Database) -> None:
         c1_row = await runs.get(c1)
         c2_row = await runs.get(c2)
         parent_row = await runs.get(parent)
-        check("child A links to the parent (FK column round-trips)",
-              c1_row is not None and c1_row.parent_run_id == parent, str(c1_row))
-        check("child B links to the parent + status/error persisted",
-              c2_row is not None and c2_row.parent_run_id == parent
-              and c2_row.status == FAILED and c2_row.error == "boom", str(c2_row))
-        check("parent stays parentless (opened outside any scope)",
-              parent_row is not None and parent_row.parent_run_id is None, str(parent_row))
+        check(
+            "child A links to the parent (FK column round-trips)",
+            c1_row is not None and c1_row.parent_run_id == parent,
+            str(c1_row),
+        )
+        check(
+            "child B links to the parent + status/error persisted",
+            c2_row is not None
+            and c2_row.parent_run_id == parent
+            and c2_row.status == FAILED
+            and c2_row.error == "boom",
+            str(c2_row),
+        )
+        check(
+            "parent stays parentless (opened outside any scope)",
+            parent_row is not None and parent_row.parent_run_id is None,
+            str(parent_row),
+        )
 
         # After the scope exits, a start is parentless again (contextvar reset).
         after = await runs.start("smoke-after")
         opened.append(after)
         after_row = await runs.get(after)
-        check("start after the scope is parentless again (contextvar reset)",
-              after_row is not None and after_row.parent_run_id is None, str(after_row))
+        check(
+            "start after the scope is parentless again (contextvar reset)",
+            after_row is not None and after_row.parent_run_id is None,
+            str(after_row),
+        )
     finally:
         if opened:
-            await db.pool.execute(
-                "DELETE FROM agent_runs WHERE id = ANY($1::uuid[])", opened
-            )
+            await db.pool.execute("DELETE FROM agent_runs WHERE id = ANY($1::uuid[])", opened)
 
 
 async def check_chat_distill(db: Database) -> None:
@@ -510,65 +613,96 @@ async def check_chat_distill(db: Database) -> None:
             await db.pool.execute(
                 "INSERT INTO chat_messages (session_id, role, content, created_at)"
                 " VALUES ($1, $2, $3, $4)",
-                sid, role, f"smoke turn {i}", ts,
+                sid,
+                role,
+                f"smoke turn {i}",
+                ts,
             )
         cutoff = now - timedelta(hours=12)
 
         due = await store.distillable_sessions(idle_cutoff=cutoff, limit=200)
         mine = next((d for d in due if d.session_id == sid), None)
-        check("idle session with no watermark is distillable",
-              mine is not None and mine.watermark is None and mine.newest_at == times[2], str(mine))
+        check(
+            "idle session with no watermark is distillable",
+            mine is not None and mine.watermark is None and mine.newest_at == times[2],
+            str(mine),
+        )
 
         delta_all = await store.delta_messages(sid, after=None, limit=300)
-        check("delta (after=None) returns all msgs oldest-first",
-              [m.content for m in delta_all] == ["smoke turn 0", "smoke turn 1", "smoke turn 2"],
-              str([m.content for m in delta_all]))
+        check(
+            "delta (after=None) returns all msgs oldest-first",
+            [m.content for m in delta_all] == ["smoke turn 0", "smoke turn 1", "smoke turn 2"],
+            str([m.content for m in delta_all]),
+        )
         delta_after = await store.delta_messages(sid, after=times[1], limit=300)
-        check("delta after a watermark returns only newer msgs",
-              [m.content for m in delta_after] == ["smoke turn 2"], str(delta_after))
+        check(
+            "delta after a watermark returns only newer msgs",
+            [m.content for m in delta_after] == ["smoke turn 2"],
+            str(delta_after),
+        )
 
         # Advance to the newest — the session is no longer distillable (max == watermark, not >).
         await store.advance_watermark(sid, last_message_at=times[2], run_id=None)
         due2 = await store.distillable_sessions(idle_cutoff=cutoff, limit=200)
-        check("session drops out after the watermark advances (idempotent)",
-              all(d.session_id != sid for d in due2), str([d.session_id for d in due2]))
+        check(
+            "session drops out after the watermark advances (idempotent)",
+            all(d.session_id != sid for d in due2),
+            str([d.session_id for d in due2]),
+        )
 
         # A new message after the watermark makes it eligible again; the upsert overwrites in place.
         newer = now - timedelta(days=1)
         await db.pool.execute(
             "INSERT INTO chat_messages (session_id, role, content, created_at)"
             " VALUES ($1,$2,$3,$4)",
-            sid, "user", "smoke turn 3", newer,
+            sid,
+            "user",
+            "smoke turn 3",
+            newer,
         )
         due3 = await store.distillable_sessions(idle_cutoff=cutoff, limit=200)
         mine3 = next((d for d in due3 if d.session_id == sid), None)
-        check("new activity after the watermark re-eligibles the session",
-              mine3 is not None and mine3.watermark == times[2] and mine3.newest_at == newer,
-              str(mine3))
+        check(
+            "new activity after the watermark re-eligibles the session",
+            mine3 is not None and mine3.watermark == times[2] and mine3.newest_at == newer,
+            str(mine3),
+        )
         await store.advance_watermark(sid, last_message_at=newer, run_id=None)
         row = await db.pool.fetchrow(
             "SELECT last_message_at FROM chat_distill_state WHERE session_id = $1", sid
         )
-        check("advance_watermark upserts in place (one row)", row["last_message_at"] == newer,
-              str(row))
+        check(
+            "advance_watermark upserts in place (one row)",
+            row["last_message_at"] == newer,
+            str(row),
+        )
 
         # session_state (M6 task 3 — the on-demand `remember` path): by-id watermark + newest, no
         # idle filter. Here the watermark is at the newest message, so remember would skip.
         state = await store.session_state(sid)
-        check("session_state returns watermark + newest for a known session",
-              state is not None and state.watermark == newer and state.newest_at == newer,
-              str(state))
+        check(
+            "session_state returns watermark + newest for a known session",
+            state is not None and state.watermark == newer and state.newest_at == newer,
+            str(state),
+        )
         unknown = await store.session_state("dddddddd-0000-0000-0000-0000000000d1")
-        check("session_state returns None for an unknown session (→404)", unknown is None,
-              str(unknown))
+        check(
+            "session_state returns None for an unknown session (→404)",
+            unknown is None,
+            str(unknown),
+        )
         # A session that exists but has no messages: known (not None) but newest_at NULL → the
         # remember endpoint skips (nothing to distill), never 404.
         empty_sid = await chat.create_session()
         try:
             empty_state = await store.session_state(empty_sid)
-            check("session_state: empty session is known with newest_at=None (→skip, not 404)",
-                  empty_state is not None and empty_state.newest_at is None
-                  and empty_state.watermark is None, str(empty_state))
+            check(
+                "session_state: empty session is known with newest_at=None (→skip, not 404)",
+                empty_state is not None
+                and empty_state.newest_at is None
+                and empty_state.watermark is None,
+                str(empty_state),
+            )
         finally:
             await db.pool.execute("DELETE FROM chat_sessions WHERE id = $1", empty_sid)
 
@@ -576,12 +710,19 @@ async def check_chat_distill(db: Database) -> None:
         cap_id = "cccccccc-0000-0000-0000-0000000000c1"
         cap_ids.append(cap_id)
         await captures.create(
-            capture_id=cap_id, kind=KIND_TEXT, status=INDEXED,
-            raw_text="The user decided X.", source="chat", source_ref=sid,
+            capture_id=cap_id,
+            kind=KIND_TEXT,
+            status=INDEXED,
+            raw_text="The user decided X.",
+            source="chat",
+            source_ref=sid,
         )
         got = await captures.get(cap_id)
-        check("captures.source_ref round-trips (source=chat, source_ref=session-id)",
-              got is not None and got.source == "chat" and got.source_ref == sid, str(got))
+        check(
+            "captures.source_ref round-trips (source=chat, source_ref=session-id)",
+            got is not None and got.source == "chat" and got.source_ref == sid,
+            str(got),
+        )
     finally:
         if cap_ids:
             await db.pool.execute("DELETE FROM captures WHERE id = ANY($1::uuid[])", cap_ids)
@@ -599,7 +740,9 @@ async def check_review_queue_reopen(db: Database) -> None:
         ReviewItem(
             kind=KIND_STANCE_CANDIDATE,
             payload={"candidate_text": "smoke stance", "anchor_at": "2026-07-10T00:00:00+00:00"},
-            excerpt="smoke", source="chat", source_ref="smoke-session",
+            excerpt="smoke",
+            source="chat",
+            source_ref="smoke-session",
         )
     )
     try:
@@ -681,13 +824,21 @@ async def check_auto_recorded(db: Database) -> None:
     live_id = "cccccccc-0000-0000-0000-0000000000a2"
     try:
         await captures.create(
-            capture_id=rec_id, kind=KIND_TEXT, status=INDEXED,
-            raw_text="The user met Alex at the office.", source="chat", source_ref="smoke-sess",
+            capture_id=rec_id,
+            kind=KIND_TEXT,
+            status=INDEXED,
+            raw_text="The user met Alex at the office.",
+            source="chat",
+            source_ref="smoke-sess",
         )
         await captures.set_node_paths(rec_id, ["smoke::memory/m1.md", "smoke::person/alex.md"])
         await captures.create(
-            capture_id=live_id, kind=KIND_TEXT, status=INDEXED,
-            raw_text="A second chat memory.", source="chat", source_ref="smoke-sess",
+            capture_id=live_id,
+            kind=KIND_TEXT,
+            status=INDEXED,
+            raw_text="A second chat memory.",
+            source="chat",
+            source_ref="smoke-sess",
         )
 
         await auto.record(rec_id, salience="high")
@@ -697,17 +848,27 @@ async def check_auto_recorded(db: Database) -> None:
 
         items = await auto.list_recent(200, entity_types=["person"])
         mine = next((i for i in items if i.capture_id == rec_id), None)
-        check("audit list joins the primary CONTENT node title (hub skipped)",
-              mine is not None and mine.title == "Met Alex at the office", str(mine))
-        check("audit item carries node_paths + salience + source_ref + snippet",
-              mine is not None
-              and mine.node_paths == ["smoke::memory/m1.md", "smoke::person/alex.md"]
-              and mine.salience == "high" and mine.source_ref == "smoke-sess"
-              and mine.snippet == "The user met Alex at the office.", str(mine))
+        check(
+            "audit list joins the primary CONTENT node title (hub skipped)",
+            mine is not None and mine.title == "Met Alex at the office",
+            str(mine),
+        )
+        check(
+            "audit item carries node_paths + salience + source_ref + snippet",
+            mine is not None
+            and mine.node_paths == ["smoke::memory/m1.md", "smoke::person/alex.md"]
+            and mine.salience == "high"
+            and mine.source_ref == "smoke-sess"
+            and mine.snippet == "The user met Alex at the office.",
+            str(mine),
+        )
 
         # The live control capture has no chat_auto_recorded row → never in the audit list.
-        check("a non-auto-recorded chat capture is absent from the audit list",
-              all(i.capture_id != live_id for i in items), str([i.capture_id for i in items]))
+        check(
+            "a non-auto-recorded chat capture is absent from the audit list",
+            all(i.capture_id != live_id for i in items),
+            str([i.capture_id for i in items]),
+        )
 
         tombstoned = await auto.tombstone(rec_id)
         check("tombstone stamps removed_at (live row)", tombstoned is True)
@@ -715,20 +876,23 @@ async def check_auto_recorded(db: Database) -> None:
         check("second tombstone is a no-op (already removed)", again is False)
 
         after = await auto.list_recent(200, entity_types=["person"])
-        check("tombstoned item drops out of the audit list",
-              all(i.capture_id != rec_id for i in after), str([i.capture_id for i in after]))
+        check(
+            "tombstoned item drops out of the audit list",
+            all(i.capture_id != rec_id for i in after),
+            str([i.capture_id for i in after]),
+        )
 
         # Reprocess replay-exclusion (the P10-preserving guarantee): the removed capture is skipped,
         # the live one still replays. capture_ids_chronological is a GLOBAL read → assert subset.
         ids = set(await reprocess.capture_ids_chronological())
-        check("reprocess excludes the tombstoned capture but keeps the live one",
-              rec_id not in ids and live_id in ids,
-              f"removed_in={rec_id in ids} live_in={live_id in ids}")
+        check(
+            "reprocess excludes the tombstoned capture but keeps the live one",
+            rec_id not in ids and live_id in ids,
+            f"removed_in={rec_id in ids} live_in={live_id in ids}",
+        )
     finally:
         # chat_auto_recorded cascades on the capture delete (FK ON DELETE CASCADE).
-        await db.pool.execute(
-            "DELETE FROM captures WHERE id = ANY($1::uuid[])", [rec_id, live_id]
-        )
+        await db.pool.execute("DELETE FROM captures WHERE id = ANY($1::uuid[])", [rec_id, live_id])
 
 
 async def check_dedup_sweep(db: Database) -> None:
@@ -780,8 +944,21 @@ async def check_dedup_sweep(db: Database) -> None:
                  ($15,'dddddddd::memory/g.md','memory','coffee, Ana (undated)','{}','{}','{}',NULL,
                   NULL,NULL,'h_g',$9,$14,$14)
                 """,
-                p, p2, a, b, c, d, f,
-                vec(0.10), vec(0.10), vec(0.11), low_cos, a_created, b_created, now, g,
+                p,
+                p2,
+                a,
+                b,
+                c,
+                d,
+                f,
+                vec(0.10),
+                vec(0.10),
+                vec(0.11),
+                low_cos,
+                a_created,
+                b_created,
+                now,
+                g,
             )
             await conn.execute(
                 """
@@ -793,43 +970,81 @@ async def check_dedup_sweep(db: Database) -> None:
                  ($7,$2,'involves','canonical',NULL),
                  ($8,$2,'involves','canonical',NULL)
                 """,
-                a, p, b, c, d, p2, f, g,
+                a,
+                p,
+                b,
+                c,
+                d,
+                p2,
+                f,
+                g,
             )
 
         watermark = now - timedelta(days=365)
         pairs = await store.candidate_pairs(
-            content_types=["memory"], entity_like_types=["person"],
-            watermark=watermark, min_cosine=0.90, candidate_k=10,
+            content_types=["memory"],
+            entity_like_types=["person"],
+            watermark=watermark,
+            min_cosine=0.90,
+            candidate_k=10,
         )
         canon = {tuple(sorted((x.node_a, x.node_b))) for x in pairs}
-        check("A~B near-dup pair surfaces (cosine ⋀ shared hub ⋀ overlap)",
-              tuple(sorted((a, b))) in canon, str(canon))
+        check(
+            "A~B near-dup pair surfaces (cosine ⋀ shared hub ⋀ overlap)",
+            tuple(sorted((a, b))) in canon,
+            str(canon),
+        )
         # C is dated 2025 (disjoint from A/B's 2026-02 windows) → excluded from its DATED partners.
-        check("disjoint dated occurred windows exclude the pair (A/B vs C)",
-              tuple(sorted((a, c))) not in canon and tuple(sorted((b, c))) not in canon, str(canon))
-        check("no shared entity hub excludes the pair (D → different hub)",
-              not any(d in pair for pair in canon), str(canon))
-        check("below-floor cosine excludes the pair (F orthogonal)",
-              not any(f in pair for pair in canon), str(canon))
+        check(
+            "disjoint dated occurred windows exclude the pair (A/B vs C)",
+            tuple(sorted((a, c))) not in canon and tuple(sorted((b, c))) not in canon,
+            str(canon),
+        )
+        check(
+            "no shared entity hub excludes the pair (D → different hub)",
+            not any(d in pair for pair in canon),
+            str(canon),
+        )
+        check(
+            "below-floor cosine excludes the pair (F orthogonal)",
+            not any(f in pair for pair in canon),
+            str(canon),
+        )
         # G is UNDATED: a null occurred_start on either side never excludes (ADR-049 §3) — so A~G
         # still reaches review, but occurred_overlap is False (no positive date signal).
-        check("undated node never excluded: A~G surfaces despite G's null occurred_start",
-              tuple(sorted((a, g))) in canon, str(canon))
+        check(
+            "undated node never excluded: A~G surfaces despite G's null occurred_start",
+            tuple(sorted((a, g))) in canon,
+            str(canon),
+        )
         ag = next(x for x in pairs if {x.node_a, x.node_b} == {a, g})
-        check("A~G signals: occurred_overlap False (G undated, not a date signal)",
-              ag.occurred_overlap is False and p in ag.shared_entity_ids, str(ag))
+        check(
+            "A~G signals: occurred_overlap False (G undated, not a date signal)",
+            ag.occurred_overlap is False and p in ag.shared_entity_ids,
+            str(ag),
+        )
         ab = next(x for x in pairs if {x.node_a, x.node_b} == {a, b})
-        check("A~B signals: cosine ≥ 0.90, shared hub P, occurred_overlap True",
-              ab.cosine >= 0.90 and p in ab.shared_entity_ids
-              and "Ana" in ab.shared_entity_titles and ab.occurred_overlap is True, str(ab))
+        check(
+            "A~B signals: cosine ≥ 0.90, shared hub P, occurred_overlap True",
+            ab.cosine >= 0.90
+            and p in ab.shared_entity_ids
+            and "Ana" in ab.shared_entity_titles
+            and ab.occurred_overlap is True,
+            str(ab),
+        )
 
         # survivor_stats: canonical degree (in+out) + created times for the default-survivor pick.
         stats = await store.survivor_stats([a, b])
-        check("survivor_stats degree = 1 each (one canonical edge to the hub)",
-              stats[a].degree == 1 and stats[b].degree == 1, str(stats))
-        check("survivor_stats carries node_created_at (A older than B)",
-              stats[a].node_created_at == a_created and stats[b].node_created_at == b_created,
-              str(stats))
+        check(
+            "survivor_stats degree = 1 each (one canonical edge to the hub)",
+            stats[a].degree == 1 and stats[b].degree == 1,
+            str(stats),
+        )
+        check(
+            "survivor_stats carries node_created_at (A older than B)",
+            stats[a].node_created_at == a_created and stats[b].node_created_at == b_created,
+            str(stats),
+        )
 
         # Re-file guard: a filed dedup-proposal for the canonical pair blocks a re-propose.
         na, nb = sorted((a, b))
@@ -840,14 +1055,19 @@ async def check_dedup_sweep(db: Database) -> None:
             """,
             json.dumps({"node_a": na, "node_b": nb}),
         )
-        check("proposal_exists true for the filed canonical pair (re-file guard)",
-              await store.proposal_exists(na, nb))
-        check("proposal_exists false for an unrelated pair",
-              not await store.proposal_exists(na, "dddddddd-0000-0000-0000-0000000000ee"))
+        check(
+            "proposal_exists true for the filed canonical pair (re-file guard)",
+            await store.proposal_exists(na, nb),
+        )
+        check(
+            "proposal_exists false for an unrelated pair",
+            not await store.proposal_exists(na, "dddddddd-0000-0000-0000-0000000000ee"),
+        )
     finally:
         await db.pool.execute(
             "DELETE FROM review_queue WHERE kind = 'dedup-proposal'"
-            " AND payload->>'node_a' = ANY($1::text[])", sorted((a, b))[:1]
+            " AND payload->>'node_a' = ANY($1::text[])",
+            sorted((a, b))[:1],
         )
         await db.pool.execute("DELETE FROM edges WHERE src_id = ANY($1::uuid[])", ids)
         await db.pool.execute("DELETE FROM nodes WHERE id = ANY($1::uuid[])", ids)
@@ -861,30 +1081,35 @@ async def check_inbox_drain(db: Database) -> None:
     print("\n== PgCaptureStore.list_inbox_materialized (M6 task 6 — inbox drainer) ==")
     captures = PgCaptureStore(db)
     now = datetime.now(UTC)
-    old = "eeeeeeee-0000-0000-0000-0000000000a1"        # inbox, oldest of ours
-    new = "eeeeeeee-0000-0000-0000-0000000000a2"        # inbox, newer
+    old = "eeeeeeee-0000-0000-0000-0000000000a1"  # inbox, oldest of ours
+    new = "eeeeeeee-0000-0000-0000-0000000000a2"  # inbox, newer
     organized = "eeeeeeee-0000-0000-0000-0000000000a3"  # real nodes only — excluded
-    removed = "eeeeeeee-0000-0000-0000-0000000000a4"    # inbox but tombstoned — excluded
+    removed = "eeeeeeee-0000-0000-0000-0000000000a4"  # inbox but tombstoned — excluded
     ids = [old, new, organized, removed]
     try:
-        await captures.create(capture_id=old, kind=KIND_TEXT, status=INDEXED,
-                              created_at=now - timedelta(hours=2))
+        await captures.create(
+            capture_id=old, kind=KIND_TEXT, status=INDEXED, created_at=now - timedelta(hours=2)
+        )
         await captures.set_node_paths(old, ["inbox/old--aa.md"])
-        await captures.create(capture_id=new, kind=KIND_TEXT, status=INDEXED,
-                              created_at=now - timedelta(hours=1))
+        await captures.create(
+            capture_id=new, kind=KIND_TEXT, status=INDEXED, created_at=now - timedelta(hours=1)
+        )
         await captures.set_node_paths(new, ["inbox/new--bb.md"])
-        await captures.create(capture_id=organized, kind=KIND_TEXT, status=INDEXED,
-                              created_at=now)
+        await captures.create(capture_id=organized, kind=KIND_TEXT, status=INDEXED, created_at=now)
         await captures.set_node_paths(organized, ["memory/real--cc.md", "person/x--dd.md"])
-        await captures.create(capture_id=removed, kind=KIND_TEXT, status=INDEXED,
-                              created_at=now - timedelta(hours=3))
+        await captures.create(
+            capture_id=removed, kind=KIND_TEXT, status=INDEXED, created_at=now - timedelta(hours=3)
+        )
         await captures.set_node_paths(removed, ["inbox/removed--ee.md"])
         await db.pool.execute("UPDATE captures SET removed_at = now() WHERE id = $1", removed)
 
         got = await captures.list_inbox_materialized(folder="inbox", limit=200)
         mine = [r.id for r in got if r.id in ids]
-        check("inbox-materialized captures selected oldest-first; organized + removed excluded",
-              mine == [old, new], str(mine))
+        check(
+            "inbox-materialized captures selected oldest-first; organized + removed excluded",
+            mine == [old, new],
+            str(mine),
+        )
         # The LIMIT bounds a run (global read → assert the count, not which id).
         capped = await captures.list_inbox_materialized(folder="inbox", limit=1)
         check("the LIMIT bounds one run's selection", len(capped) == 1, str(len(capped)))
@@ -923,8 +1148,11 @@ async def main() -> int:
         by_title = await alias.find_candidates("Alex", types=["person"])
         check("exact title 'Alex' -> ALEX", [c.id for c in by_title] == [ALEX], str(by_title))
         by_alias = await alias.find_candidates("alexandru", types=["person"])
-        check("normalized alias 'alexandru' -> ALEX (accretion recall)",
-              [c.id for c in by_alias] == [ALEX], str(by_alias))
+        check(
+            "normalized alias 'alexandru' -> ALEX (accretion recall)",
+            [c.id for c in by_alias] == [ALEX],
+            str(by_alias),
+        )
         ghost_hit = await alias.find_candidates("Ghost", types=["person"])
         check("tombstoned 'Ghost' excluded", ghost_hit == [], str(ghost_hit))
         wrong_type = await alias.find_candidates("Alex", types=["idea"])
@@ -934,130 +1162,203 @@ async def main() -> int:
         overlap = await alias.find_candidates(
             "Alex Marsh", types=["person"], tokens=["alex", "marsh"], limit=8
         )
-        check("token-overlap 'Alex Marsh' -> ALEX (shared token)",
-              ALEX in [c.id for c in overlap], str(overlap))
+        check(
+            "token-overlap 'Alex Marsh' -> ALEX (shared token)",
+            ALEX in [c.id for c in overlap],
+            str(overlap),
+        )
         no_tokens = await alias.find_candidates("Nomatch", types=["person"], tokens=[], limit=8)
         check("empty tokens -> exact-only (no fan-out)", no_tokens == [], str(no_tokens))
-        check("candidate carries store_path (for accretion)",
-              all(c.store_path for c in by_title), str(by_title))
+        check(
+            "candidate carries store_path (for accretion)",
+            all(c.store_path for c in by_title),
+            str(by_title),
+        )
 
         print("\n== PgEntityStore (task-6 merge/backfill/profile reads) ==")
         n = await ent.get_node(ALEX)
         check("get_node ALEX aliases", n is not None and set(n.aliases) == {"Alex", "Alexandru"})
         inbound = await ent.inbound_canonical_edges(ALEX)
-        check("inbound_canonical_edges excludes tombstone src + derived",
-              [e.src_id for e in inbound] == [MEM1], str(inbound))
+        check(
+            "inbound_canonical_edges excludes tombstone src + derived",
+            [e.src_id for e in inbound] == [MEM1],
+            str(inbound),
+        )
         # list_entities / entities_touched_since are GLOBAL reads (not smoke-scoped), so assert the
         # invariants as subsets — smoke live entities present, tombstone excluded — rather than
         # exact equality, keeping the check honest against a dev DB that holds real entities
         # (isolation promise in the module docstring).
         listed = {e.id for e in await ent.list_entities(types=["person", "place"])}
-        check("list_entities includes live smoke entities, excludes tombstone",
-              {ALEX, PLACE} <= listed and GHOST not in listed, str(listed))
-        touched = {e.id for e in await ent.entities_touched_since(
-            types=["person"], since=datetime.now(UTC) - timedelta(days=1)
-        )}
-        check("entities_touched_since includes recent ALEX, excludes tombstone",
-              ALEX in touched and GHOST not in touched, str(touched))
+        check(
+            "list_entities includes live smoke entities, excludes tombstone",
+            {ALEX, PLACE} <= listed and GHOST not in listed,
+            str(listed),
+        )
+        touched = {
+            e.id
+            for e in await ent.entities_touched_since(
+                types=["person"], since=datetime.now(UTC) - timedelta(days=1)
+            )
+        }
+        check(
+            "entities_touched_since includes recent ALEX, excludes tombstone",
+            ALEX in touched and GHOST not in touched,
+            str(touched),
+        )
         hood = await ent.neighborhood(ALEX)
         rels = sorted((h.dir, h.rel, h.node_id) for h in hood)
-        check("neighborhood = in:involves(MEM1) + out:at(PLACE), tombstone/derived excluded",
-              rels == sorted([("in", "involves", MEM1), ("out", "at", PLACE)]), str(rels))
+        check(
+            "neighborhood = in:involves(MEM1) + out:at(PLACE), tombstone/derived excluded",
+            rels == sorted([("in", "involves", MEM1), ("out", "at", PLACE)]),
+            str(rels),
+        )
         check("neighborhood carries since/occurred", any(h.since is not None for h in hood))
         cands = await ent.memory_nodes_matching_alias(
-            "Alexandru", entity_id=ALEX,
-            window_start=datetime.now(UTC) - timedelta(days=365), limit=10,
+            "Alexandru",
+            entity_id=ALEX,
+            window_start=datetime.now(UTC) - timedelta(days=365),
+            limit=10,
         )
-        check("backfill alias match = MEM2 (no edge yet)",
-              [m.node_id for m in cands] == [MEM2], str(cands))
+        check(
+            "backfill alias match = MEM2 (no edge yet)",
+            [m.node_id for m in cands] == [MEM2],
+            str(cands),
+        )
 
         print("\n== PgProfileStore (task-6 node_profiles upsert + embed codec) ==")
         check("current_hash None before write", await prof.current_hash(ALEX) is None)
         await prof.upsert_profile(
-            ALEX, tier="snapshot", profile="Alex is a person met at the office.",
+            ALEX,
+            tier="snapshot",
+            profile="Alex is a person met at the office.",
             observations=[{"cat": "role", "text": "colleague", "as_of": "2026-02"}],
-            neighborhood_hash="hash_v1", embedding=vec(0.10),
+            neighborhood_hash="hash_v1",
+            embedding=vec(0.10),
         )
         check("current_hash after upsert", await prof.current_hash(ALEX) == "hash_v1")
         await prof.upsert_profile(  # ON CONFLICT update path (also clears embedding)
-            ALEX, tier="full", profile="Alex, updated.", observations=[],
-            neighborhood_hash="hash_v2", embedding=None,
+            ALEX,
+            tier="full",
+            profile="Alex, updated.",
+            observations=[],
+            neighborhood_hash="hash_v2",
+            embedding=None,
         )
         check("upsert ON CONFLICT updates hash", await prof.current_hash(ALEX) == "hash_v2")
         # final state: ALEX profile with a NON-null embedding on a known direction so the profile
         # retrieval leg (ADR-037) can be exercised below. ALEX has NO chunk (thin entity hub).
         await prof.upsert_profile(
-            ALEX, tier="full", profile="Alex, updated.", observations=[],
-            neighborhood_hash="hash_v3", embedding=vec(0.10),
+            ALEX,
+            tier="full",
+            profile="Alex, updated.",
+            observations=[],
+            neighborhood_hash="hash_v3",
+            embedding=vec(0.10),
         )
         # a tombstoned entity (GHOST, merged into ALEX) with a profile on the SAME direction — the
         # profile leg's `merged_into IS NULL` guard must keep it out of search (ADR-030 §5 / 037).
         await prof.upsert_profile(
-            GHOST, tier="stub", profile="Ghost profile.", observations=[],
-            neighborhood_hash="hash_g", embedding=vec(0.10),
+            GHOST,
+            tier="stub",
+            profile="Ghost profile.",
+            observations=[],
+            neighborhood_hash="hash_g",
+            embedding=vec(0.10),
         )
 
         print("\n== PgSearchStore (get_node profile join + hybrid RRF search + temporal, M4 t2) ==")
         node_row = await search.get_node(ALEX)
-        check("get_node LEFT JOIN returns profile text",
-              node_row is not None and node_row.profile == "Alex, updated.", str(node_row))
+        check(
+            "get_node LEFT JOIN returns profile text",
+            node_row is not None and node_row.profile == "Alex, updated.",
+            str(node_row),
+        )
         # chunk (vector) leg intact: query at MEM2's chunk direction, no FTS text → vector-only.
         chunk_hits = await search.search_chunks(vec(0.21), "", rp(settings))
-        check("vector leg intact: query -> MEM2 via chunk embedding",
-              MEM2 in [h.node_id for h in chunk_hits], str([h.node_id for h in chunk_hits]))
+        check(
+            "vector leg intact: query -> MEM2 via chunk embedding",
+            MEM2 in [h.node_id for h in chunk_hits],
+            str([h.node_id for h in chunk_hits]),
+        )
         # ADR-037 profile leg: ALEX has a profile embedding but NO chunk — a query at the profile's
         # direction must surface the ALEX entity node, snippet = the profile text.
         prof_hits = await search.search_chunks(vec(0.10), "", rp(settings))
         alex_hit = next((h for h in prof_hits if h.node_id == ALEX), None)
-        check("ADR-037: profile-only entity ALEX reachable via search (profile leg)",
-              alex_hit is not None, str([h.node_id for h in prof_hits]))
-        check("ADR-037: profile hit snippet = profile text",
-              alex_hit is not None and alex_hit.snippet == "Alex, updated.",
-              str(alex_hit))
-        check("ADR-037: tombstoned entity's profile excluded from search leg",
-              GHOST not in [h.node_id for h in prof_hits], str([h.node_id for h in prof_hits]))
+        check(
+            "ADR-037: profile-only entity ALEX reachable via search (profile leg)",
+            alex_hit is not None,
+            str([h.node_id for h in prof_hits]),
+        )
+        check(
+            "ADR-037: profile hit snippet = profile text",
+            alex_hit is not None and alex_hit.snippet == "Alex, updated.",
+            str(alex_hit),
+        )
+        check(
+            "ADR-037: tombstoned entity's profile excluded from search leg",
+            GHOST not in [h.node_id for h in prof_hits],
+            str([h.node_id for h in prof_hits]),
+        )
         # type filter still applies to the profile leg (ALEX is a person).
         filtered = await search.search_chunks(vec(0.10), "", rp(settings, types=["idea"]))
-        check("type filter excludes ALEX profile hit",
-              ALEX not in [h.node_id for h in filtered], str([h.node_id for h in filtered]))
+        check(
+            "type filter excludes ALEX profile hit",
+            ALEX not in [h.node_id for h in filtered],
+            str([h.node_id for h in filtered]),
+        )
 
         # --- M4 task 2: hybrid FTS leg (migration 008 tsv) + RRF fusion ------------------------
         # FTS leg matches by lexeme (not vector): a far-off embedding + a text query hitting MEM2's
         # chunk ("office project") must still surface MEM2 via the tsvector leg, proving the tsv
         # column + websearch_to_tsquery + RRF fuse. vec(9.0) is far from every seeded direction.
         fts_hits = await search.search_chunks(vec(9.0), "office project", rp(settings))
-        check("FTS leg: text 'office project' surfaces MEM2 via tsvector (migration 008)",
-              MEM2 in [h.node_id for h in fts_hits], str([h.node_id for h in fts_hits]))
-        check("FTS leg: 'office' matches both office-chunk memories (MEM1+MEM2)",
-              {MEM1, MEM2} <= set(h.node_id for h in
-                                  await search.search_chunks(vec(9.0), "office", rp(settings))))
+        check(
+            "FTS leg: text 'office project' surfaces MEM2 via tsvector (migration 008)",
+            MEM2 in [h.node_id for h in fts_hits],
+            str([h.node_id for h in fts_hits]),
+        )
+        check(
+            "FTS leg: 'office' matches both office-chunk memories (MEM1+MEM2)",
+            {MEM1, MEM2}
+            <= set(h.node_id for h in await search.search_chunks(vec(9.0), "office", rp(settings))),
+        )
         # Self-suppression: a non-English query yields no corpus-matching lexemes → FTS contributes
         # nothing, ranking falls back to the vector leg (no crash, MEM2 still reachable by vector).
         suppressed = await search.search_chunks(vec(0.21), "bonjour salut ça va", rp(settings))
-        check("FTS self-suppresses on non-English query (vector-only fallback, no error)",
-              MEM2 in [h.node_id for h in suppressed], str([h.node_id for h in suppressed]))
+        check(
+            "FTS self-suppresses on non-English query (vector-only fallback, no error)",
+            MEM2 in [h.node_id for h in suppressed],
+            str([h.node_id for h in suppressed]),
+        )
 
         # --- M4 task 2: temporal filters on occurred (ALEX 2026-01-01, MEM1 02-01, MEM2 03-01) ---
         until_hits = await search.search_chunks(
             vec(0.20), "office", rp(settings, until=date(2026, 1, 15))
         )
-        check("temporal until: occurred_start <= 2026-01-15 keeps ALEX, drops MEM1/MEM2",
-              MEM1 not in [h.node_id for h in until_hits]
-              and MEM2 not in [h.node_id for h in until_hits], str([h.node_id for h in until_hits]))
+        check(
+            "temporal until: occurred_start <= 2026-01-15 keeps ALEX, drops MEM1/MEM2",
+            MEM1 not in [h.node_id for h in until_hits]
+            and MEM2 not in [h.node_id for h in until_hits],
+            str([h.node_id for h in until_hits]),
+        )
         since_hits = await search.search_chunks(
             vec(0.20), "office", rp(settings, since=date(2026, 2, 15))
         )
-        check("temporal since: occurred >= 2026-02-15 keeps MEM2, drops MEM1/ALEX",
-              MEM2 in [h.node_id for h in since_hits]
-              and MEM1 not in [h.node_id for h in since_hits]
-              and ALEX not in [h.node_id for h in since_hits], str([h.node_id for h in since_hits]))
-        asof_hits = await search.search_chunks(
-            vec(0.10), "", rp(settings, as_of=date(2026, 1, 15))
+        check(
+            "temporal since: occurred >= 2026-02-15 keeps MEM2, drops MEM1/ALEX",
+            MEM2 in [h.node_id for h in since_hits]
+            and MEM1 not in [h.node_id for h in since_hits]
+            and ALEX not in [h.node_id for h in since_hits],
+            str([h.node_id for h in since_hits]),
         )
-        check("temporal as_of: occurred_start <= 2026-01-15 keeps ALEX only (dated nodes)",
-              ALEX in [h.node_id for h in asof_hits]
-              and MEM1 not in [h.node_id for h in asof_hits]
-              and MEM2 not in [h.node_id for h in asof_hits], str([h.node_id for h in asof_hits]))
+        asof_hits = await search.search_chunks(vec(0.10), "", rp(settings, as_of=date(2026, 1, 15)))
+        check(
+            "temporal as_of: occurred_start <= 2026-01-15 keeps ALEX only (dated nodes)",
+            ALEX in [h.node_id for h in asof_hits]
+            and MEM1 not in [h.node_id for h in asof_hits]
+            and MEM2 not in [h.node_id for h in asof_hits],
+            str([h.node_id for h in asof_hits]),
+        )
 
         print("\n== PgNeighborStore (M5 task 1 — one-hop traverse: union/keyset/tombstone SQL) ==")
         # Seeded graph: MEM1 -involves-> ALEX (canonical), ALEX -at-> PLACE (canonical),
@@ -1065,60 +1366,88 @@ async def main() -> int:
         nbr = PgNeighborStore(db)
         both = await nbr.neighbors(ALEX, rel=None, direction=None, after=None, limit=50)
         # Ordered by (origin, rel, dir, node_id): PLACE (canonical/at/out) then MEM1 (involves/in).
-        check("neighbors(ALEX) both dirs, ordered, tombstone/derived-endpoint excluded",
-              [(e.node_id, e.dir, e.rel) for e in both]
-              == [(PLACE, "out", "at"), (MEM1, "in", "involves")], str(both))
-        check("neighbor carries endpoint type/plane (M7 render, no second fetch)",
-              both[0].type == "place" and both[0].plane == "personal", str(both[0]))
+        check(
+            "neighbors(ALEX) both dirs, ordered, tombstone/derived-endpoint excluded",
+            [(e.node_id, e.dir, e.rel) for e in both]
+            == [(PLACE, "out", "at"), (MEM1, "in", "involves")],
+            str(both),
+        )
+        check(
+            "neighbor carries endpoint type/plane (M7 render, no second fetch)",
+            both[0].type == "place" and both[0].plane == "personal",
+            str(both[0]),
+        )
         only_at = await nbr.neighbors(ALEX, rel="at", direction=None, after=None, limit=50)
-        check("rel filter 'at' -> PLACE only",
-              [e.node_id for e in only_at] == [PLACE], str(only_at))
+        check(
+            "rel filter 'at' -> PLACE only", [e.node_id for e in only_at] == [PLACE], str(only_at)
+        )
         inbound = await nbr.neighbors(ALEX, rel=None, direction="in", after=None, limit=50)
         check("direction 'in' -> MEM1 only", [e.node_id for e in inbound] == [MEM1], str(inbound))
         outbound = await nbr.neighbors(ALEX, rel=None, direction="out", after=None, limit=50)
-        check("direction 'out' -> PLACE only",
-              [e.node_id for e in outbound] == [PLACE], str(outbound))
+        check(
+            "direction 'out' -> PLACE only", [e.node_id for e in outbound] == [PLACE], str(outbound)
+        )
         # Tombstone exclusion on BOTH ends: the in-leg drops a tombstoned src (MEM2's only edge is
         # GHOST -similar-> MEM2), the out-leg drops a tombstoned dst (MEM1 -knows-> GHOST).
         mem2 = await nbr.neighbors(MEM2, rel=None, direction=None, after=None, limit=50)
-        check("neighbors(MEM2) empty — derived edge's tombstoned src excluded (in-leg)", mem2 == [],
-              str(mem2))
+        check(
+            "neighbors(MEM2) empty — derived edge's tombstoned src excluded (in-leg)",
+            mem2 == [],
+            str(mem2),
+        )
         mem1 = await nbr.neighbors(MEM1, rel=None, direction=None, after=None, limit=50)
-        check("neighbors(MEM1) = ALEX only — tombstoned dst GHOST excluded (out-leg)",
-              [e.node_id for e in mem1] == [ALEX], str(mem1))
+        check(
+            "neighbors(MEM1) = ALEX only — tombstoned dst GHOST excluded (out-leg)",
+            [e.node_id for e in mem1] == [ALEX],
+            str(mem1),
+        )
         # Keyset pagination drives the real (origin,rel,dir,node_id) > (…::uuid) tuple comparison.
         pg1 = await nbr.neighbors(ALEX, rel=None, direction=None, after=None, limit=1)
         check("page 1 (limit 1) -> PLACE", [e.node_id for e in pg1] == [PLACE], str(pg1))
         after = (pg1[0].origin, pg1[0].rel, pg1[0].dir, pg1[0].node_id)
         pg2 = await nbr.neighbors(ALEX, rel=None, direction=None, after=after, limit=1)
-        check("page 2 (keyset after PLACE) -> MEM1, no overlap",
-              [e.node_id for e in pg2] == [MEM1], str(pg2))
+        check(
+            "page 2 (keyset after PLACE) -> MEM1, no overlap",
+            [e.node_id for e in pg2] == [MEM1],
+            str(pg2),
+        )
 
         print("\n== PgVocabularyStore (task-7a app_settings jsonb) ==")
-        check("get_additions empty initially",
-              (await vocab.get_additions()).edge_rels == ())
+        check("get_additions empty initially", (await vocab.get_additions()).edge_rels == ())
         added = await vocab.add(edge_rels=["smoke_rel"], node_types=["smoke_type"])
-        check("add returns merged additions",
-              "smoke_rel" in added.edge_rels and "smoke_type" in added.node_types, str(added))
+        check(
+            "add returns merged additions",
+            "smoke_rel" in added.edge_rels and "smoke_type" in added.node_types,
+            str(added),
+        )
         again = await vocab.add(edge_rels=["smoke_rel"])  # idempotent
         check("add idempotent (no dup)", again.edge_rels.count("smoke_rel") == 1, str(again))
 
         print("\n== PgEdgeConsolidationStore (task-7b inventory + path resolution) ==")
         inv = await edges.edge_inventory(exclude_rel="involves", limit=50)
         inv_rels = {(e.src_id, e.rel, e.dst_id) for e in inv}
-        check("edge_inventory excludes exclude_rel + derived + tombstone target",
-              (MEM1, "involves", ALEX) not in inv_rels and (ALEX, "at", PLACE) in inv_rels,
-              str(inv_rels))
+        check(
+            "edge_inventory excludes exclude_rel + derived + tombstone target",
+            (MEM1, "involves", ALEX) not in inv_rels and (ALEX, "at", PLACE) in inv_rels,
+            str(inv_rels),
+        )
         # excerpt join: query with exclude_rel='at' so the involves edge (src MEM1, which HAS a
         # chunk_index 0) is the candidate — its src_excerpt must be the LEFT JOIN'd chunk content.
         inv2 = await edges.edge_inventory(exclude_rel="at", limit=50)
         involves_edge = next((e for e in inv2 if e.rel == "involves" and e.src_id == MEM1), None)
-        check("edge_inventory src_excerpt from chunk_index 0",
-              involves_edge is not None and involves_edge.src_excerpt is not None
-              and "Alex" in involves_edge.src_excerpt, str(involves_edge))
+        check(
+            "edge_inventory src_excerpt from chunk_index 0",
+            involves_edge is not None
+            and involves_edge.src_excerpt is not None
+            and "Alex" in involves_edge.src_excerpt,
+            str(involves_edge),
+        )
         paths = await edges.store_paths_for([ALEX, GHOST, PLACE])
-        check("store_paths_for resolves live, drops tombstone",
-              paths.get(ALEX) == "smoke::person/alex.md" and GHOST not in paths, str(paths))
+        check(
+            "store_paths_for resolves live, drops tombstone",
+            paths.get(ALEX) == "smoke::person/alex.md" and GHOST not in paths,
+            str(paths),
+        )
 
         print("\n== PgChatStore (M4 task 3 — chat_sessions/chat_messages + sources jsonb) ==")
         chat = PgChatStore(db)
@@ -1126,30 +1455,56 @@ async def main() -> int:
         check("create_session returns id", bool(sid))
         await chat.add_message(sid, role="user", content="what did I decide about pricing?")
         srcs = [
-            {"node_id": ALEX, "store_path": "smoke::person/alex.md", "type": "person",
-             "title": "Alex", "snippet": "met at the office", "score": 0.031, "planes": ["Work"]},
+            {
+                "node_id": ALEX,
+                "store_path": "smoke::person/alex.md",
+                "type": "person",
+                "title": "Alex",
+                "snippet": "met at the office",
+                "score": 0.031,
+                "planes": ["Work"],
+            },
         ]
         await chat.add_message(
-            sid, role="assistant", content="You raised prices [1].", model="claude-opus-4-8",
+            sid,
+            role="assistant",
+            content="You raised prices [1].",
+            model="claude-opus-4-8",
             sources=srcs,
         )
         msgs = await chat.session_messages(sid)
-        check("session_messages returns both turns oldest-first",
-              [m.role for m in msgs] == ["user", "assistant"], str([m.role for m in msgs]))
-        check("assistant sources jsonb round-trips (list[dict], score float)",
-              msgs[1].sources == srcs, str(msgs[1].sources))
-        check("user turn has no model / empty sources",
-              msgs[0].model is None and msgs[0].sources == [], str(msgs[0]))
+        check(
+            "session_messages returns both turns oldest-first",
+            [m.role for m in msgs] == ["user", "assistant"],
+            str([m.role for m in msgs]),
+        )
+        check(
+            "assistant sources jsonb round-trips (list[dict], score float)",
+            msgs[1].sources == srcs,
+            str(msgs[1].sources),
+        )
+        check(
+            "user turn has no model / empty sources",
+            msgs[0].model is None and msgs[0].sources == [],
+            str(msgs[0]),
+        )
         # limit window: newest-N, still oldest-first (the DESC-then-reorder subquery).
         last_one = await chat.session_messages(sid, limit=1)
-        check("session_messages limit=1 keeps the newest turn",
-              [m.content for m in last_one] == ["You raised prices [1]."], str(last_one))
+        check(
+            "session_messages limit=1 keeps the newest turn",
+            [m.content for m in last_one] == ["You raised prices [1]."],
+            str(last_one),
+        )
         await chat.set_last_model(sid, "nebius")
         await chat.set_title(sid, "smoke::Pricing decision")
         sess = await chat.get_session(sid)
-        check("set_title / set_last_model persisted",
-              sess is not None and sess.title == "smoke::Pricing decision"
-              and sess.last_model == "nebius", str(sess))
+        check(
+            "set_title / set_last_model persisted",
+            sess is not None
+            and sess.title == "smoke::Pricing decision"
+            and sess.last_model == "nebius",
+            str(sess),
+        )
         listed = await chat.list_sessions(50)
         check("list_sessions includes the session", sid in [s.id for s in listed])
         await db.pool.execute("DELETE FROM chat_sessions WHERE id = $1", sid)

@@ -56,9 +56,7 @@ def _edge_line(edge: NeighborEdge | NodeEdgeView, indent: str = "") -> str:
     )
 
 
-def _render_edges(
-    edges: list[NodeEdgeView], node_id: str, cap: int, indent: str = ""
-) -> list[str]:
+def _render_edges(edges: list[NodeEdgeView], node_id: str, cap: int, indent: str = "") -> list[str]:
     lines = [_edge_line(e, indent) for e in edges[:cap]]
     if len(edges) > cap:
         extra = len(edges) - cap
@@ -72,7 +70,7 @@ def render_node(node: NodePreview, *, edge_cap: int) -> str:
     if node.merged_into is not None:
         return (
             f"Node `{node.node_id}` was merged into `{node.merged_into}` — "
-            f"use `get_node(id=\"{node.merged_into}\")`."
+            f'use `get_node(id="{node.merged_into}")`.'
         )
     lines = [f"# {_title(node.title)}", ""]
     lines.append(f"- id: `{node.node_id}`")
@@ -123,9 +121,7 @@ def _render_context_tree(
         if cn.neighbors:
             lines += _render_context_tree(cn.neighbors, depth + 1, edge_cap)
         if cn.truncated:
-            lines.append(
-                f'{indent}  - …more; use `traverse(id="{cn.edge.node_id}")` for the rest'
-            )
+            lines.append(f'{indent}  - …more; use `traverse(id="{cn.edge.node_id}")` for the rest')
     return lines
 
 

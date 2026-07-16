@@ -131,9 +131,7 @@ async def run_pipeline(name: str) -> int:
         )
         runners = {defn.name: runner for defn, runner in scheduler.pipeline_runners()}
         if name not in runners:
-            sys.stderr.write(
-                f"unknown pipeline {name!r}; known: {', '.join(sorted(runners))}\n"
-            )
+            sys.stderr.write(f"unknown pipeline {name!r}; known: {', '.join(sorted(runners))}\n")
             return 2
         outcome = await runners[name].run()
         # Only the distiller + inbox-drain organize through the shared capture pipeline; drain it +

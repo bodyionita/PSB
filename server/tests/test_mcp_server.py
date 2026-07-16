@@ -30,9 +30,15 @@ class FakeSearch:
         self.calls.append({"query": query, **kw})
         return [
             SearchHit(
-                node_id=NID, store_path="p", type="memory", title="Pricing call",
-                plane="Professional", planes=["Professional"], tags=["pricing"],
-                snippet="We raised prices.", score=0.03,
+                node_id=NID,
+                store_path="p",
+                type="memory",
+                title="Pricing call",
+                plane="Professional",
+                planes=["Professional"],
+                tags=["pricing"],
+                snippet="We raised prices.",
+                score=0.03,
             )
         ]
 
@@ -40,43 +46,103 @@ class FakeSearch:
         if node_id != NID:
             return None
         return NodePreview(
-            node_id=NID, store_path="p", type="memory", title="Pricing call", plane="Professional",
-            planes=["Professional"], tags=["pricing"], aliases=[], disambig=None, occurred=None,
-            occurred_end=None, body="We raised prices.", profile=None,
-            edges=[NodeEdgeView(rel="involves", dir="out", node_id=NID2, type="person",
-                                title="Alex", origin="canonical", score=None, since=None,
-                                until=None)],
+            node_id=NID,
+            store_path="p",
+            type="memory",
+            title="Pricing call",
+            plane="Professional",
+            planes=["Professional"],
+            tags=["pricing"],
+            aliases=[],
+            disambig=None,
+            occurred=None,
+            occurred_end=None,
+            body="We raised prices.",
+            profile=None,
+            edges=[
+                NodeEdgeView(
+                    rel="involves",
+                    dir="out",
+                    node_id=NID2,
+                    type="person",
+                    title="Alex",
+                    origin="canonical",
+                    score=None,
+                    since=None,
+                    until=None,
+                )
+            ],
             merged_into=None,
         )
 
 
 class FakeGraph:
     async def neighbors(self, node_id, *, rel=None, direction="both", cursor=None):
-        edge = NeighborEdge(origin="canonical", rel="involves", dir="out", node_id=NID2,
-                            type="person", title="Alex", plane="Professional", score=None,
-                            since=None, until=None)
-        return NeighborPage(center_id=node_id, neighbors=[edge], next_cursor="CUR", rel=rel,
-                            direction=direction)
+        edge = NeighborEdge(
+            origin="canonical",
+            rel="involves",
+            dir="out",
+            node_id=NID2,
+            type="person",
+            title="Alex",
+            plane="Professional",
+            score=None,
+            since=None,
+            until=None,
+        )
+        return NeighborPage(
+            center_id=node_id, neighbors=[edge], next_cursor="CUR", rel=rel, direction=direction
+        )
 
     async def build_context(self, node_id, *, depth=None):
         if node_id != NID:
             return None
         node = NodePreview(
-            node_id=NID, store_path="p", type="memory", title="Pricing call", plane="Professional",
-            planes=["Professional"], tags=[], aliases=[], disambig=None, occurred=None,
-            occurred_end=None, body="body", profile=None, edges=[], merged_into=None,
+            node_id=NID,
+            store_path="p",
+            type="memory",
+            title="Pricing call",
+            plane="Professional",
+            planes=["Professional"],
+            tags=[],
+            aliases=[],
+            disambig=None,
+            occurred=None,
+            occurred_end=None,
+            body="body",
+            profile=None,
+            edges=[],
+            merged_into=None,
         )
-        edge = NeighborEdge(origin="canonical", rel="involves", dir="out", node_id=NID2,
-                            type="person", title="Alex", plane=None, score=None, since=None,
-                            until=None)
-        return NodeContext(node=node, neighbors=[ContextNeighbor(edge=edge)], depth=1,
-                           truncated=False, identity_capsule="The user runs a startup.")
+        edge = NeighborEdge(
+            origin="canonical",
+            rel="involves",
+            dir="out",
+            node_id=NID2,
+            type="person",
+            title="Alex",
+            plane=None,
+            score=None,
+            since=None,
+            until=None,
+        )
+        return NodeContext(
+            node=node,
+            neighbors=[ContextNeighbor(edge=edge)],
+            depth=1,
+            truncated=False,
+            identity_capsule="The user runs a startup.",
+        )
 
 
 class FakeVocab:
     async def list_types(self):
-        return SimpleNamespace(node_types=["memory", "person"], edge_rels=["involves"],
-                               entity_like_types=["person"], proposals=[])
+        return SimpleNamespace(
+            node_types=["memory", "person"],
+            edge_rels=["involves"],
+            entity_like_types=["person"],
+            proposals=[],
+        )
 
 
 class FakeCapture:
@@ -98,8 +164,12 @@ def _mcp():
     search, graph, capture = FakeSearch(), FakeGraph(), FakeCapture()
     app = SimpleNamespace(
         state=SimpleNamespace(
-            settings=settings, oauth_service=None, search_service=search, graph_service=graph,
-            capture_pipeline=capture, vocabulary_service=FakeVocab(),
+            settings=settings,
+            oauth_service=None,
+            search_service=search,
+            graph_service=graph,
+            capture_pipeline=capture,
+            vocabulary_service=FakeVocab(),
             identity_capsule_store=FakeCapsuleStore(),
         )
     )
@@ -121,7 +191,13 @@ async def test_list_tools_and_annotations():
         tools = (await client.list_tools()).tools
     by_name = {t.name: t for t in tools}
     assert set(by_name) == {
-        "search", "get_node", "traverse", "build_context", "list_planes", "list_types", "capture"
+        "search",
+        "get_node",
+        "traverse",
+        "build_context",
+        "list_planes",
+        "list_types",
+        "capture",
     }
     assert by_name["search"].annotations.readOnlyHint is True
     assert by_name["capture"].annotations.readOnlyHint is False  # the write tool
@@ -212,9 +288,13 @@ async def test_traverse_maps_invalid_direction():
 
     app = SimpleNamespace(
         state=SimpleNamespace(
-            settings=settings, oauth_service=None, search_service=FakeSearch(),
-            graph_service=RaisingGraph(), capture_pipeline=FakeCapture(),
-            vocabulary_service=FakeVocab(), identity_capsule_store=FakeCapsuleStore(),
+            settings=settings,
+            oauth_service=None,
+            search_service=FakeSearch(),
+            graph_service=RaisingGraph(),
+            capture_pipeline=FakeCapture(),
+            vocabulary_service=FakeVocab(),
+            identity_capsule_store=FakeCapsuleStore(),
         )
     )
     mcp = build_mcp_server(app, settings)
@@ -234,6 +314,6 @@ def test_transport_security_allows_the_public_host():
 
     sec = mcp.settings.transport_security
     assert sec is not None and sec.enable_dns_rebinding_protection is True
-    assert "braindan.cc" in sec.allowed_hosts          # bare Host (edge sends no port)
-    assert "braindan.cc:*" in sec.allowed_hosts         # tolerate an explicit port
+    assert "braindan.cc" in sec.allowed_hosts  # bare Host (edge sends no port)
+    assert "braindan.cc:*" in sec.allowed_hosts  # tolerate an explicit port
     assert "https://braindan.cc" in sec.allowed_origins

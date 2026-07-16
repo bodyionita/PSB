@@ -263,9 +263,7 @@ def retarget_edges(raw_text: str, *, old_to: str, new_to: str) -> tuple[str, int
     return f"---\n{chr(10).join(out)}\n---\n{body}", retargeted
 
 
-def retype_edge(
-    raw_text: str, *, to: str, from_rel: str, to_rel: str
-) -> tuple[str, int]:
+def retype_edge(raw_text: str, *, to: str, from_rel: str, to_rel: str) -> tuple[str, int]:
     """Rewrite every canonical edge ``{rel: from_rel, to: to}`` → ``rel: to_rel`` (edge
     retro-consolidation, ADR-036 / M3 task 7b). Pure (no I/O) so it is unit-tested directly.
 
@@ -391,8 +389,8 @@ def merged_alias_union(
     return _unique(
         [
             *survivor_aliases,
-            *( [survivor_title] if survivor_title else [] ),
-            *( [loser_title] if loser_title else [] ),
+            *([survivor_title] if survivor_title else []),
+            *([loser_title] if loser_title else []),
             *loser_aliases,
         ]
     )
@@ -536,9 +534,9 @@ class NodeWriter:
         path = self._root / Path(*store_path.split("/"))
         if not path.exists():
             return
-        self._atomic_write(path, render_tombstone(
-            node_id=node_id, node_type=node_type, survivor_id=survivor_id
-        ))
+        self._atomic_write(
+            path, render_tombstone(node_id=node_id, node_type=node_type, survivor_id=survivor_id)
+        )
 
     def remove_nodes(
         self, store_paths: list[str], *, keep_types: set[str] | tuple[str, ...] = ()

@@ -192,8 +192,18 @@ class EntityResolver:
                 )
             else:
                 await self._disambiguate(
-                    result, key, m, candidates, source, source_ref, created_local, since, excerpt,
-                    pending_edges=edge_map.get(key, []), min_len=min_len, stop=stop,
+                    result,
+                    key,
+                    m,
+                    candidates,
+                    source,
+                    source_ref,
+                    created_local,
+                    since,
+                    excerpt,
+                    pending_edges=edge_map.get(key, []),
+                    min_len=min_len,
+                    stop=stop,
                 )
         return result
 
@@ -253,8 +263,14 @@ class EntityResolver:
         except ProviderUnavailable:
             result.resolver_fallback_used = True
             await self._file_review(
-                result, m, capped, source, source_ref, excerpt,
-                reason="resolver-unavailable", pending_edges=pending_edges,
+                result,
+                m,
+                capped,
+                source,
+                source_ref,
+                excerpt,
+                reason="resolver-unavailable",
+                pending_edges=pending_edges,
             )
             return
 
@@ -269,8 +285,14 @@ class EntityResolver:
             self._mint(result, key, m, source, source_ref, created_local, since)
         else:
             await self._file_review(
-                result, m, capped, source, source_ref, excerpt,
-                reason="low-confidence", pending_edges=pending_edges,
+                result,
+                m,
+                capped,
+                source,
+                source_ref,
+                excerpt,
+                reason="low-confidence",
+                pending_edges=pending_edges,
             )
 
     def _maybe_accrete(

@@ -128,18 +128,19 @@ async def test_fold_skips_missing_source_never_crashes(tmp_path: Path):
     assert result.sources_skipped == 1
     assert result.edges_retargeted == 0
     # The loser is still tombstoned even though a source was skipped.
-    assert parse_node_metadata(
-        (tmp_path / Path(*loser.split("/"))).read_text("utf-8"),
-        store_path=loser,
-        fallback_created=CREATED,
-    ).merged_into == "surv-2"
+    assert (
+        parse_node_metadata(
+            (tmp_path / Path(*loser.split("/"))).read_text("utf-8"),
+            store_path=loser,
+            fallback_created=CREATED,
+        ).merged_into
+        == "surv-2"
+    )
 
 
 @pytest.mark.asyncio
 async def test_entity_node_projects_onto_target(tmp_path: Path):
     # Sanity: an EntityNode's fields map cleanly onto a MergeTarget (the projection callers use).
     node = EntityNode("id-1", "person", "Alex", "person/alex--1.md", ["alex"], None)
-    target = MergeTarget(
-        id=node.id, type=node.type, title=node.title, store_path=node.store_path
-    )
+    target = MergeTarget(id=node.id, type=node.type, title=node.title, store_path=node.store_path)
     assert (target.id, target.type, target.store_path) == ("id-1", "person", "person/alex--1.md")

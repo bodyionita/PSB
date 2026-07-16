@@ -28,8 +28,15 @@ NID2 = "22222222-2222-2222-2222-222222222222"
 
 def _hit(**kw) -> SearchHit:
     base = dict(
-        node_id=NID, store_path="p", type="memory", title="Pricing call", plane="Professional",
-        planes=["Professional"], tags=["pricing"], snippet="We raised prices in Q2.", score=0.0321,
+        node_id=NID,
+        store_path="p",
+        type="memory",
+        title="Pricing call",
+        plane="Professional",
+        planes=["Professional"],
+        tags=["pricing"],
+        snippet="We raised prices in Q2.",
+        score=0.0321,
     )
     base.update(kw)
     return SearchHit(**base)
@@ -37,8 +44,15 @@ def _hit(**kw) -> SearchHit:
 
 def _edge(node_id=NID2, rel="involves", direction="out", **kw) -> NodeEdgeView:
     base = dict(
-        rel=rel, dir=direction, node_id=node_id, type="person", title="Alex", origin="canonical",
-        score=None, since=None, until=None,
+        rel=rel,
+        dir=direction,
+        node_id=node_id,
+        type="person",
+        title="Alex",
+        origin="canonical",
+        score=None,
+        since=None,
+        until=None,
     )
     base.update(kw)
     return NodeEdgeView(**base)
@@ -46,8 +60,16 @@ def _edge(node_id=NID2, rel="involves", direction="out", **kw) -> NodeEdgeView:
 
 def _neighbor(node_id=NID2, rel="involves", direction="out", **kw) -> NeighborEdge:
     base = dict(
-        origin="canonical", rel=rel, dir=direction, node_id=node_id, type="person", title="Alex",
-        plane="Professional", score=None, since=None, until=None,
+        origin="canonical",
+        rel=rel,
+        dir=direction,
+        node_id=node_id,
+        type="person",
+        title="Alex",
+        plane="Professional",
+        score=None,
+        since=None,
+        until=None,
     )
     base.update(kw)
     return NeighborEdge(**base)
@@ -55,9 +77,21 @@ def _neighbor(node_id=NID2, rel="involves", direction="out", **kw) -> NeighborEd
 
 def _node(**kw) -> NodePreview:
     base = dict(
-        node_id=NID, store_path="p", type="memory", title="Pricing call", plane="Professional",
-        planes=["Professional"], tags=["pricing"], aliases=[], disambig=None, occurred=None,
-        occurred_end=None, body="We raised prices.", profile=None, edges=[], merged_into=None,
+        node_id=NID,
+        store_path="p",
+        type="memory",
+        title="Pricing call",
+        plane="Professional",
+        planes=["Professional"],
+        tags=["pricing"],
+        aliases=[],
+        disambig=None,
+        occurred=None,
+        occurred_end=None,
+        body="We raised prices.",
+        profile=None,
+        edges=[],
+        merged_into=None,
     )
     base.update(kw)
     return NodePreview(**base)
@@ -111,14 +145,17 @@ def test_traverse_empty():
 def test_build_context_includes_capsule_and_tree():
     tree = [ContextNeighbor(edge=_neighbor(), neighbors=[], truncated=True)]
     ctx = NodeContext(
-        node=_node(), neighbors=tree, depth=1, truncated=False,
+        node=_node(),
+        neighbors=tree,
+        depth=1,
+        truncated=False,
         identity_capsule="The user runs a startup.",
     )
     md = render_build_context(ctx, edge_cap=20)
     assert "identity capsule" in md and "The user runs a startup." in md
     assert "## Context (depth 1)" in md
     assert "`involves`" in md and NID2 in md
-    assert "use `traverse(id=\"" + NID2 + "\")" in md  # per-branch truncation pointer
+    assert 'use `traverse(id="' + NID2 + '")' in md  # per-branch truncation pointer
 
 
 def test_build_context_no_capsule():

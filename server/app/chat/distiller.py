@@ -67,8 +67,22 @@ _SALIENCE_ALIASES = {"medium": SALIENCE_MED, "moderate": SALIENCE_MED, "mid": SA
 # whose text or evidence reads hedged is downgraded to `unclear` (bias uncertain uptake to review,
 # never auto-endorse). A conservative, high-precision set — the prompt does the primary routing.
 _HEDGE_MARKERS = (
-    "maybe", "might", "perhaps", "i think", "i guess", "probably", "not sure", "unsure",
-    "possibly", "i wonder", "kind of", "sort of", "we'll see", "tbd", "idk", "i'm not sure",
+    "maybe",
+    "might",
+    "perhaps",
+    "i think",
+    "i guess",
+    "probably",
+    "not sure",
+    "unsure",
+    "possibly",
+    "i wonder",
+    "kind of",
+    "sort of",
+    "we'll see",
+    "tbd",
+    "idk",
+    "i'm not sure",
 )
 
 # Hard delimiters — the thread is DATA, never instructions (injection hygiene, carried from chat).
@@ -392,19 +406,20 @@ class ChatDistillerService:
             if result.truncated:
                 logger.info(
                     "chat-distiller: session %s delta capped at %d msg(s); remainder deferred to "
-                    "the next run", session.session_id, limit,
+                    "the next run",
+                    session.session_id,
+                    limit,
                 )
 
             try:
-                completion = await self._routing.complete(
-                    "conspect", self._distill_messages(delta)
-                )
+                completion = await self._routing.complete("conspect", self._distill_messages(delta))
             except ProviderUnavailable as exc:
                 # Chain down ⇒ degrade: leave the session un-distilled, do NOT advance the
                 # watermark, retry next window (ADR-048 §3 / rule 7). The session is the raw.
                 logger.warning(
                     "chat-distiller: conspect chain down for session %s (retry next window): %s",
-                    session.session_id, exc,
+                    session.session_id,
+                    exc,
                 )
                 result.skipped_reason = "conspect chain unavailable"
                 return result
@@ -466,9 +481,7 @@ class ChatDistillerService:
                 result.endorsed.append(capture_id)
             else:  # unclear
                 anchor = _anchor_time(candidate.evidence_excerpt, delta, default=anchor_default)
-                review_id = await self._file_stance_candidate(
-                    session.session_id, candidate, anchor
-                )
+                review_id = await self._file_stance_candidate(session.session_id, candidate, anchor)
                 if review_id is not None:
                     result.review.append(review_id)
 
@@ -636,9 +649,7 @@ def _dedup_key(text: str) -> str:
     return _match_normalize(text)
 
 
-def _anchor_time(
-    excerpt: str, messages: list[ChatMessageRecord], *, default: datetime
-) -> datetime:
+def _anchor_time(excerpt: str, messages: list[ChatMessageRecord], *, default: datetime) -> datetime:
     """The ``created_at`` an endorsed candidate's capture is stamped with (ADR-048 §1): the time of
     the message the candidate is anchored to, so a chat memory carries *conversation* time, not the
     3am job-run time. Located by matching the evidence excerpt to a delta message; falls back to

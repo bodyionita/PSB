@@ -79,9 +79,7 @@ async def resolve_batch(
         )
     results = await service.resolve_batch([str(i) for i in request.ids], request.action)
     return ReviewBatchResponse(
-        results=[
-            ReviewBatchResultItem(id=r.id, ok=r.ok, error=r.error) for r in results
-        ]
+        results=[ReviewBatchResultItem(id=r.id, ok=r.ok, error=r.error) for r in results]
     )
 
 
@@ -112,7 +110,5 @@ async def resolve_review(
             status_code=status.HTTP_409_CONFLICT, detail="review item already resolved"
         ) from None
     except BadResolution as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return _to_response(record)

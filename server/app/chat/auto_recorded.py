@@ -76,9 +76,7 @@ class AutoRecordedStore(Protocol):
         NULL`` so a double-remove is a no-op."""
         ...
 
-    async def list_recent(
-        self, limit: int, *, entity_types: list[str]
-    ) -> list[AutoRecordedItem]:
+    async def list_recent(self, limit: int, *, entity_types: list[str]) -> list[AutoRecordedItem]:
         """The audit list: auto-recorded, non-removed captures newest-first, joined to their primary
         content node for a title. ``entity_types`` are the hub folders to skip when picking the
         title node (a minted hub isn't the memory)."""
@@ -129,8 +127,10 @@ class AutoRecordedService:
 
     async def list_recent(self, limit: int | None = None) -> list[AutoRecordedItem]:
         """The chat-scoped audit list (``GET /chat/auto-recorded``), bounded by config (rule 9)."""
-        capped = min(limit or self._settings.chat_auto_recorded_list_max,
-                     self._settings.chat_auto_recorded_list_max)
+        capped = min(
+            limit or self._settings.chat_auto_recorded_list_max,
+            self._settings.chat_auto_recorded_list_max,
+        )
         entity_types = list(
             (await effective_vocabulary(self._vocab, self._settings)).entity_like_types
         )
@@ -221,9 +221,7 @@ class PgAutoRecordedStore:
         except (ValueError, IndexError):
             return False
 
-    async def list_recent(
-        self, limit: int, *, entity_types: list[str]
-    ) -> list[AutoRecordedItem]:
+    async def list_recent(self, limit: int, *, entity_types: list[str]) -> list[AutoRecordedItem]:
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """

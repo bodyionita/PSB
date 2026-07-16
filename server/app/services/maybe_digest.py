@@ -47,9 +47,7 @@ class MaybeDigestOutcome:
         if self.total == 0:
             return "maybe digest: no parked maybes"
         kinds = len(self.by_kind)
-        base = (
-            f"maybe digest: {self.total} parked maybe(s) across {kinds} kind(s)"
-        )
+        base = f"maybe digest: {self.total} parked maybe(s) across {kinds} kind(s)"
         if self.oldest_age_days is not None:
             base += f", oldest {self.oldest_age_days}d old"
         return base
@@ -66,8 +64,7 @@ class MaybeDigestOutcome:
 
 
 class MaybeDigestService:
-    """Owns the weekly maybe-digest: aggregate the parked maybes → a feed-visible run (ADR-048 §8).
-    """
+    """Owns the weekly maybe-digest: aggregate parked maybes → a feed-visible run (ADR-048 §8)."""
 
     def __init__(
         self,

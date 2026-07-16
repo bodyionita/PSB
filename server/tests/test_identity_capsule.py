@@ -30,14 +30,21 @@ from .fakes import (
 
 def _hub(node_id: str, title: str, *, degree: int = 3, profile: str = "") -> HubProfile:
     return HubProfile(
-        node_id=node_id, title=title, type="person", tier="snapshot",
-        profile=profile or f"{title} is someone the user knows.", degree=degree,
+        node_id=node_id,
+        title=title,
+        type="person",
+        tier="snapshot",
+        profile=profile or f"{title} is someone the user knows.",
+        degree=degree,
     )
 
 
 def _node(node_id: str, title: str, *, node_type: str = "memory", excerpt: str = "") -> RecentNode:
     return RecentNode(
-        node_id=node_id, title=title, type=node_type, plane="Personal",
+        node_id=node_id,
+        title=title,
+        type=node_type,
+        plane="Personal",
         excerpt=excerpt or f"something about {title}",
     )
 
@@ -120,7 +127,9 @@ async def test_refresh_distills_and_saves_blob():
 
 async def test_caps_are_honored_from_settings():
     settings = Settings(
-        chat_chain=["conspect-p"], distill_chain=["conspect-p"], quick_chain=["conspect-p"],
+        chat_chain=["conspect-p"],
+        distill_chain=["conspect-p"],
+        quick_chain=["conspect-p"],
         identity_capsule_max_hubs=1,
         identity_capsule_max_memories=2,
         identity_capsule_max_insights=0,
@@ -141,12 +150,12 @@ async def test_caps_are_honored_from_settings():
 
 async def test_char_cap_truncates_stored_text():
     settings = Settings(
-        chat_chain=["conspect-p"], distill_chain=["conspect-p"], quick_chain=["conspect-p"],
+        chat_chain=["conspect-p"],
+        distill_chain=["conspect-p"],
+        quick_chain=["conspect-p"],
         identity_capsule_max_chars=20,
     )
-    service, capsule, *_ = _make(
-        hubs=[_hub("h1", "Alex")], reply="x" * 500, settings=settings
-    )
+    service, capsule, *_ = _make(hubs=[_hub("h1", "Alex")], reply="x" * 500, settings=settings)
 
     await service.run_scheduled()
 
@@ -169,9 +178,7 @@ async def test_no_source_material_skips_without_saving():
 
 
 async def test_llm_down_keeps_last_capsule():
-    service, capsule, sources, provider, runs = _make(
-        hubs=[_hub("h1", "Alex")], available=False
-    )
+    service, capsule, sources, provider, runs = _make(hubs=[_hub("h1", "Alex")], available=False)
 
     outcome = await service.run_scheduled()
 

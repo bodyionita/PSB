@@ -212,7 +212,8 @@ class ReprocessService:
                 summary += f"; ⚠ {merges} standing merge(s) NOT re-applied (re-merge manually)"
                 logger.warning(
                     "reprocess-all: %d standing merge(s) could not be re-applied by id "
-                    "(re-identify-and-re-apply is a documented follow-up, ADR-042 §4)", merges
+                    "(re-identify-and-re-apply is a documented follow-up, ADR-042 §4)",
+                    merges,
                 )
             logger.info("%s", summary)
             await self._runs.finish(
@@ -274,9 +275,7 @@ class PgReprocessStore:
         async with self._db.acquire() as conn:
             # Tombstoned captures (one-tap remove, ADR-048 §11) are replay-excluded, so the
             # preview's "captures to replay" must match `capture_ids_chronological` — exclude them.
-            captures = await conn.fetchval(
-                "SELECT count(*) FROM captures WHERE removed_at IS NULL"
-            )
+            captures = await conn.fetchval("SELECT count(*) FROM captures WHERE removed_at IS NULL")
             nodes = await conn.fetchval("SELECT count(*) FROM nodes")
         return int(captures or 0), int(nodes or 0)
 
@@ -295,9 +294,7 @@ class PgReprocessStore:
             # + nightly sweeps, so they're cleared; `stance-candidate` is PRESERVED — its backing
             # (chat sessions) is never touched by capture replay and the watermark won't re-file it,
             # so a parked human decision must survive. DELETE (not TRUNCATE) to scope by kind.
-            await conn.execute(
-                "DELETE FROM review_queue WHERE kind <> $1", KIND_STANCE_CANDIDATE
-            )
+            await conn.execute("DELETE FROM review_queue WHERE kind <> $1", KIND_STANCE_CANDIDATE)
             await conn.execute("UPDATE captures SET node_paths = '{}'")
 
     async def capture_ids_chronological(self) -> list[str]:

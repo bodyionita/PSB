@@ -43,8 +43,11 @@ async def main() -> int:
 
         print("\n== PgReprocessStore read methods (read-only) ==")
         captures, nodes = await store.counts()
-        check("counts() returns ints", isinstance(captures, int) and isinstance(nodes, int),
-              f"{captures},{nodes}")
+        check(
+            "counts() returns ints",
+            isinstance(captures, int) and isinstance(nodes, int),
+            f"{captures},{nodes}",
+        )
         merges = await store.count_merges()
         check("count_merges() returns int", isinstance(merges, int), str(merges))
         ids = await store.capture_ids_chronological()
@@ -52,9 +55,10 @@ async def main() -> int:
 
         # Chronological ordering: verify against an explicit ORDER BY on the same data.
         async with db.acquire() as conn:
-            want = [str(r["id"]) for r in await conn.fetch(
-                "SELECT id FROM captures ORDER BY created_at ASC, id ASC"
-            )]
+            want = [
+                str(r["id"])
+                for r in await conn.fetch("SELECT id FROM captures ORDER BY created_at ASC, id ASC")
+            ]
         check("chronological order matches created_at ASC", ids == want)
 
         print("\n== reset_derived_and_review SQL (in a ROLLED-BACK txn — dev data untouched) ==")
@@ -103,16 +107,22 @@ async def main() -> int:
                 check("non-stance review kinds cleared", others_left == 0, str(others_left))
                 # captures row count is preserved (only node_paths cleared).
                 cap_after = await conn.fetchval("SELECT count(*) FROM captures")
-                check("captures rows preserved (not truncated)", cap_after == captures,
-                      f"{cap_after} vs {captures}")
+                check(
+                    "captures rows preserved (not truncated)",
+                    cap_after == captures,
+                    f"{cap_after} vs {captures}",
+                )
                 print(f"       (rolled back — {before} node(s) restored)")
             finally:
                 await tx.rollback()
 
         # Confirm the rollback: data is back.
         _, nodes_after = await store.counts()
-        check("rollback restored nodes (dev data intact)", nodes_after == nodes,
-              f"{nodes_after} vs {nodes}")
+        check(
+            "rollback restored nodes (dev data intact)",
+            nodes_after == nodes,
+            f"{nodes_after} vs {nodes}",
+        )
     finally:
         await db.disconnect()
 

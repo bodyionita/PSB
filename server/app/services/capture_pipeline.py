@@ -251,9 +251,7 @@ class CapturePipeline:
         self._spawn(self._process_burst_limited(capture_id))
         return capture_id
 
-    async def create_chat_capture(
-        self, text: str, *, session_id: str, created_at: datetime
-    ) -> str:
+    async def create_chat_capture(self, text: str, *, session_id: str, created_at: datetime) -> str:
         """Materialize an **endorsed** chat-distiller candidate as a capture (ADR-048 §1).
 
         The candidate's clean memory statement becomes the capture ``raw`` (``source=chat``,
@@ -359,8 +357,11 @@ class CapturePipeline:
             organize = await self._organize(self._combined_text(record))
             created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
-                organize, capture_id=capture_id, created_local=created_local,
-                source=self._effective_source(record), inter=inter,
+                organize,
+                capture_id=capture_id,
+                created_local=created_local,
+                source=self._effective_source(record),
+                inter=inter,
             )
             await self._store.set_node_paths(capture_id, paths)
             await self._index_nodes(paths)
@@ -512,8 +513,11 @@ class CapturePipeline:
 
             created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
-                organize, capture_id=capture_id, created_local=created_local,
-                source=self._effective_source(record), inter=inter,
+                organize,
+                capture_id=capture_id,
+                created_local=created_local,
+                source=self._effective_source(record),
+                inter=inter,
             )
             await self._store.set_node_paths(capture_id, paths)
             # `written` reflects nodes actually on disk (matters for a future retry-resume).
@@ -638,8 +642,11 @@ class CapturePipeline:
             )
             created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
-                organize, capture_id=capture_id, created_local=created_local,
-                source=self._effective_source(record), inter=inter,
+                organize,
+                capture_id=capture_id,
+                created_local=created_local,
+                source=self._effective_source(record),
+                inter=inter,
             )
             await self._store.set_node_paths(capture_id, paths)
             await self._store.mark_status(capture_id, WRITTEN)
@@ -710,8 +717,11 @@ class CapturePipeline:
             max_edges=self._settings.organizer_max_edges,
         )
         if coerced:
-            logger.info("organizer emitted %d entity-typed node(s), coerced to memory: %s",
-                        len(coerced), coerced)
+            logger.info(
+                "organizer emitted %d entity-typed node(s), coerced to memory: %s",
+                len(coerced),
+                coerced,
+            )
         if not nodes:
             logger.info("organize produced no valid nodes, using inbox fallback")
             return self._inbox_result(text)
@@ -1079,9 +1089,7 @@ def _chat_capture_id(session_id: str, text: str) -> str:
     return str(uuid.uuid5(_CHAT_CAPTURE_NS, f"{session_id}\n{normalized}"))
 
 
-def build_capture_pipeline(
-    settings: Settings, db, store_backup: StoreBackup
-) -> CapturePipeline:
+def build_capture_pipeline(settings: Settings, db, store_backup: StoreBackup) -> CapturePipeline:
     """Construct a standalone :class:`CapturePipeline` (full organizer wiring) for the CLI-driven
     jobs that must go through the single writer (rule 2b) without the HTTP app — ``reprocess-all``
     replay and the chat-distiller's endorsed-candidate ingest (ADR-042 / ADR-048). Mirrors the

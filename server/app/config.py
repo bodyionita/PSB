@@ -91,9 +91,7 @@ class Settings(BaseSettings):
     # `idea` was reclassified content-only in the M3 task-11 quality pass (ADR-039) — the resolver
     # no longer mints idea hubs. The config/API key keeps its `entity_like_types` name (the web
     # `GET /types` contract, ADR-006) even though it now realizes the ADRs' `entity_types`.
-    entity_like_types: CsvList = Field(
-        default=["person", "place", "topic", "event", "project"]
-    )
+    entity_like_types: CsvList = Field(default=["person", "place", "topic", "event", "project"])
     # Entity-resolution confidence floor (ADR-030 §3, live-tuned at the M3 Accept):
     # below it the organizer never links — edge goes pending + entity-ambiguity review item.
     entity_match_min_conf: float = Field(default=0.8, ge=0.0, le=1.0)
@@ -191,8 +189,26 @@ class Settings(BaseSettings):
     # (English store; generic words that would over-match). Extend as needed.
     entity_stop_tokens: CsvList = Field(
         default=[
-            "the", "and", "for", "with", "from", "this", "that", "her", "his", "their",
-            "our", "your", "mom", "dad", "guy", "man", "boss", "friend", "team", "work",
+            "the",
+            "and",
+            "for",
+            "with",
+            "from",
+            "this",
+            "that",
+            "her",
+            "his",
+            "their",
+            "our",
+            "your",
+            "mom",
+            "dad",
+            "guy",
+            "man",
+            "boss",
+            "friend",
+            "team",
+            "work",
         ]
     )
 
@@ -257,15 +273,11 @@ class Settings(BaseSettings):
     # model→provider index (ADR-045); the vendor-string change cost is documented in
     # `claude_opus_model` below.
     chat_chain: CsvList = Field(default=["claude-opus-4-8", "meta-llama/Llama-3.3-70B-Instruct"])
-    distill_chain: CsvList = Field(
-        default=["claude-opus-4-8", "meta-llama/Llama-3.3-70B-Instruct"]
-    )
+    distill_chain: CsvList = Field(default=["claude-opus-4-8", "meta-llama/Llama-3.3-70B-Instruct"])
     # `quick` routing-group seed (ADR-043, ADR-045): a cheap/fast lane for trivial calls (M4 =
     # session titling). The cheaper Sonnet model (served by the same `claude` provider) is primary;
     # the Nebius model is the fallback.
-    quick_chain: CsvList = Field(
-        default=["claude-sonnet-4-6", "meta-llama/Llama-3.3-70B-Instruct"]
-    )
+    quick_chain: CsvList = Field(default=["claude-sonnet-4-6", "meta-llama/Llama-3.3-70B-Instruct"])
     # STT fallback chain (ADR-020): Groq (whisper-large-v3) primary, OpenAI (whisper-1) fallback.
     stt_chain: CsvList = Field(default=["groq", "openai"])
     # The two models the single `claude` provider serves through the Agent SDK / CLI via per-call

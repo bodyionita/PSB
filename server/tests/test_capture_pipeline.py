@@ -329,15 +329,17 @@ async def test_reorganize_refuses_a_removed_capture(tmp_path: Path):
     # No re-organize ran; node_paths untouched; the attempt is logged as a skip.
     assert responder.calls == organize_calls
     assert store.records[cid].node_paths == [original]
-    assert any(
-        r.status == "skipped" and "removed" in (r.summary or "") for r in runs.runs.values()
-    )
+    assert any(r.status == "skipped" and "removed" in (r.summary or "") for r in runs.runs.values())
 
 
 def _organizer_json_entity(title: str, entity_name: str = "Alex") -> str:
     node = {
-        "title": title, "type": "memory", "plane": "Ideas", "planes": ["Ideas"],
-        "tags": ["x"], "body": "b",
+        "title": title,
+        "type": "memory",
+        "plane": "Ideas",
+        "planes": ["Ideas"],
+        "tags": ["x"],
+        "body": "b",
         "entities": [{"name": entity_name, "type": "person", "rel": "involves"}],
     }
     return json.dumps({"nodes": [node]})
@@ -374,10 +376,21 @@ async def test_pipeline_coerces_entity_typed_node_to_memory(tmp_path: Path):
     # ADR-039: an entity-typed content node the model emits is coerced to memory (+ surfaced).
     def responder(messages):
         if "organize a person's raw capture" in messages[0].content:
-            return json.dumps({"nodes": [{
-                "title": "How I know Horia", "type": "person", "plane": "Ideas",
-                "planes": ["Ideas"], "tags": [], "body": "Horia is my friend", "entities": [],
-            }]})
+            return json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "title": "How I know Horia",
+                            "type": "person",
+                            "plane": "Ideas",
+                            "planes": ["Ideas"],
+                            "tags": [],
+                            "body": "Horia is my friend",
+                            "entities": [],
+                        }
+                    ]
+                }
+            )
         return "nudge?"
 
     chat = FakeChatProvider("fake-chat", responder=responder)
@@ -393,13 +406,30 @@ async def test_pipeline_coerces_entity_typed_node_to_memory(tmp_path: Path):
 async def test_capture_accretes_variant_alias_onto_existing_hub(tmp_path: Path):
     # ADR-040 §4: a confident link under a new surface form accretes it onto the hub's file.
     writer = NodeWriter(str(tmp_path / "store"))
-    [hub] = writer.write_nodes([NodeDocument(
-        id="horia-1", type="person", title="Horia", body="",
-        created_local=CREATED, source="text", aliases=("Horia",),
-    )])
-    alias = FakeAliasStore(entities=[EntityCandidate(
-        id="horia-1", type="person", title="Horia", aliases=["Horia"], store_path=hub.store_path,
-    )])
+    [hub] = writer.write_nodes(
+        [
+            NodeDocument(
+                id="horia-1",
+                type="person",
+                title="Horia",
+                body="",
+                created_local=CREATED,
+                source="text",
+                aliases=("Horia",),
+            )
+        ]
+    )
+    alias = FakeAliasStore(
+        entities=[
+            EntityCandidate(
+                id="horia-1",
+                type="person",
+                title="Horia",
+                aliases=["Horia"],
+                store_path=hub.store_path,
+            )
+        ]
+    )
 
     def responder(messages):
         system = messages[0].content

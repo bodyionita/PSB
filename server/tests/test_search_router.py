@@ -128,8 +128,12 @@ def test_search_forwards_temporal_filters():
     service = FakeSearchService(hits=[_HIT])
     resp = _client(service).post(
         f"{PREFIX}/search",
-        json={"query": "pricing", "since": "2026-01-01", "until": "2026-06-30",
-              "as_of": "2026-03-15"},
+        json={
+            "query": "pricing",
+            "since": "2026-01-01",
+            "until": "2026-06-30",
+            "as_of": "2026-03-15",
+        },
     )
     assert resp.status_code == 200
     call = service.calls[0]

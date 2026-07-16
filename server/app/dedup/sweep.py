@@ -127,9 +127,7 @@ class DedupSweepService:
                 ),
             )
 
-        stats = await self._store.survivor_stats(
-            sorted({nid for pair in pairs for nid in pair})
-        )
+        stats = await self._store.survivor_stats(sorted({nid for pair in pairs for nid in pair}))
         max_pairs = self._settings.dedup_max_pairs_per_run
         filed = 0
         already = 0
@@ -160,9 +158,7 @@ class DedupSweepService:
                 )
             )
             filed += 1
-        return DedupOutcome(
-            pairs_scanned=len(pairs), proposals_filed=filed, already_filed=already
-        )
+        return DedupOutcome(pairs_scanned=len(pairs), proposals_filed=filed, already_filed=already)
 
     async def _watermark(self, now: datetime) -> datetime:
         """Examine only content nodes indexed since the last successful sweep (the backfill idiom);

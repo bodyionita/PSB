@@ -45,9 +45,7 @@ def _routing() -> ModelRoutingService:
     settings = Settings(
         chat_chain=[OPUS, LLAMA], distill_chain=[OPUS, LLAMA], quick_chain=[SONNET, LLAMA]
     )
-    return ModelRoutingService(
-        settings=settings, store=FakeModelRoutingStore(), registry=registry
-    )
+    return ModelRoutingService(settings=settings, store=FakeModelRoutingStore(), registry=registry)
 
 
 def _client(routing: ModelRoutingService) -> TestClient:

@@ -104,9 +104,7 @@ async def test_claude_nonzero_returncode_degrades_to_unavailable(monkeypatch):
 async def test_claude_empty_output_degrades_to_unavailable(monkeypatch):
     provider = ClaudeProvider(models=["m"])
     monkeypatch.setattr(provider, "_resolve_cli", lambda: "claude")
-    monkeypatch.setattr(
-        "app.providers.claude.subprocess.run", _fake_run_factory({}, stdout="   ")
-    )
+    monkeypatch.setattr("app.providers.claude.subprocess.run", _fake_run_factory({}, stdout="   "))
     with pytest.raises(ProviderUnavailable):
         await provider.complete([ChatMessage(role="user", content="hi")])
 

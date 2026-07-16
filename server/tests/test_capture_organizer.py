@@ -233,18 +233,14 @@ def test_entity_typed_content_node_is_coerced_to_memory():
 
 def test_each_entity_type_is_coerced():
     for etype in ENTITY_TYPES:
-        nodes, _, coerced = _validate(
-            {"nodes": [{"title": "t", "type": etype, "body": "b"}]}
-        )
+        nodes, _, coerced = _validate({"nodes": [{"title": "t", "type": etype, "body": "b"}]})
         assert nodes[0].type == "memory", etype
         assert coerced == (etype,)
 
 
 def test_content_types_are_not_coerced():
     for ctype in ("memory", "idea", "insight", "conversation"):
-        nodes, _, coerced = _validate(
-            {"nodes": [{"title": "t", "type": ctype, "body": "b"}]}
-        )
+        nodes, _, coerced = _validate({"nodes": [{"title": "t", "type": ctype, "body": "b"}]})
         assert nodes[0].type == ctype, ctype
         assert coerced == ()
 

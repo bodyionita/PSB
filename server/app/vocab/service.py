@@ -130,9 +130,7 @@ class VocabularyService:
         return EffectiveVocabulary(
             node_types=_union(self._settings.node_types, additions.node_types),
             edge_rels=_union(self._settings.edge_rels, additions.edge_rels),
-            entity_like_types=_union(
-                self._settings.entity_like_types, additions.entity_like_types
-            ),
+            entity_like_types=_union(self._settings.entity_like_types, additions.entity_like_types),
         )
 
     # --- GET /types -------------------------------------------------------------------------

@@ -33,9 +33,7 @@ def upgrade() -> None:
             REFERENCES agent_runs (id) ON DELETE SET NULL
         """
     )
-    op.execute(
-        "CREATE INDEX agent_runs_parent_run_id_idx ON agent_runs (parent_run_id)"
-    )
+    op.execute("CREATE INDEX agent_runs_parent_run_id_idx ON agent_runs (parent_run_id)")
 
 
 def downgrade() -> None:

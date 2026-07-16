@@ -216,9 +216,7 @@ def build_backfill_service(
     )
 
 
-def _qualifying_aliases(
-    aliases: list[str], title: str | None, min_len: int
-) -> list[str]:
+def _qualifying_aliases(aliases: list[str], title: str | None, min_len: int) -> list[str]:
     """Aliases (+ the entity title) long enough to backfill on, most-specific (longest) first,
     deduped case-insensitively (ADR-032 entropy guard: short aliases never auto-link)."""
     seen: set[str] = set()

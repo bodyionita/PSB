@@ -61,7 +61,9 @@ class FakeReprocessor:
         if capture_id in self._fail:
             return ReprocessOne(capture_id=capture_id, ok=False, error="boom")
         return ReprocessOne(
-            capture_id=capture_id, ok=True, node_count=2,
+            capture_id=capture_id,
+            ok=True,
+            node_count=2,
             used_inbox_fallback=capture_id in self._inbox,
             coerced=self._coerced.get(capture_id, 0),
             accreted=self._accreted.get(capture_id, 0),
@@ -100,8 +102,14 @@ class FakeProfileRefresh:
         return _FakeProfileOutcome(self._refreshed)
 
 
-def _service(tmp_path: Path, store: FakeReprocessStore, reprocessor: FakeReprocessor,
-             *, graph: FakeGraph | None = None, profile_refresh: FakeProfileRefresh | None = None):
+def _service(
+    tmp_path: Path,
+    store: FakeReprocessStore,
+    reprocessor: FakeReprocessor,
+    *,
+    graph: FakeGraph | None = None,
+    profile_refresh: FakeProfileRefresh | None = None,
+):
     settings = Settings(graph_store_path=str(tmp_path / "store"), scheduler_tz="UTC")
     return ReprocessService(
         settings=settings,
@@ -126,12 +134,16 @@ async def test_preview_reports_counts_no_writes(tmp_path: Path):
 async def test_apply_resets_replays_chronologically_and_commits(tmp_path: Path):
     # Seed some node files so the store reset has something to remove.
     writer = NodeWriter(str(tmp_path / "store"))
-    writer.write_nodes([
-        NodeDocument(id="n1", type="memory", title="x", body="b",
-                     created_local=CREATED, source="text"),
-        NodeDocument(id="n2", type="person", title="Alex", body="",
-                     created_local=CREATED, source="text"),
-    ])
+    writer.write_nodes(
+        [
+            NodeDocument(
+                id="n1", type="memory", title="x", body="b", created_local=CREATED, source="text"
+            ),
+            NodeDocument(
+                id="n2", type="person", title="Alex", body="", created_local=CREATED, source="text"
+            ),
+        ]
+    )
     store = FakeReprocessStore(ids=["old", "mid", "new"])
     reprocessor = FakeReprocessor()
     graph = FakeGraph()
@@ -219,7 +231,7 @@ async def test_apply_aggregates_coerced_and_accreted_totals(tmp_path: Path):
     so a reprocess heal is auditable (reviewer #3 follow-up)."""
     store = FakeReprocessStore(ids=["a", "b", "c"])
     reprocessor = FakeReprocessor(
-        coerced={"a": 2, "c": 1},   # 3 total
+        coerced={"a": 2, "c": 1},  # 3 total
         accreted={"b": 1, "c": 2},  # 3 total
     )
     service, _ = _service(tmp_path, store, reprocessor)

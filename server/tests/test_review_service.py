@@ -162,10 +162,19 @@ async def test_pick_candidate_accretes_new_surface_form(tmp_path: Path):
     service, review, index, indexer, backup, _, writer, settings = _build(tmp_path)
     _seed_source_node(writer, index)
     # A real "Horia" hub on disk + indexed, so get_index_state finds its path for accretion.
-    [hub] = writer.write_nodes([NodeDocument(
-        id="horia-1", type="person", title="Horia", body="",
-        created_local=CREATED, source="text", aliases=("Horia",),
-    )])
+    [hub] = writer.write_nodes(
+        [
+            NodeDocument(
+                id="horia-1",
+                type="person",
+                title="Horia",
+                body="",
+                created_local=CREATED,
+                source="text",
+                aliases=("Horia",),
+            )
+        ]
+    )
     index.nodes["horia-1"] = NodeUpsert(
         id="horia-1", store_path=hub.store_path, type="person", content_hash="h"
     )
@@ -540,10 +549,16 @@ def _dedup_build(tmp_path: Path):
 def _seed_content_node(writer: NodeWriter, index: FakeIndexStore, node_id: str, node_type: str):
     """Write a real content node file + register it in the index; returns the store path."""
     [w] = writer.write_nodes(
-        [NodeDocument(
-            id=node_id, type=node_type, title=f"{node_type} {node_id}", body="b",
-            created_local=CREATED, source="text",
-        )]
+        [
+            NodeDocument(
+                id=node_id,
+                type=node_type,
+                title=f"{node_type} {node_id}",
+                body="b",
+                created_local=CREATED,
+                source="text",
+            )
+        ]
     )
     index.nodes[node_id] = NodeUpsert(
         id=node_id, store_path=w.store_path, type=node_type, content_hash="h"
@@ -561,8 +576,12 @@ def _dedup_item(node_a=DEDUP_A, node_b=DEDUP_B, default_survivor=DEDUP_A) -> Rev
         payload={
             "node_a": node_a,
             "node_b": node_b,
-            "signals": {"cosine": 0.95, "shared_entity_ids": ["e1"],
-                        "shared_entity_titles": ["Ana"], "occurred_overlap": True},
+            "signals": {
+                "cosine": 0.95,
+                "shared_entity_ids": ["e1"],
+                "shared_entity_titles": ["Ana"],
+                "occurred_overlap": True,
+            },
             "default_survivor": default_survivor,
         },
         excerpt="possible duplicate",
@@ -589,7 +608,8 @@ async def test_dedup_merge_folds_loser_into_default_survivor(tmp_path: Path):
     # The default survivor (A) is kept; B is tombstoned onto A (cross-type merge allowed).
     b_meta = parse_node_metadata(
         (Path(settings.graph_store_path) / Path(*b_path.split("/"))).read_text("utf-8"),
-        store_path=b_path, fallback_created=CREATED,
+        store_path=b_path,
+        fallback_created=CREATED,
     )
     assert b_meta.merged_into == DEDUP_A
     assert commit.reasons and "dedup merge" in commit.reasons[0]
@@ -613,7 +633,8 @@ async def test_dedup_merge_honours_explicit_survivor(tmp_path: Path):
     assert record.resolution == {"action": "merge", "survivor": DEDUP_B, "loser": DEDUP_A}
     a_meta = parse_node_metadata(
         (Path(settings.graph_store_path) / Path(*a_path.split("/"))).read_text("utf-8"),
-        store_path=a_path, fallback_created=CREATED,
+        store_path=a_path,
+        fallback_created=CREATED,
     )
     assert a_meta.merged_into == DEDUP_B
 
@@ -677,8 +698,12 @@ async def test_dedup_batch_keep_clears_proposals(tmp_path: Path):
     # A homogeneous batch of dedup proposals resolves via `action` (default survivor, no explicit).
     service, review, *_ = _dedup_build(tmp_path)
     r1 = await review.enqueue(_dedup_item(node_a=DEDUP_A, node_b=DEDUP_B))
-    r2 = await review.enqueue(_dedup_item(node_a="33333333-3333-4333-8333-333333333333",
-                                          node_b="44444444-4444-4444-8444-444444444444"))
+    r2 = await review.enqueue(
+        _dedup_item(
+            node_a="33333333-3333-4333-8333-333333333333",
+            node_b="44444444-4444-4444-8444-444444444444",
+        )
+    )
 
     results = await service.resolve_batch([r1, r2], "keep")
 

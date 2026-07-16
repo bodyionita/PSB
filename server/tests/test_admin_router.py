@@ -306,9 +306,7 @@ def test_vocab_consolidate_propose_returns_plan():
     assert resp.json() == {
         "plan_id": "plan-e1",
         "rel": "mentors",
-        "retypings": [
-            {"src_id": "s1", "to": "d1", "from_rel": "involves", "to_rel": "mentors"}
-        ],
+        "retypings": [{"src_id": "s1", "to": "d1", "from_rel": "involves", "to_rel": "mentors"}],
     }
 
 

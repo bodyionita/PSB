@@ -65,8 +65,13 @@ async def test_exact_hit_auto_links_without_llm():
     alias = FakeAliasStore(
         candidates_by_key={
             ("horia", "person"): [
-                EntityCandidate(id="horia-1", type="person", title="Horia",
-                                aliases=["Horia"], store_path="person/horia--h1.md")
+                EntityCandidate(
+                    id="horia-1",
+                    type="person",
+                    title="Horia",
+                    aliases=["Horia"],
+                    store_path="person/horia--h1.md",
+                )
             ]
         }
     )
@@ -82,7 +87,10 @@ async def test_exact_hit_auto_links_without_llm():
 
 async def test_variant_surfaces_existing_hub_then_llm_confirms_and_accretes():
     hub = EntityCandidate(
-        id="horia-1", type="person", title="Horia", aliases=["Horia"],
+        id="horia-1",
+        type="person",
+        title="Horia",
+        aliases=["Horia"],
         store_path="person/horia--h1.md",
     )
     # No exact key for "horia fenwick"; the hub is only reachable via the token-overlap pool.
@@ -105,7 +113,10 @@ async def test_variant_surfaces_existing_hub_then_llm_confirms_and_accretes():
 
 async def test_fuzzy_single_candidate_low_confidence_goes_to_review_never_guessed():
     hub = EntityCandidate(
-        id="horia-1", type="person", title="Horia", aliases=["Horia"],
+        id="horia-1",
+        type="person",
+        title="Horia",
+        aliases=["Horia"],
         store_path="person/horia--h1.md",
     )
     alias = FakeAliasStore(entities=[hub])
@@ -138,10 +149,20 @@ async def test_no_candidates_mints_a_new_hub():
 
 
 async def test_exact_hit_alongside_fuzzy_still_short_circuits():
-    exact = EntityCandidate(id="horia-1", type="person", title="Horia", aliases=["Horia"],
-                            store_path="person/horia--h1.md")
-    fuzzy = EntityCandidate(id="horia-2", type="person", title="Horia Delgado",
-                            aliases=["Horia Delgado"], store_path="person/horia-delgado--h2.md")
+    exact = EntityCandidate(
+        id="horia-1",
+        type="person",
+        title="Horia",
+        aliases=["Horia"],
+        store_path="person/horia--h1.md",
+    )
+    fuzzy = EntityCandidate(
+        id="horia-2",
+        type="person",
+        title="Horia Delgado",
+        aliases=["Horia Delgado"],
+        store_path="person/horia-delgado--h2.md",
+    )
     alias = FakeAliasStore(
         candidates_by_key={("horia", "person"): [exact]}, entities=[exact, fuzzy]
     )

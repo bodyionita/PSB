@@ -138,9 +138,7 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute(
-        "CREATE INDEX review_queue_status_idx ON review_queue (status, created_at DESC)"
-    )
+    op.execute("CREATE INDEX review_queue_status_idx ON review_queue (status, created_at DESC)")
 
     op.execute("ALTER TABLE captures RENAME COLUMN note_paths TO node_paths")
 
