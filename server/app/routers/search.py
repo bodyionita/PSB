@@ -144,9 +144,9 @@ async def node_neighbors(
     cursor: str | None = Query(default=None),
     service: GraphService = Depends(get_graph_service),
 ) -> NeighborZonesResponse | NeighborPageResponse:
-    """One-hop neighbors for the M7 map (03-api §Nodes neighbors, ADR-051 §2). Two modes:
+    """One-hop neighbors for the M7 map (03-api §Nodes neighbors, ADR-051 §2 / ADR-052). Two modes:
 
-    no ``rel`` → the grouped first page (one zone per ``(origin, rel)``, per-zone capped +
+    no ``rel`` → the grouped first page (one zone per ``rel``, per-zone capped +
     ``total``/``next_cursor``); with ``rel`` (+ optional ``cursor``) → that single zone's next flat
     page over the M5 keyset primitive ("show more"). Unknown node → ``center=None`` + empty zones.
     ``direction`` is validated to ``out``/``in``/``both`` by the type; a bad ``cursor`` → 422.
