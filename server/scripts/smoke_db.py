@@ -34,6 +34,12 @@ from app.identity.store import (
 )
 from app.oauth.store import PgOAuthStore
 from app.search.store import PgSearchStore, RetrievalParams
+from app.services.agent_runs import (
+    FAILED,
+    SUCCEEDED,
+    PgAgentRunStore,
+    child_run_scope,
+)
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
 
@@ -424,6 +430,56 @@ async def check_oauth(db: Database) -> None:
         await db.pool.execute("DELETE FROM mcp_oauth_clients WHERE client_id = $1", cid)
 
 
+async def check_agent_runs_linkage(db: Database) -> None:
+    """M5.5 task 1 (ADR-047 §5): the real ``agent_runs`` parent/child linkage — the
+    ``parent_run_id`` column + FK (migration 012) driven through :class:`PgAgentRunStore` and the
+    ``child_run_scope`` contextvar, which the unit tests can only fake."""
+    print("\n== PgAgentRunStore parent/child linkage (M5.5 task 1 — migration 012) ==")
+    runs = PgAgentRunStore(db)
+    opened: list[str] = []
+    try:
+        # A bare start (no active scope) is parentless — the standalone-job path, unchanged.
+        bare = await runs.start("smoke-bare")
+        opened.append(bare)
+        bare_row = await runs.get(bare)
+        check("bare run is parentless", bare_row is not None and bare_row.parent_run_id is None,
+              str(bare_row))
+
+        # A pipeline parent + two child steps opened inside child_run_scope.
+        parent = await runs.start("smoke-nightly")
+        opened.append(parent)
+        with child_run_scope(parent) as collected:
+            c1 = await runs.start("smoke-step-a")
+            await runs.finish(c1, status=SUCCEEDED, summary="a ok")
+            c2 = await runs.start("smoke-step-b")
+            await runs.finish(c2, status=FAILED, summary="b failed", error="boom")
+        opened += [c1, c2]
+        check("scope collected both child run ids", collected == [c1, c2], str(collected))
+
+        c1_row = await runs.get(c1)
+        c2_row = await runs.get(c2)
+        parent_row = await runs.get(parent)
+        check("child A links to the parent (FK column round-trips)",
+              c1_row is not None and c1_row.parent_run_id == parent, str(c1_row))
+        check("child B links to the parent + status/error persisted",
+              c2_row is not None and c2_row.parent_run_id == parent
+              and c2_row.status == FAILED and c2_row.error == "boom", str(c2_row))
+        check("parent stays parentless (opened outside any scope)",
+              parent_row is not None and parent_row.parent_run_id is None, str(parent_row))
+
+        # After the scope exits, a start is parentless again (contextvar reset).
+        after = await runs.start("smoke-after")
+        opened.append(after)
+        after_row = await runs.get(after)
+        check("start after the scope is parentless again (contextvar reset)",
+              after_row is not None and after_row.parent_run_id is None, str(after_row))
+    finally:
+        if opened:
+            await db.pool.execute(
+                "DELETE FROM agent_runs WHERE id = ANY($1::uuid[])", opened
+            )
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -686,6 +742,7 @@ async def main() -> int:
         await check_identity_capsule(db)
         await check_model_routing_migration(db)
         await check_oauth(db)
+        await check_agent_runs_linkage(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

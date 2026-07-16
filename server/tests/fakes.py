@@ -24,7 +24,12 @@ from app.providers.base import (
 from app.providers.registry import ProviderRegistry
 from app.search.service import NodePreview
 from app.search.store import NodeRow, RetrievalParams, SearchHit
-from app.services.agent_runs import RUNNING, AgentRun
+from app.services.agent_runs import (
+    RUNNING,
+    AgentRun,
+    current_parent_run_id,
+    record_child_run,
+)
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
 from app.services.model_routing import GroupRouting, ModelRoutingService
@@ -850,9 +855,14 @@ class FakeAgentRunStore:
         self._seq = 0
 
     async def start(self, agent: str) -> str:
+        # Mirror PgAgentRunStore: link to the ambient pipeline parent (ADR-047 §5) and register the
+        # child so a PipelineRunner captures it — so the linkage is exercised identically in tests.
         self._seq += 1
         run_id = f"run-{self._seq}"
-        self.runs[run_id] = AgentRun(id=run_id, agent=agent, status=RUNNING)
+        self.runs[run_id] = AgentRun(
+            id=run_id, agent=agent, status=RUNNING, parent_run_id=current_parent_run_id()
+        )
+        record_child_run(run_id)
         return run_id
 
     async def finish(

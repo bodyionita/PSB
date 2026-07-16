@@ -116,7 +116,7 @@ def test_production_rejects_insecure_default_secrets():
     Settings(environment="development")
 
 
-def test_compute_head_is_migration_011():
-    # M5 task 4 adds revision 011 (captures.source column, ADR-046 §4); head advances to it from
-    # 010 (the MCP OAuth client/token tables).
-    assert compute_head() == "011"
+def test_compute_head_is_migration_012():
+    # M5.5 task 1 adds revision 012 (agent_runs.parent_run_id, ADR-047 §5); head advances to it
+    # from 011 (captures.source column, ADR-046 §4).
+    assert compute_head() == "012"

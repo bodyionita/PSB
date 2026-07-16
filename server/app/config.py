@@ -7,10 +7,13 @@ schedules or plane lists are hardcoded elsewhere.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from .services.pipeline import PipelineDef
 
 # The shipped dev default for HMAC secrets. Fine for local dev; rejected at boot in production
 # (see Settings._check_production_secrets) so it can never silently protect a live surface.
@@ -417,8 +420,52 @@ class Settings(BaseSettings):
     # (weekly cadence + one night of grace) or the latest drill failed (ADR-014 §6).
     integrity_drill_max_age_days: int = 8
 
+    # --- Pipelines (ADR-047: the pipeline is the scheduling primitive) ---
+    # One cron per pipeline (ADR-047 §7), not one per job. The window (ADR-010) is enforced by
+    # *sequencing from these starts*, not by the retired per-job stagger: the `nightly` pipeline
+    # runs its steps back-to-back from 03:00, one step's RAM at a time; the `weekly` integrity drill
+    # keeps its Sunday slot. The ordered steps + per-step `on_fail` live in `pipeline_defs()` below.
+    # (The per-job `*_cron` settings above are wired into these pipelines by M5.5 task 2, which
+    # retires them as individual scheduler triggers.)
+    nightly_pipeline_cron: str = "0 3 * * *"
+    weekly_pipeline_cron: str = "30 4 * * sun"
+
     # --- Web / CORS (dev only; in prod Caddy same-origins the app) ---
     cors_origins: CsvList = Field(default=["http://localhost:5173"])
+
+    def pipeline_defs(self) -> tuple[PipelineDef, ...]:
+        """The `nightly` + `weekly` pipeline definitions (ADR-047 §1/§3): name, cron, steps,
+        per-step `on_fail`. The nightly roster is the migrated ADR-010 order (dependency order:
+        raw-input sync → db backup → reindex → derived profiles/backfill → identity capsule → store
+        commit/bundle); the weekly pipeline is the integrity drill. **`continue`-dominant** (ADR-047
+        §4): a flaky step never costs the night its downstream backups — no step here is a
+        foundational precondition that should abort the rest, so all are `continue` (the `halt`
+        policy exists and is exercised, but the migrated durability roster doesn't need it). Task 2
+        wires these into the scheduler (one cron per pipeline) + maps each step name to its job.
+        Lazy import keeps config out of the pipeline→agent_runs→db→config import cycle."""
+        from .services.pipeline import CONTINUE, PipelineDef, PipelineStepDef
+
+        step = lambda name: PipelineStepDef(name=name, on_fail=CONTINUE)  # noqa: E731
+        nightly = PipelineDef(
+            name="nightly",
+            cron=self.nightly_pipeline_cron,
+            steps=(
+                step("data-sync"),
+                step("db-backup"),
+                step("reindex"),
+                step("profile-refresh"),
+                step("entity-backfill"),
+                step("identity-capsule-refresh"),
+                step("store-sweep"),
+                step("store-backup"),
+            ),
+        )
+        weekly = PipelineDef(
+            name="weekly",
+            cron=self.weekly_pipeline_cron,
+            steps=(step("integrity-drill"),),
+        )
+        return (nightly, weekly)
 
     @field_validator(
         "planes",
