@@ -52,8 +52,11 @@ CHAT_DISTILL = "chat-distill"
 # nodes. Not yet a pipeline step (M6 task 8) — standalone verb = the run-now + local-test path.
 DEDUP_SWEEP = "dedup-sweep"
 # The inbox drainer (ADR-048 §10, M6 task 6): re-organize `inbox/`-materialized captures against the
-# now-richer registry. Not yet a pipeline step (M6 task 8) — standalone verb = run-now + local-test.
+# now-richer registry. A `nightly` pipeline step (M6 task 8); this standalone verb = run-now + test.
 INBOX_DRAIN = "inbox-drain"
+# The weekly maybe-digest (ADR-048 §8, M6 task 8): a feed-visible run summarizing parked `maybe`
+# review items. A `weekly` pipeline step; this standalone verb = the run-now + local-test path.
+MAYBE_DIGEST = "maybe-digest"
 # The reprocess-all-from-raw op (ADR-042). Destructive of derived state but confirm is implicit at
 # the CLI (an operator running it deliberately) — raw + approved vocab are preserved.
 REPROCESS = "reprocess-all"
@@ -67,6 +70,7 @@ JOBS: tuple[str, ...] = (
     CHAT_DISTILL,
     DEDUP_SWEEP,
     INBOX_DRAIN,
+    MAYBE_DIGEST,
     REPROCESS,
 )
 
@@ -94,6 +98,20 @@ async def run_pipeline(name: str) -> int:
         from .vocab.store import PgVocabularyStore
 
         vocab = VocabularyService(settings=settings, vocab_store=PgVocabularyStore(db))
+        # M6 sleep-cycle steps (ADR-048) join the roster here. The chat-distiller (endorsed →
+        # capture → organizer) and the inbox-drain (reorganize_capture) both drive the SAME pipeline
+        # — the single writer (rule 2b) — so they organize into one store; we drain it + flush the
+        # store backup after the run so this short-lived process commits their background work (the
+        # in-app nightly's long-lived debounce owns that itself — the reprocess-all/CLI pattern).
+        from .chat.distiller import build_chat_distiller_service
+        from .inbox.drain import InboxDrainService
+        from .services.capture_pipeline import build_capture_pipeline
+        from .services.capture_store import PgCaptureStore
+        from .services.maybe_digest import build_maybe_digest_service
+
+        pipeline = build_capture_pipeline(settings, db, store_backup)
+        from .dedup.sweep import build_dedup_sweep_service
+
         scheduler = PipelineScheduler(
             settings=settings,
             jobs=build_backup_jobs(settings, db, store_backup),
@@ -102,6 +120,15 @@ async def run_pipeline(name: str) -> int:
             profile_refresh=build_profile_refresh_service(settings, db, vocab),
             backfill=build_backfill_service(settings, db, store_backup, vocab),
             identity_capsule=build_identity_capsule_service(settings, db),
+            chat_distiller=build_chat_distiller_service(settings, db, pipeline),
+            inbox_drain=InboxDrainService(
+                settings=settings,
+                capture_store=PgCaptureStore(db),
+                pipeline=pipeline,
+                run_store=PgAgentRunStore(db),
+            ),
+            dedup_sweep=build_dedup_sweep_service(settings, db, vocab),
+            maybe_digest=build_maybe_digest_service(settings, db),
         )
         runners = {defn.name: runner for defn, runner in scheduler.pipeline_runners()}
         if name not in runners:
@@ -110,6 +137,11 @@ async def run_pipeline(name: str) -> int:
             )
             return 2
         outcome = await runners[name].run()
+        # Drain the shared capture pipeline (background organizes from chat-distill / inbox-drain)
+        # then flush the store backup so this one-shot process commits the resolved nodes before it
+        # exits — the in-app nightly relies on its long-lived debounce instead (rule 6, idempotent).
+        await pipeline.drain()
+        await store_backup.backup_now(f"pipeline-{name}")
         if outcome is None:
             logger.error("pipeline %s did not run (could not open its parent run)", name)
             return 1
@@ -171,6 +203,11 @@ async def run_job(name: str) -> None:
 
             await build_inbox_drain_service(settings, db, store_backup).run_scheduled()
             await store_backup.backup_now("inbox-drain")
+        elif name == MAYBE_DIGEST:
+            # DB-only (a read over review_queue + its own run row, no store git) — like the sweep.
+            from .services.maybe_digest import build_maybe_digest_service
+
+            await build_maybe_digest_service(settings, db).run_scheduled()
         else:
             jobs = build_backup_jobs(settings, db, store_backup)
             await getattr(jobs, BACKUP_JOBS[name])()

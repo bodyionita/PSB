@@ -468,14 +468,19 @@ class Settings(BaseSettings):
 
     def pipeline_defs(self) -> tuple[PipelineDef, ...]:
         """The `nightly` + `weekly` pipeline definitions (ADR-047 §1/§3): name, cron, steps,
-        per-step `on_fail`. The nightly roster is the migrated ADR-010 order (dependency order:
-        raw-input sync → db backup → reindex → derived profiles/backfill → identity capsule → store
-        commit/bundle); the weekly pipeline is the integrity drill. **`continue`-dominant** (ADR-047
-        §4): a flaky step never costs the night its downstream backups — no step here is a
-        foundational precondition that should abort the rest, so all are `continue` (the `halt`
-        policy exists and is exercised, but the migrated durability roster doesn't need it). Task 2
-        wires these into the scheduler (one cron per pipeline) + maps each step name to its job.
-        Lazy import keeps config out of the pipeline→agent_runs→db→config import cycle."""
+        per-step `on_fail`. The nightly roster is the migrated ADR-010 order plus the M6 sleep-cycle
+        jobs woven into their dependency slots (04-pipelines §Scheduling / ADR-048 §consequences):
+        **chat-distiller** first (its endorsed nodes must exist before reindex), then raw-input sync
+        → db backup → **inbox-drain** (enriches entities before the entity jobs, before reindex) →
+        reindex → derived profiles/backfill → identity capsule → **dedup-sweep** (needs post-reindex
+        embeddings) → store commit/bundle; the **weekly** pipeline is the integrity drill + the M6
+        **maybe-digest**. **`continue`-dominant** (ADR-047 §4): a flaky step never costs the night
+        its downstream backups — no step here is a foundational precondition that should abort the
+        rest, so all are `continue` (the `halt` policy exists and is exercised, but this roster
+        doesn't need it). The scheduler maps each step name to its job coroutine (one cron per
+        pipeline); an M6 job not wired into a given scheduler is dropped with a log, never scheduled
+        as a doomed `missing` step (ADR-047 §5). Lazy import keeps config out of the
+        pipeline→agent_runs→db→config import cycle."""
         from .services.pipeline import CONTINUE, PipelineDef, PipelineStepDef
 
         step = lambda name: PipelineStepDef(name=name, on_fail=CONTINUE)  # noqa: E731
@@ -483,12 +488,15 @@ class Settings(BaseSettings):
             name="nightly",
             cron=self.nightly_pipeline_cron,
             steps=(
+                step("chat-distiller"),
                 step("data-sync"),
                 step("db-backup"),
+                step("inbox-drain"),
                 step("reindex"),
                 step("profile-refresh"),
                 step("entity-backfill"),
                 step("identity-capsule-refresh"),
+                step("dedup-sweep"),
                 step("store-sweep"),
                 step("store-backup"),
             ),
@@ -496,7 +504,10 @@ class Settings(BaseSettings):
         weekly = PipelineDef(
             name="weekly",
             cron=self.weekly_pipeline_cron,
-            steps=(step("integrity-drill"),),
+            steps=(
+                step("integrity-drill"),
+                step("maybe-digest"),
+            ),
         )
         return (nightly, weekly)
 

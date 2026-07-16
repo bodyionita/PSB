@@ -23,18 +23,25 @@ from app.services.store_backup import StoreBackupService
 
 from .fakes import FakeAgentRunStore, FakeGitRepo, FakeObjectStore
 
-# The full nightly roster (all optional jobs wired) + the weekly pipeline.
+# The full nightly roster (all optional jobs wired — the prod shape) + the weekly pipeline. The M6
+# sleep-cycle jobs (ADR-048) are woven into their dependency slots: chat-distiller first, then
+# inbox-drain before reindex, and dedup-sweep after the entity jobs.
 NIGHTLY_STEPS = [
+    "chat-distiller",
     "data-sync",
     "db-backup",
+    "inbox-drain",
     "reindex",
     "profile-refresh",
     "entity-backfill",
     "identity-capsule-refresh",
+    "dedup-sweep",
     "store-sweep",
     "store-backup",
 ]
-# With no optional agent-window jobs wired, only the five backup steps survive (two of them weekly).
+WEEKLY_STEPS = ["integrity-drill", "maybe-digest"]
+# With no optional agent-window / sleep-cycle jobs wired, only the five backup steps survive (two of
+# them weekly) — the M6 steps drop with a log, never scheduled as doomed `missing` steps.
 BACKUP_ONLY_NIGHTLY = ["data-sync", "db-backup", "store-sweep", "store-backup"]
 
 
@@ -57,7 +64,7 @@ def _jobs(tmp_path: Path) -> tuple[Settings, BackupJobs]:
 
 
 def _full_scheduler(tmp_path: Path, **over) -> PipelineScheduler:
-    """A scheduler with every optional agent-window job wired (the prod shape)."""
+    """A scheduler with every optional agent-window + M6 sleep-cycle job wired (the prod shape)."""
     settings, jobs = _jobs(tmp_path)
     return PipelineScheduler(
         settings=settings,
@@ -67,6 +74,10 @@ def _full_scheduler(tmp_path: Path, **over) -> PipelineScheduler:
         profile_refresh=_FakeJob(),
         backfill=_FakeJob(),
         identity_capsule=_FakeJob(),
+        chat_distiller=_FakeJob(),
+        inbox_drain=_FakeJob(),
+        dedup_sweep=_FakeJob(),
+        maybe_digest=_FakeJob(),
         **over,
     )
 
@@ -76,9 +87,9 @@ def test_pipeline_runners_cover_nightly_and_weekly_in_order(tmp_path: Path):
     by_name = {d.name: d for d, _ in runners}
 
     assert set(by_name) == {"nightly", "weekly"}
-    # steps preserved in dependency order (the migrated ADR-010 roster).
+    # steps preserved in dependency order (the migrated ADR-010 roster + the M6 sleep-cycle jobs).
     assert [s.name for s in by_name["nightly"].steps] == NIGHTLY_STEPS
-    assert [s.name for s in by_name["weekly"].steps] == ["integrity-drill"]
+    assert [s.name for s in by_name["weekly"].steps] == WEEKLY_STEPS
     # every pipeline cron parses.
     for defn, _ in runners:
         assert CronTrigger.from_crontab(defn.cron)
@@ -87,6 +98,7 @@ def test_pipeline_runners_cover_nightly_and_weekly_in_order(tmp_path: Path):
 def test_step_funcs_map_to_the_intended_job_coroutines(tmp_path: Path):
     settings, jobs = _jobs(tmp_path)
     reindex, profile, backfill, capsule = _FakeJob(), _FakeJob(), _FakeJob(), _FakeJob()
+    distiller, drain, dedup, digest = _FakeJob(), _FakeJob(), _FakeJob(), _FakeJob()
     scheduler = PipelineScheduler(
         settings=settings,
         jobs=jobs,
@@ -95,6 +107,10 @@ def test_step_funcs_map_to_the_intended_job_coroutines(tmp_path: Path):
         profile_refresh=profile,
         backfill=backfill,
         identity_capsule=capsule,
+        chat_distiller=distiller,
+        inbox_drain=drain,
+        dedup_sweep=dedup,
+        maybe_digest=digest,
     )
     funcs = scheduler._step_funcs()
     # backup jobs → BackupJobs methods; guards against a wiring swap.
@@ -108,6 +124,11 @@ def test_step_funcs_map_to_the_intended_job_coroutines(tmp_path: Path):
     assert funcs["profile-refresh"] == profile.run_scheduled
     assert funcs["entity-backfill"] == backfill.run_scheduled
     assert funcs["identity-capsule-refresh"] == capsule.run_scheduled
+    # M6 sleep-cycle jobs → their run_scheduled (ADR-048).
+    assert funcs["chat-distiller"] == distiller.run_scheduled
+    assert funcs["inbox-drain"] == drain.run_scheduled
+    assert funcs["dedup-sweep"] == dedup.run_scheduled
+    assert funcs["maybe-digest"] == digest.run_scheduled
 
 
 def test_unwired_optional_jobs_are_dropped_from_the_pipeline(tmp_path: Path):

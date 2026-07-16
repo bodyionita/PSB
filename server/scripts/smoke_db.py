@@ -45,7 +45,12 @@ from app.services.agent_runs import (
 )
 from app.services.capture_store import INDEXED, KIND_TEXT, PgCaptureStore
 from app.services.reprocess import PgReprocessStore
-from app.services.review_queue import KIND_STANCE_CANDIDATE, PgReviewQueue, ReviewItem
+from app.services.review_queue import (
+    KIND_DEDUP_PROPOSAL,
+    KIND_STANCE_CANDIDATE,
+    PgReviewQueue,
+    ReviewItem,
+)
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
 
@@ -614,6 +619,53 @@ async def check_review_queue_reopen(db: Database) -> None:
         await db.pool.execute("DELETE FROM review_queue WHERE id = $1", rid)
 
 
+async def check_maybe_digest_stats(db: Database) -> None:
+    """M6 task 8 (ADR-048 §8): the real ``PgReviewQueue.maybe_kind_stats`` aggregate — the weekly
+    maybe-digest's ``GROUP BY status='maybe'`` (per-kind count + oldest ``min(created_at)``,
+    n-DESC-ordered) that a fake can't validate. Only ``maybe`` rows count; ``pending`` excluded."""
+    print("\n== PgReviewQueue.maybe_kind_stats (M6 task 8) ==")
+    q = PgReviewQueue(db)
+    ids: list[str] = []
+    try:
+        # Two parked stance-candidates + one parked dedup-proposal + one still-pending (excluded).
+        for i in range(2):
+            rid = await q.enqueue(ReviewItem(kind=KIND_STANCE_CANDIDATE, payload={"n": i}))
+            await q.resolve(rid, status="maybe", resolution={"verdict": "maybe"})
+            ids.append(rid)
+        rid_dedup = await q.enqueue(ReviewItem(kind=KIND_DEDUP_PROPOSAL, payload={"x": 1}))
+        await q.resolve(rid_dedup, status="maybe", resolution={"action": "maybe"})
+        ids.append(rid_dedup)
+        rid_pending = await q.enqueue(ReviewItem(kind=KIND_STANCE_CANDIDATE, payload={"p": 1}))
+        ids.append(rid_pending)  # left pending → must NOT appear in the maybe aggregate
+
+        stats = await q.maybe_kind_stats()
+        by_kind = {s.kind: s for s in stats}
+        check(
+            "stance-candidate maybe count = 2",
+            by_kind.get(KIND_STANCE_CANDIDATE) is not None
+            and by_kind[KIND_STANCE_CANDIDATE].count == 2,
+            str(stats),
+        )
+        check(
+            "dedup-proposal maybe count = 1",
+            by_kind.get(KIND_DEDUP_PROPOSAL) is not None
+            and by_kind[KIND_DEDUP_PROPOSAL].count == 1,
+        )
+        check(
+            "oldest_created_at is populated",
+            all(s.oldest_created_at is not None for s in stats),
+        )
+        # n DESC ordering: the 2-count kind sorts before the 1-count kind.
+        check(
+            "ordered by count desc",
+            [s.kind for s in stats][:2] == [KIND_STANCE_CANDIDATE, KIND_DEDUP_PROPOSAL],
+            str([s.kind for s in stats]),
+        )
+    finally:
+        for rid in ids:
+            await db.pool.execute("DELETE FROM review_queue WHERE id = $1", rid)
+
+
 async def check_auto_recorded(db: Database) -> None:
     """M6 task 4 (ADR-048 §11/§12): the real ``PgAutoRecordedStore`` (audit JOIN + tombstone) +
     reprocess replay-exclusion — the un-fakeable ``chat_auto_recorded`` ⋈ ``captures`` ⋈ ``nodes``
@@ -1108,6 +1160,7 @@ async def main() -> int:
         await check_agent_runs_linkage(db)
         await check_chat_distill(db)
         await check_review_queue_reopen(db)
+        await check_maybe_digest_stats(db)
         await check_auto_recorded(db)
         await check_dedup_sweep(db)
         await check_inbox_drain(db)

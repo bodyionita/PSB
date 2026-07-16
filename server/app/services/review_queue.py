@@ -97,6 +97,17 @@ class ReviewRecord:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class MaybeKindStat:
+    """Parked-``maybe`` aggregate for the weekly maybe-digest (ADR-048 §8): per-kind count + the
+    oldest filed time, so the digest can report totals + aging (an untriaged pile stalls the
+    feature) without loading every row. One row per kind that has at least one parked ``maybe``."""
+
+    kind: str
+    count: int
+    oldest_created_at: datetime
+
+
 class ReviewQueue(Protocol):
     """The write surface the organizer/entity-resolution path relies on."""
 
@@ -181,6 +192,26 @@ class PgReviewQueue:
                 review_id,
             )
         return _row_to_record(row) if row is not None else None
+
+    async def maybe_kind_stats(self) -> list[MaybeKindStat]:
+        """Per-kind count + oldest filed time of the parked ``maybe`` items — the weekly
+        maybe-digest aggregate (ADR-048 §8). An empty list means nothing is parked. A cheap ``GROUP
+        BY`` so the digest never loads every row."""
+        async with self._db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT kind, count(*) AS n, min(created_at) AS oldest
+                  FROM review_queue
+                 WHERE status = $1
+                 GROUP BY kind
+                 ORDER BY n DESC, kind
+                """,
+                STATUS_MAYBE,
+            )
+        return [
+            MaybeKindStat(kind=r["kind"], count=r["n"], oldest_created_at=r["oldest"])
+            for r in rows
+        ]
 
     async def resolve(
         self, review_id: str, *, status: str, resolution: dict[str, Any]

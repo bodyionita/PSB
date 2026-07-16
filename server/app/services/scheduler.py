@@ -38,9 +38,10 @@ logger = logging.getLogger(__name__)
 
 
 class EntityJob(Protocol):
-    """A nightly agent-window job (reindex / profile-refresh / backfill / identity-capsule) — one
-    idempotent, never-raising entry point the scheduler and CLI both drive (ADR-030 §4/§6, ADR-046
-    §5). Some return an outcome for CLI logging; the pipeline runner ignores it."""
+    """A nightly agent-window / sleep-cycle job (reindex / profile-refresh / backfill /
+    identity-capsule / chat-distiller / inbox-drain / dedup-sweep / maybe-digest) — one idempotent,
+    never-raising entry point the scheduler and CLI both drive (ADR-030 §4/§6, ADR-046 §5, ADR-048).
+    Some return an outcome for CLI logging; the pipeline runner ignores it."""
 
     async def run_scheduled(self) -> object | None: ...
 
@@ -56,6 +57,10 @@ class PipelineScheduler:
         profile_refresh: EntityJob | None = None,
         backfill: EntityJob | None = None,
         identity_capsule: EntityJob | None = None,
+        chat_distiller: EntityJob | None = None,
+        inbox_drain: EntityJob | None = None,
+        dedup_sweep: EntityJob | None = None,
+        maybe_digest: EntityJob | None = None,
         scheduler: AsyncIOScheduler | None = None,
     ) -> None:
         self._settings = settings
@@ -65,14 +70,19 @@ class PipelineScheduler:
         self._profile_refresh = profile_refresh
         self._backfill = backfill
         self._identity_capsule = identity_capsule
+        self._chat_distiller = chat_distiller
+        self._inbox_drain = inbox_drain
+        self._dedup_sweep = dedup_sweep
+        self._maybe_digest = maybe_digest
         self._tz = ZoneInfo(settings.scheduler_tz)
         self._scheduler = scheduler or AsyncIOScheduler(timezone=self._tz)
 
     def _step_funcs(self) -> dict[str, StepFunc]:
         """Map each pipeline step name → the job coroutine that runs it. The five backup jobs are
-        always wired; the agent-window jobs are present only when their service was constructed
-        (they stay optional, as before). A step whose job is absent is dropped by
-        :meth:`pipeline_runners` — never scheduled as a doomed ``missing`` step (ADR-047 §5)."""
+        always wired; the agent-window + M6 sleep-cycle jobs are present only when their service was
+        constructed (they stay optional, as before — prod wires them all). A step whose job is
+        absent is dropped by :meth:`pipeline_runners` — never scheduled as a doomed ``missing`` step
+        (ADR-047 §5)."""
         funcs: dict[str, StepFunc] = {
             "data-sync": self._jobs.run_data_sync,
             "db-backup": self._jobs.run_db_backup,
@@ -88,6 +98,15 @@ class PipelineScheduler:
             funcs["entity-backfill"] = self._backfill.run_scheduled
         if self._identity_capsule is not None:
             funcs["identity-capsule-refresh"] = self._identity_capsule.run_scheduled
+        # M6 sleep-cycle steps (ADR-048): woven into their dependency slots by `pipeline_defs`.
+        if self._chat_distiller is not None:
+            funcs["chat-distiller"] = self._chat_distiller.run_scheduled
+        if self._inbox_drain is not None:
+            funcs["inbox-drain"] = self._inbox_drain.run_scheduled
+        if self._dedup_sweep is not None:
+            funcs["dedup-sweep"] = self._dedup_sweep.run_scheduled
+        if self._maybe_digest is not None:
+            funcs["maybe-digest"] = self._maybe_digest.run_scheduled
         return funcs
 
     def pipeline_runners(self) -> list[tuple[PipelineDef, PipelineRunner]]:

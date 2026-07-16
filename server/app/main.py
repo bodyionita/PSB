@@ -35,6 +35,7 @@ from .graph.service import DerivedEdgeGraph, GraphService
 from .graph.store import PgGraphStore, PgNeighborStore
 from .identity.service import IdentityCapsuleService
 from .identity.store import PgCapsuleSourceStore, PgIdentityCapsuleStore
+from .inbox.drain import InboxDrainService
 from .indexing.indexer import Indexer
 from .indexing.store import PgIndexStore
 from .mcp.server import build_mcp_server
@@ -52,6 +53,7 @@ from .services.backup_jobs import build_backup_jobs
 from .services.capture_pipeline import CapturePipeline
 from .services.capture_store import PgCaptureStore
 from .services.git_repo import GitRepo
+from .services.maybe_digest import MaybeDigestService
 from .services.model_routing import build_model_routing
 from .services.rate_limit import RateLimiter
 from .services.reindex import ReindexService
@@ -354,6 +356,26 @@ async def lifespan(app: FastAPI):
         auto_recorded=auto_recorded_store,
     )
 
+    # Inbox drainer (M6 task 6, ADR-048 §10): a nightly step that re-organizes `inbox/`-materialized
+    # captures against the now-richer registry. It drives the SAME shared capture pipeline (the
+    # single writer, rule 2b) + capture store — no second pipeline — so its on-success commits ride
+    # the long-lived store-backup debounce. Scheduled as a `nightly` pipeline step (task 8).
+    app.state.inbox_drain_service = InboxDrainService(
+        settings=settings,
+        capture_store=capture_store,
+        pipeline=pipeline,
+        run_store=run_store,
+    )
+
+    # Maybe-digest (M6 task 8, ADR-048 §8): a weekly step emitting one feed-visible `agent_run`
+    # summarizing the parked `maybe` review items (an untriaged pile stalls the feature). DB-only (a
+    # read over `review_queue` + its own run row). Scheduled as a `weekly` pipeline step (task 8).
+    app.state.maybe_digest_service = MaybeDigestService(
+        settings=settings,
+        store=review_queue,
+        run_store=run_store,
+    )
+
     # Reprocess-all-from-raw (ADR-042, M3 task 11): the standing data-survival op. Constructed after
     # the pipeline (it drives the pipeline's per-capture re-ingestion) + reuses the node writer,
     # derived-edge graph, and store backup for the reset → replay → recompute → force-commit pass.
@@ -390,6 +412,10 @@ async def lifespan(app: FastAPI):
             profile_refresh=profile_refresh_service,
             backfill=backfill_service,
             identity_capsule=app.state.identity_capsule_service,
+            chat_distiller=app.state.chat_distiller_service,
+            inbox_drain=app.state.inbox_drain_service,
+            dedup_sweep=app.state.dedup_sweep_service,
+            maybe_digest=app.state.maybe_digest_service,
         )
         scheduler.start()
     app.state.scheduler = scheduler

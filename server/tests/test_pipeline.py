@@ -321,18 +321,23 @@ def test_config_defines_nightly_and_weekly_pipelines():
 
     assert set(by_name) == {"nightly", "weekly"}
     nightly = by_name["nightly"]
-    # dependency order preserved from the retired ADR-010 stagger.
+    # dependency order preserved from the retired ADR-010 stagger + the M6 sleep-cycle jobs woven
+    # into their slots (ADR-048): chat-distiller first, inbox-drain before reindex, then dedup-sweep
+    # after the entity jobs (it needs post-reindex embeddings).
     assert [s.name for s in nightly.steps] == [
+        "chat-distiller",
         "data-sync",
         "db-backup",
+        "inbox-drain",
         "reindex",
         "profile-refresh",
         "entity-backfill",
         "identity-capsule-refresh",
+        "dedup-sweep",
         "store-sweep",
         "store-backup",
     ]
-    assert [s.name for s in by_name["weekly"].steps] == ["integrity-drill"]
+    assert [s.name for s in by_name["weekly"].steps] == ["integrity-drill", "maybe-digest"]
     # continue-dominant roster (ADR-047 §4): no migrated durability step aborts the rest.
     assert all(s.on_fail == CONTINUE for d in defs for s in d.steps)
 
