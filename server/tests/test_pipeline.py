@@ -281,6 +281,73 @@ async def test_a_step_that_opens_no_run_is_reported_skipped_not_failed():
     assert parent.status == SUCCEEDED
 
 
+# --- ADR-050: a step's status is its OWN job run, not the transitive scope ---------------------
+
+
+async def test_a_nested_spawned_capture_failure_does_not_fail_the_step():
+    # ADR-050: a data-safe ``inbox/`` fallback closes its nested ``agent="capture"`` organize run
+    # ``failed`` (rule 7). That nested run is flattened into the step's scope via child_run_scope,
+    # but it must NOT fail the enclosing step (chat-distiller/inbox-drain) whose OWN run succeeded.
+    store = FakeAgentRunStore()
+    order: list[str] = []
+
+    async def distiller() -> (
+        None
+    ):  # own run ok + a spawned capture that inbox-falls (chat-distiller)
+        own = await store.start("chat-distiller")
+        nested = await store.start("capture")  # a spawned organize under a different agent
+        await store.finish(nested, status=FAILED, summary="organize -> inbox fallback")
+        await store.finish(own, status=SUCCEEDED, summary="4 endorsed")
+
+    defn = PipelineDef(
+        name="nightly",
+        cron="0 3 * * *",
+        # on_fail=HALT so we also prove a benign nested fallback never trips a halt gate.
+        steps=(PipelineStepDef("chat-distiller", on_fail=HALT), PipelineStepDef("b")),
+    )
+    outcome = await _runner(
+        defn, {"chat-distiller": distiller, "b": _step(order, store, "b")}, store
+    ).run()
+
+    step = outcome.steps[0]
+    assert step.status == SUCCEEDED  # the nested capture failure did not fail the step
+    assert outcome.halted_at is None  # nor abort the halt step
+    assert order == ["b"]  # the pipeline proceeded
+    # the step reports its OWN run, not the nested capture one
+    assert step.child_run_id is not None
+    assert store.runs[step.child_run_id].agent == "chat-distiller"
+    # the nested capture run stays visible + parented to the pipeline parent (rule 7)
+    nested = next(r for r in store.runs.values() if r.agent == "capture")
+    assert nested.status == FAILED
+    assert nested.parent_run_id is not None
+
+
+async def test_the_steps_own_failure_still_fails_even_with_a_clean_nested_run():
+    # The other side of ADR-050: the own-run gate must not HIDE a genuine step failure. If the job's
+    # own run fails, the step fails (and a halt step aborts) even when a spawned run succeeded.
+    store = FakeAgentRunStore()
+    order: list[str] = []
+
+    async def drainer() -> None:
+        own = await store.start("inbox-drain")
+        nested = await store.start("capture")
+        await store.finish(nested, status=SUCCEEDED, summary="reorganized ok")
+        await store.finish(own, status=FAILED, summary="drain itself errored")
+
+    defn = PipelineDef(
+        name="nightly",
+        cron="0 3 * * *",
+        steps=(PipelineStepDef("inbox-drain", on_fail=HALT), PipelineStepDef("b")),
+    )
+    outcome = await _runner(
+        defn, {"inbox-drain": drainer, "b": _step(order, store, "b")}, store
+    ).run()
+
+    assert outcome.steps[0].status == FAILED  # own-run failure not masked by the clean nested run
+    assert outcome.halted_at == "inbox-drain"
+    assert order == []  # halted before b
+
+
 # --- resilience: parent row can't be opened ----------------------------------------------------
 
 

@@ -222,31 +222,39 @@ class PipelineRunner:
             # A job that raised mid-flight left its own run row open — close it failed so no
             # ``running`` row is orphaned (rule 7: failures end runs as failed, always visible).
             await self._fail_orphaned_children(child_ids)
-        status = await self._step_status(child_ids, raised=raised)
-        child_run_id = child_ids[-1] if child_ids else None
+        own_run_id, status = await self._step_status(child_ids, step.name, raised=raised)
         return _StepResult(
-            name=step.name, on_fail=step.on_fail, status=status, child_run_id=child_run_id
+            name=step.name, on_fail=step.on_fail, status=status, child_run_id=own_run_id
         )
 
-    async def _step_status(self, child_ids: list[str], *, raised: bool) -> str:
-        """A step is FAILED if it raised, or any child run it opened is not *cleanly done*
-        (``failed``, an orphaned ``running``, or an unknown status — see ``_STEP_OK_STATUSES``);
-        otherwise it takes the child run's own terminal status (``succeeded``/``skipped``). A step
-        that opened no child at all (e.g. the job couldn't reach the DB to open its row) but didn't
-        raise is reported ``skipped`` — nothing ran, but the step didn't hard-fail."""
-        if raised:
-            return FAILED
-        if not child_ids:
-            return SKIPPED
-        last_status = SUCCEEDED
+    async def _step_status(
+        self, child_ids: list[str], step_name: str, *, raised: bool
+    ) -> tuple[str | None, str]:
+        """A step's status is its **own** job run — the child whose ``agent == step_name``
+        (ADR-050). Runs the job *spawns* under a different agent (``"capture"`` organize/reorganize)
+        stay parented to the pipeline for visibility (rule 7) but do **not** gate the step — so a
+        data-safe ``inbox/`` fallback (its ``capture`` run closed ``failed``) never fails the
+        enclosing step. FAILED if it raised or the own run is not *cleanly done*
+        (``failed``/orphaned ``running``/unknown — a ``halt`` step must abort on it); otherwise the
+        own run's terminal status (``succeeded``/``skipped``). A step that opened no own run (e.g.
+        ``store-sweep``) but didn't raise is ``skipped``. Returns ``(own_run_id, status)`` so the
+        step reports its **own** run, not a nested spawned one."""
+        own_run_id: str | None = None
+        own_status: str | None = None
+        failed = raised
         for cid in child_ids:
             run = await self._runs.get(cid)
-            if run is None:
-                continue
+            if run is None or run.agent != step_name:
+                continue  # a nested spawned run (organize/capture) — visible, not step-gating
+            own_run_id = cid
+            own_status = run.status
             if run.status not in _STEP_OK_STATUSES:
-                return FAILED  # ``failed``/``running``/unknown → a halt step must abort on it
-            last_status = run.status
-        return last_status
+                failed = True  # own job not cleanly done → a halt step must abort on it
+        if failed:
+            return own_run_id, FAILED
+        if own_status is None:
+            return own_run_id, SKIPPED  # the step opened no own run — nothing it itself ran
+        return own_run_id, own_status
 
     async def _fail_orphaned_children(self, child_ids: list[str]) -> None:
         """Close any still-``running`` child run a raising step left behind (rule 7). Best-effort:
