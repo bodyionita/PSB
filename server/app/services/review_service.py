@@ -2,7 +2,7 @@
 
 The admin Review surface: list the decidable-in-place items the pipeline filed, and resolve one.
 Resolution is where a human decision becomes graph structure — the business logic the router
-delegates to (rule 5). Two kinds are resolvable in M3:
+delegates to (rule 5). Three kinds are resolvable:
 
   * ``entity-ambiguity`` — the organizer couldn't confidently link an entity mention, so it left
     the edge **pending** + filed candidates (ADR-030 §3). A resolution:
@@ -10,6 +10,11 @@ delegates to (rule 5). Two kinds are resolvable in M3:
         content node that wanted it, targeting the chosen entity;
       - ``choice = "new"`` → mint a fresh thin entity hub, then materialize the edge onto it;
       - ``choice = "maybe"`` → defer (status ``maybe``), draw nothing.
+  * ``stance-candidate`` (**M6**, ADR-048 §7) — a chat-distilled memory whose user-stance was
+    unclear. A ``verdict``: ``agree`` materializes a ``source=chat`` capture through the pipeline
+    (the **exact auto-endorse path** — one ingest path, not two, so P10 holds); ``disagree``
+    discards it (logged, never a node); ``maybe`` parks it, **re-openable** (a parked maybe accepts
+    a later agree/disagree — the resolve guard treats ``pending`` ∪ ``maybe`` as decidable).
   * ``vocab-proposal`` — a proposed node/edge type outside the seeded vocabulary (ADR-027). This
     branch is **delegated in full** to the Vocabulary service (M3 task 7 / ADR-035): approve mutates
     the live vocabulary + opens the ``vocab-consolidation`` job, reject discards. Governance lives
@@ -41,10 +46,12 @@ from ..indexing.store import IndexStore
 from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .agent_runs import AgentRunStore
 from .review_queue import (
+    DECIDABLE_STATUSES,
     KIND_ENTITY_AMBIGUITY,
+    KIND_STANCE_CANDIDATE,
     KIND_VOCAB_PROPOSAL,
+    STATUS_DISCARDED,
     STATUS_MAYBE,
-    STATUS_PENDING,
     STATUS_RESOLVED,
     BadResolution,
     ReviewNotFound,
@@ -72,6 +79,20 @@ class VocabGovernance(VocabularyProvider, Protocol):
     async def resolve_proposal(self, review_id: str, verdict: str | None) -> ReviewRecord: ...
 
 
+class ChatCaptureIngest(Protocol):
+    """The one capture-pipeline method the ``stance-candidate`` **agree** path needs: materialize an
+    endorsed candidate as a ``source=chat`` capture that flows through the organizer (ADR-048 §7).
+
+    Agree reuses **the exact auto-endorse path** the chat-distiller uses (one ingest path, not two),
+    so a review-agreed memory is indistinguishable downstream from an auto-endorsed one and is
+    replayed by ``reprocess-all`` (P10). Declared here (not imported from ``app.chat``) so the
+    services layer needn't depend on the chat package — the concrete impl is ``CapturePipeline``."""
+
+    async def create_chat_capture(
+        self, text: str, *, session_id: str, created_at: datetime
+    ) -> str: ...
+
+
 class ReviewService:
     def __init__(
         self,
@@ -84,6 +105,7 @@ class ReviewService:
         store_backup: StoreBackup,
         run_store: AgentRunStore,
         vocab: VocabGovernance | None = None,
+        chat_ingest: ChatCaptureIngest | None = None,
     ) -> None:
         self._settings = settings
         self._store = review_store
@@ -96,6 +118,10 @@ class ReviewService:
         # effective entity-like types for minting. None ⇒ vocab-proposals unresolvable + seed-only
         # entity types (existing task-4 tests construct without it).
         self._vocab = vocab
+        # Capture pipeline (M6 task 2): the stance-candidate **agree** path materializes a
+        # `source=chat` capture through it — the exact auto-endorse path (ADR-048 §7). None ⇒
+        # stance-candidate agree unresolvable (older tests that don't file stance items).
+        self._chat_ingest = chat_ingest
         self._tz = ZoneInfo(settings.scheduler_tz)
 
     async def list_items(
@@ -113,14 +139,18 @@ class ReviewService:
     ) -> ReviewRecord:
         """Resolve one review item (POST /review/{id}); returns the updated record.
 
-        Materialization runs before the status transition, so a materialization failure leaves the
-        item ``pending`` (retryable) rather than resolved-but-unapplied. Both are idempotent, so the
-        (single-user) race where the guarded transition then finds it already resolved is harmless.
+        Materialization (the entity edge, or the stance-candidate agree capture) runs before the
+        status transition, so a materialization failure leaves the item decidable (retryable) rather
+        than resolved-but-unapplied. Both are idempotent (the edge writes are; the agree capture has
+        a deterministic id, ADR-048 §1), so the (single-user) race where the guarded transition then
+        finds it already terminal is harmless.
         """
         record = await self._store.get(review_id)
         if record is None:
             raise ReviewNotFound(review_id)
-        if record.status != STATUS_PENDING:
+        # Decidable = pending ∪ maybe (ADR-048 §7): a parked `maybe` re-opens to a later verdict;
+        # only the terminal resolved/discarded raise 409.
+        if record.status not in DECIDABLE_STATUSES:
             raise ReviewNotPending(review_id)
 
         if record.kind == KIND_VOCAB_PROPOSAL:
@@ -131,10 +161,13 @@ class ReviewService:
             return await self._vocab.resolve_proposal(review_id, verdict)
         if record.kind == KIND_ENTITY_AMBIGUITY:
             new_status, resolution = await self._resolve_entity(record, choice)
-            await self._store.resolve(review_id, status=new_status, resolution=resolution)
-            updated = await self._store.get(review_id)
-            return updated if updated is not None else record
-        raise BadResolution(f"kind {record.kind!r} is not resolvable in M3")
+        elif record.kind == KIND_STANCE_CANDIDATE:
+            new_status, resolution = await self._resolve_stance_candidate(record, verdict)
+        else:
+            raise BadResolution(f"kind {record.kind!r} is not resolvable")
+        await self._store.resolve(review_id, status=new_status, resolution=resolution)
+        updated = await self._store.get(review_id)
+        return updated if updated is not None else record
 
     # --- entity-ambiguity ---------------------------------------------------------------
 
@@ -211,6 +244,53 @@ class ReviewService:
         )
         written = await asyncio.to_thread(self._writer.write_nodes, [doc])
         return doc.id, written[0].store_path
+
+    # --- stance-candidate (M6, ADR-048 §7) ----------------------------------------------
+
+    async def _resolve_stance_candidate(
+        self, record: ReviewRecord, verdict: str | None
+    ) -> tuple[str, dict]:
+        """Resolve a chat-distilled stance-unclear candidate (ADR-048 §7).
+
+        ``agree`` → materialize a ``source=chat`` capture through the pipeline — **the exact
+        auto-endorse path** (one ingest path, not two) — so it organizes + is replayed by
+        ``reprocess-all`` (P10); ``disagree`` → discarded (logged, never a node); ``maybe`` → parked
+        and re-openable. The capture's ``created_at`` is the anchoring message time recorded in the
+        payload at file time (``anchor_at``), so an agreed memory carries *conversation* time, not
+        the review-decision time — matching auto-endorse."""
+        decision = (verdict or "").strip().lower()
+        if decision == "maybe":
+            return STATUS_MAYBE, {"verdict": "maybe"}
+        if decision == "disagree":
+            logger.info("stance-candidate %s disagreed → discarded (no node)", record.id)
+            return STATUS_DISCARDED, {"verdict": "disagree"}
+        if decision != "agree":
+            raise BadResolution("stance-candidate requires a 'verdict' of agree|disagree|maybe")
+
+        if self._chat_ingest is None:  # pragma: no cover — always wired in main.py
+            raise BadResolution("stance-candidate agree is not configured")
+        text = str(record.payload.get("candidate_text") or "").strip()
+        session_id = (record.source_ref or "").strip()
+        if not text or not session_id:
+            raise BadResolution("stance-candidate is missing its candidate_text / session")
+        capture_id = await self._chat_ingest.create_chat_capture(
+            text, session_id=session_id, created_at=self._stance_anchor(record)
+        )
+        return STATUS_RESOLVED, {"verdict": "agree", "capture_id": capture_id}
+
+    def _stance_anchor(self, record: ReviewRecord) -> datetime:
+        """The ``created_at`` an agreed candidate's capture is stamped with: the anchoring message
+        time the distiller recorded in the payload (``anchor_at``, ISO-8601). Falls back to the
+        review item's own ``created_at`` if absent/unparseable (still a sane, monotonic time)."""
+        raw = record.payload.get("anchor_at")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                return datetime.fromisoformat(raw)
+            except ValueError:
+                logger.warning("stance-candidate %s: unparseable anchor_at %r", record.id, raw)
+        return record.created_at
+
+    # --- entity-ambiguity materialization ------------------------------------------------
 
     async def _materialize(
         self, target_id: str, pending_edges: list[dict], *, extra_paths: list[str] | None = None

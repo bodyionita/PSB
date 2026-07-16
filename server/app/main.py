@@ -219,21 +219,6 @@ async def lifespan(app: FastAPI):
         vocab=vocabulary_service,
     )
 
-    # Review read/resolve surface (ADR-030 §3, M3 task 4): lists pending items and resolves them —
-    # materializing a pending entity edge onto the store (writer + reindex + commit); the
-    # vocab-proposal branch is delegated to the Vocabulary service (task 7 — mutate live vocab +
-    # open the consolidation job).
-    app.state.review_service = ReviewService(
-        settings=settings,
-        review_store=review_queue,
-        index_store=index_store,
-        indexer=indexer,
-        node_writer=node_writer,
-        store_backup=store_backup,
-        run_store=run_store,
-        vocab=vocabulary_service,
-    )
-
     # Entity services (ADR-030 §5/§6 + §4, M3 task 6). All share the one entity-read store; the
     # merge/backfill jobs share the node writer + indexer + store backup so they rewrite files then
     # reindex + force-commit (store is truth, rule 1).
@@ -287,6 +272,24 @@ async def lifespan(app: FastAPI):
         vocab=vocabulary_service,
     )
     app.state.capture_pipeline = pipeline
+
+    # Review read/resolve surface (ADR-030 §3, M3 task 4 + M6 task 2): lists decidable items and
+    # resolves them — materializing a pending entity edge onto the store (write + reindex + commit),
+    # the vocab-proposal branch is delegated to the Vocabulary service (task 7 — mutate live vocab +
+    # open the consolidation job); the M6 `stance-candidate` **agree** materializes a `source=chat`
+    # capture through the pipeline (the exact auto-endorse path, ADR-048 §7), so it is built after
+    # the pipeline it depends on.
+    app.state.review_service = ReviewService(
+        settings=settings,
+        review_store=review_queue,
+        index_store=index_store,
+        indexer=indexer,
+        node_writer=node_writer,
+        store_backup=store_backup,
+        run_store=run_store,
+        vocab=vocabulary_service,
+        chat_ingest=pipeline,
+    )
 
     # Reprocess-all-from-raw (ADR-042, M3 task 11): the standing data-survival op. Constructed after
     # the pipeline (it drives the pipeline's per-capture re-ingestion) + reuses the node writer,

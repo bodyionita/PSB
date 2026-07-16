@@ -24,6 +24,7 @@ from app.indexing.store import NodeUpsert
 from app.providers.registry import ProviderRegistry
 from app.services.review_queue import (
     KIND_ENTITY_AMBIGUITY,
+    KIND_STANCE_CANDIDATE,
     KIND_VOCAB_PROPOSAL,
     ReviewItem,
 )
@@ -40,6 +41,7 @@ from app.vocab.service import VocabularyService
 from .fakes import (
     FakeAgentRunStore,
     FakeAliasStore,
+    FakeChatCaptureIngest,
     FakeChatProvider,
     FakeIndexer,
     FakeIndexStore,
@@ -325,6 +327,132 @@ async def test_vocab_requires_valid_verdict(tmp_path: Path):
     )
     with pytest.raises(BadResolution):
         await service.resolve(rid, verdict="perhaps")
+
+
+# --- stance-candidate resolution (M6, ADR-048 §7) -----------------------------------------
+
+
+def _stance_build(tmp_path: Path, *, ingest: FakeChatCaptureIngest | None = None):
+    """A ReviewService wired with a chat-capture ingest, for the stance-candidate agree path. The
+    agree path touches only the review store + the ingest, so the store-facing fakes are inert."""
+    settings = _settings(tmp_path)
+    review = FakeReviewQueue()
+    service = ReviewService(
+        settings=settings,
+        review_store=review,
+        index_store=FakeIndexStore(),
+        indexer=FakeIndexer(),
+        node_writer=NodeWriter(settings.graph_store_path),
+        store_backup=FakeStoreBackup(),
+        run_store=FakeAgentRunStore(),
+        vocab=None,
+        chat_ingest=ingest,
+    )
+    return service, review
+
+
+ANCHOR = "2026-07-10T14:30:00+00:00"
+
+
+def _stance_item(anchor_at: str | None = ANCHOR) -> ReviewItem:
+    payload: dict = {
+        "candidate_text": "The user decided to switch to Postgres.",
+        "referenced_entity_names": ["Postgres"],
+        "salience": "high",
+        "why_unclear": "hedged",
+    }
+    if anchor_at is not None:
+        payload["anchor_at"] = anchor_at
+    return ReviewItem(
+        kind=KIND_STANCE_CANDIDATE,
+        payload=payload,
+        excerpt="maybe Postgres",
+        source="chat",
+        source_ref="session-42",
+    )
+
+
+async def test_stance_agree_materializes_capture(tmp_path: Path):
+    ingest = FakeChatCaptureIngest()
+    service, review = _stance_build(tmp_path, ingest=ingest)
+    rid = await review.enqueue(_stance_item())
+
+    record = await service.resolve(rid, verdict="agree")
+
+    assert record.status == "resolved"
+    assert record.resolution["verdict"] == "agree"
+    # Exactly one capture, via the auto-endorse path: candidate text, session id, anchored time.
+    assert len(ingest.captures) == 1
+    cap = ingest.captures[0]
+    assert cap["text"] == "The user decided to switch to Postgres."
+    assert cap["session_id"] == "session-42"
+    # created_at is the anchoring conversation time (ADR-048 §7), not the review-decision time.
+    assert cap["created_at"] == datetime.fromisoformat(ANCHOR)
+    assert record.resolution["capture_id"] == cap["capture_id"]
+
+
+async def test_stance_agree_without_anchor_falls_back_to_item_created_at(tmp_path: Path):
+    ingest = FakeChatCaptureIngest()
+    service, review = _stance_build(tmp_path, ingest=ingest)
+    rid = await review.enqueue(_stance_item(anchor_at=None))
+
+    await service.resolve(rid, verdict="agree")
+
+    # No anchor_at recorded ⇒ the review item's own created_at is a sane monotonic fallback.
+    assert ingest.captures[0]["created_at"] == review.records[rid].created_at
+
+
+async def test_stance_disagree_discards_no_capture(tmp_path: Path):
+    ingest = FakeChatCaptureIngest()
+    service, review = _stance_build(tmp_path, ingest=ingest)
+    rid = await review.enqueue(_stance_item())
+
+    record = await service.resolve(rid, verdict="disagree")
+
+    assert record.status == "discarded"
+    assert record.resolution == {"verdict": "disagree"}
+    assert ingest.captures == []  # never a node
+
+
+async def test_stance_maybe_parks_and_reopens_to_agree(tmp_path: Path):
+    """`maybe` is re-openable (ADR-048 §7): a parked item accepts a later agree — the fix to the
+    resolve guard (`pending` ∪ `maybe` decidable) is what makes the second decide land."""
+    ingest = FakeChatCaptureIngest()
+    service, review = _stance_build(tmp_path, ingest=ingest)
+    rid = await review.enqueue(_stance_item())
+
+    parked = await service.resolve(rid, verdict="maybe")
+    assert parked.status == "maybe"
+    assert ingest.captures == []
+
+    # Re-open the parked maybe and agree — previously this raised (maybe was terminal).
+    reopened = await service.resolve(rid, verdict="agree")
+    assert reopened.status == "resolved"
+    assert len(ingest.captures) == 1
+
+
+async def test_stance_resolved_is_terminal(tmp_path: Path):
+    ingest = FakeChatCaptureIngest()
+    service, review = _stance_build(tmp_path, ingest=ingest)
+    rid = await review.enqueue(_stance_item())
+    await service.resolve(rid, verdict="agree")
+    with pytest.raises(ReviewNotPending):
+        await service.resolve(rid, verdict="disagree")
+
+
+async def test_stance_bad_verdict_rejected(tmp_path: Path):
+    service, review = _stance_build(tmp_path, ingest=FakeChatCaptureIngest())
+    rid = await review.enqueue(_stance_item())
+    with pytest.raises(BadResolution):
+        await service.resolve(rid, verdict="perhaps")
+
+
+async def test_stance_agree_unconfigured_is_bad_resolution(tmp_path: Path):
+    # No ingest wired ⇒ agree can't materialize; disagree/maybe still work (no capture needed).
+    service, review = _stance_build(tmp_path, ingest=None)
+    rid = await review.enqueue(_stance_item())
+    with pytest.raises(BadResolution):
+        await service.resolve(rid, verdict="agree")
 
 
 # --- lifecycle + listing ------------------------------------------------------------------

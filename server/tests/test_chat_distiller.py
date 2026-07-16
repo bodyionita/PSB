@@ -235,6 +235,10 @@ async def test_unclear_candidate_files_stance_candidate_review_item():
     assert item.payload["salience"] == "low"
     assert item.payload["why_unclear"] == "hedged"
     assert item.excerpt == "not sure about Postgres"
+    # anchor_at records the anchoring message time so a later Review **agree** materializes the
+    # capture with conversation time (ADR-048 §7). The excerpt doesn't match a delta message, so it
+    # falls back to the latest user message (m3) — the same anchor an endorsed candidate would use.
+    assert item.payload["anchor_at"] == _DELTA["s1"][2].created_at.isoformat()
     assert store.advanced  # still materialized → watermark advanced
     assert _run(runs).details["to_review"] == 1
 

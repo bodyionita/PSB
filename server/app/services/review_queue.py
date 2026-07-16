@@ -1,7 +1,8 @@
 """The kind-generic review queue (02-data-model §3, ADR-030 §3 / ADR-029).
 
-Every human-decision item the system files goes through one table, one lifecycle
-(``pending → resolved/discarded/maybe``). M3 files two kinds — ``entity-ambiguity`` (the
+Every human-decision item the system files goes through one table, one lifecycle: ``pending`` →
+``resolved``/``discarded`` (terminal), or ``maybe`` (parked but **still-decidable** — ADR-048 §7,
+a maybe re-opens to a later agree/disagree). M3 files two kinds — ``entity-ambiguity`` (the
 organizer couldn't confidently resolve an entity mention, ADR-030 §3) and ``vocab-proposal``
 (the organizer proposed a node/edge type outside the seeded vocabulary, ADR-027). The
 ``stance-candidate`` (M6) and ``dedup-proposal`` (M6+) kinds reuse the same table later.
@@ -10,7 +11,8 @@ Two surfaces over the one table:
   * :class:`ReviewQueue` — the **write path** the organizer/entity-resolution relies on
     (``enqueue``); the resolver depends on this narrow protocol so it unit-tests against a fake.
   * :class:`ReviewReadStore` — the **read/resolve path** for the admin Review surface (M3 task 4):
-    list decidable-in-place items and transition one out of ``pending``. The *materialization*
+    list decidable-in-place items and transition one out of a decidable state
+    (``pending``/``maybe``). The *materialization*
     logic (pending edge → file + DB, vocab-approve → consolidation queue-hook) lives in
     ``review_service.py`` (business logic, rule 5); this store only reads rows and flips status.
 
@@ -34,11 +36,17 @@ KIND_VOCAB_PROPOSAL = "vocab-proposal"
 KIND_STANCE_CANDIDATE = "stance-candidate"
 KIND_DEDUP_PROPOSAL = "dedup-proposal"
 
-# Lifecycle statuses (ADR-030 §3): items start ``pending`` and transition once, terminally.
+# Lifecycle statuses (ADR-030 §3). Items start ``pending``; ``maybe`` is a **parked, still-
+# decidable** state (ADR-048 §7) — it accepts a later agree/disagree — while ``resolved``/
+# ``discarded`` are terminal. So the resolve guard is "decidable" (``pending`` ∪ ``maybe``).
 STATUS_PENDING = "pending"
 STATUS_RESOLVED = "resolved"
 STATUS_DISCARDED = "discarded"
 STATUS_MAYBE = "maybe"
+
+# The still-decidable statuses a ``resolve`` may transition out of (ADR-048 §7): ``pending`` and
+# the re-openable ``maybe``. ``resolved``/``discarded`` are terminal — a resolve on one is a no-op.
+DECIDABLE_STATUSES = (STATUS_PENDING, STATUS_MAYBE)
 
 
 # Resolution errors, shared by every service that resolves a review item (the Review service for
@@ -54,7 +62,8 @@ class ReviewNotFound(ReviewError):
 
 
 class ReviewNotPending(ReviewError):
-    """The item was already resolved/discarded/deferred — it cannot be resolved again (409)."""
+    """The item is terminal (already ``resolved``/``discarded``) — it cannot be decided again (409).
+    A parked ``maybe`` is NOT terminal (re-openable, ADR-048 §7), so it does not raise this."""
 
 
 class BadResolution(ReviewError):
@@ -112,8 +121,9 @@ class ReviewReadStore(Protocol):
     async def resolve(
         self, review_id: str, *, status: str, resolution: dict[str, Any]
     ) -> bool:
-        """Transition a still-``pending`` item to ``status`` + record ``resolution``. Guarded on
-        ``status='pending'`` so a double resolve is a no-op; returns whether a row transitioned."""
+        """Transition a still-**decidable** item (``pending`` or the re-openable ``maybe`` — ADR-048
+        §7) to ``status`` + record ``resolution``. Guarded on those two, so a decide on a terminal
+        (``resolved``/``discarded``) row is a no-op; returns whether a row transitioned."""
         ...
 
 
@@ -176,16 +186,19 @@ class PgReviewQueue:
         self, review_id: str, *, status: str, resolution: dict[str, Any]
     ) -> bool:
         async with self._db.acquire() as conn:
+            # Decidable = pending ∪ maybe (ADR-048 §7): a parked `maybe` re-opens to agree/disagree.
+            # resolved/discarded are terminal — a decide on one matches no row (no-op → 409 above).
             row_id = await conn.fetchval(
                 """
                 UPDATE review_queue
                    SET status = $2, resolution = $3::jsonb, resolved_at = now()
-                 WHERE id = $1 AND status = 'pending'
+                 WHERE id = $1 AND status = ANY($4::text[])
                 RETURNING id
                 """,
                 review_id,
                 status,
                 json.dumps(resolution),
+                list(DECIDABLE_STATUSES),
             )
         return row_id is not None
 

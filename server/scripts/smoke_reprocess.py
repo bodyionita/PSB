@@ -16,6 +16,7 @@ import sys
 from app.config import get_settings
 from app.db import Database
 from app.services.reprocess import PgReprocessStore
+from app.services.review_queue import KIND_STANCE_CANDIDATE
 
 _PASS = _FAIL = 0
 
@@ -57,25 +58,49 @@ async def main() -> int:
         check("chronological order matches created_at ASC", ids == want)
 
         print("\n== reset_derived_and_review SQL (in a ROLLED-BACK txn — dev data untouched) ==")
-        # Exercise the exact reset statements against real pg, then abort so nothing is lost.
+        # Exercise the exact reset statements against real pg on THIS connection, then abort so
+        # nothing is lost. (The store method opens its own pooled connection+txn — running it here
+        # would commit outside this rollback and wipe dev data — so mirror its statements instead.)
+        # Seed one stance-candidate + one other kind first so the kind-aware DELETE (ADR-048 §7) is
+        # proven: stance-candidate survives, the rest are cleared.
         async with db.pool.acquire() as conn:  # manual txn control (start → rollback)
             tx = conn.transaction()
             await tx.start()
             try:
                 before = await conn.fetchval("SELECT count(*) FROM nodes")
+                stance_id = await conn.fetchval(
+                    "INSERT INTO review_queue (kind, payload) "
+                    "VALUES ($1, '{}'::jsonb) RETURNING id",
+                    KIND_STANCE_CANDIDATE,
+                )
+                await conn.execute(
+                    "INSERT INTO review_queue (kind, payload) "
+                    "VALUES ('entity-ambiguity', '{}'::jsonb)"
+                )
                 await conn.execute("TRUNCATE nodes CASCADE")
-                await conn.execute("TRUNCATE review_queue")
+                # Mirror of PgReprocessStore.reset_derived_and_review's kind-aware DELETE — the
+                # constant guards against a silent drift if the preserved kind is ever renamed.
+                await conn.execute(
+                    "DELETE FROM review_queue WHERE kind <> $1", KIND_STANCE_CANDIDATE
+                )
                 await conn.execute("UPDATE captures SET node_paths = '{}'")
                 after_nodes = await conn.fetchval("SELECT count(*) FROM nodes")
                 after_chunks = await conn.fetchval("SELECT count(*) FROM chunks")
                 after_edges = await conn.fetchval("SELECT count(*) FROM edges")
                 after_profiles = await conn.fetchval("SELECT count(*) FROM node_profiles")
-                after_review = await conn.fetchval("SELECT count(*) FROM review_queue")
                 check("TRUNCATE nodes CASCADE empties nodes", after_nodes == 0, str(after_nodes))
                 check("cascade empties chunks", after_chunks == 0, str(after_chunks))
                 check("cascade empties edges", after_edges == 0, str(after_edges))
                 check("cascade empties node_profiles", after_profiles == 0, str(after_profiles))
-                check("review_queue truncated", after_review == 0, str(after_review))
+                # Kind-aware review reset (ADR-048 §7): stance-candidate preserved, others gone.
+                stance_kept = await conn.fetchval(
+                    "SELECT count(*) FROM review_queue WHERE id = $1", stance_id
+                )
+                others_left = await conn.fetchval(
+                    "SELECT count(*) FROM review_queue WHERE kind <> 'stance-candidate'"
+                )
+                check("stance-candidate item PRESERVED", stance_kept == 1, str(stance_kept))
+                check("non-stance review kinds cleared", others_left == 0, str(others_left))
                 # captures row count is preserved (only node_paths cleared).
                 cap_after = await conn.fetchval("SELECT count(*) FROM captures")
                 check("captures rows preserved (not truncated)", cap_after == captures,

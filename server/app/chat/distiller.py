@@ -374,15 +374,23 @@ class ChatDistillerService:
                 )
                 result.endorsed.append(capture_id)
             else:  # unclear
-                review_id = await self._file_stance_candidate(session.session_id, candidate)
+                anchor = _anchor_time(candidate.evidence_excerpt, delta, default=anchor_default)
+                review_id = await self._file_stance_candidate(
+                    session.session_id, candidate, anchor
+                )
                 if review_id is not None:
                     result.review.append(review_id)
 
     async def _file_stance_candidate(
-        self, session_id: str, candidate: DistillCandidate
+        self, session_id: str, candidate: DistillCandidate, anchor: datetime
     ) -> str | None:
         """File a stance-unclear candidate as a review item (names + text, never node ids — ADR-048
-        §7). Best-effort: a review-store hiccup is logged, never fails the run (rule 7)."""
+        §7). Best-effort: a review-store hiccup is logged, never fails the run (rule 7).
+
+        ``anchor_at`` records the anchoring message time (the same anchor an *endorsed* candidate's
+        capture would carry) so that a later **agree** in Review materializes the capture with
+        *conversation* time — the exact auto-endorse path (ADR-048 §1/§7) — not the review-decision
+        time. It is a timestamp, never a node id, so it can't strand the item across a reprocess."""
         try:
             return await self._review.enqueue(
                 ReviewItem(
@@ -392,6 +400,7 @@ class ChatDistillerService:
                         "referenced_entity_names": candidate.referenced_entity_names,
                         "salience": candidate.salience,
                         "why_unclear": candidate.why_unclear,
+                        "anchor_at": anchor.isoformat(),
                     },
                     excerpt=candidate.evidence_excerpt or None,
                     source="chat",

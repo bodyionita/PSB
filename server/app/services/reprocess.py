@@ -7,12 +7,15 @@ retained raw input through the current pipeline, rather than leaving old derived
     reset derived state  →  replay every capture's raw (chronological)  →  recompute derived edges
       →  one force commit + push
 
-**Reset contract (ADR-042 §2).** *Always kept:* raw ``captures`` (text/audio/source_ref) + the
-graph-store git history (deletions are unlinks). *Preserved (human governance):* approved vocabulary
-additions (``app_settings``); standing merges are reported (re-apply is a documented follow-up —
-there are zero merges today). *Rebuilt from raw:* every node file, the DB index
-(``nodes``/``chunks``/``edges``/``node_profiles``), the alias index, and the ``review_queue``
-(entity-ambiguity / vocab-proposal items are capture-derived and re-minted by the replay).
+**Reset contract (ADR-042 §2, refined by ADR-048 §7).** *Always kept:* raw ``captures``
+(text/audio/source_ref) + the graph-store git history (deletions are unlinks). *Preserved (human
+governance):* approved vocabulary additions (``app_settings``); **``stance-candidate`` review
+items** (their backing chat sessions are never touched by capture replay, and the watermark won't
+re-file them — a parked human decision must survive); standing merges are reported (re-apply is a
+documented follow-up — there are zero merges today). *Rebuilt from raw:* every node file, the DB
+index (``nodes``/``chunks``/``edges``/``node_profiles``), the alias index, and the
+**capture/graph-derived** ``review_queue`` kinds (entity-ambiguity / vocab-proposal / dedup-proposal
+— re-minted by the replay + nightly sweeps).
 
 **Safety (ADR-042 §3).** Destructive of derived state → admin-gated + **confirm-required** (the
 router's two-step). Single-flight; runs in the background with an ``agent_runs`` row + a
@@ -33,6 +36,7 @@ from ..db import Database
 from ..graph.node_writer import NodeWriter
 from .agent_runs import FAILED, SUCCEEDED, AgentRunStore
 from .capture_pipeline import ReprocessOne
+from .review_queue import KIND_STANCE_CANDIDATE
 from .store_backup import StoreCommitter
 
 logger = logging.getLogger(__name__)
@@ -73,9 +77,10 @@ class ReprocessStore(Protocol):
         ...
 
     async def reset_derived_and_review(self) -> None:
-        """Truncate the derived index (``nodes`` cascades ``chunks``/``edges``/``node_profiles``) +
-        the ``review_queue``, and clear ``captures.node_paths``. Raw + vocab (``app_settings``) are
-        untouched."""
+        """Truncate the derived index (``nodes`` cascades ``chunks``/``edges``/``node_profiles``),
+        clear the **capture/graph-derived** ``review_queue`` kinds (all but ``stance-candidate``,
+        which is preserved — ADR-048 §7), and clear ``captures.node_paths``. Raw + vocab
+        (``app_settings``) are untouched."""
         ...
 
     async def capture_ids_chronological(self) -> list[str]:
@@ -162,7 +167,8 @@ class ReprocessService:
         try:
             # Report (never silently drop) any standing merges the rebuild can't re-apply by id.
             merges = await self._store.count_merges()
-            # 1. Reset derived state (store files + DB index + review queue). Vocab + raw kept.
+            # 1. Reset derived state (store files + DB index + capture/graph-derived review kinds).
+            #    Vocab + raw + `stance-candidate` items kept (ADR-048 §7).
             removed = await asyncio.to_thread(self._writer.remove_all_nodes, ignore=self._ignore)
             await self._store.reset_derived_and_review()
 
@@ -276,7 +282,14 @@ class PgReprocessStore:
             # TRUNCATE nodes CASCADE clears chunks/edges/node_profiles (FK→nodes cascade); captures
             # has no FK to nodes, so it (and agent_runs / app_settings / chat_*) is untouched.
             await conn.execute("TRUNCATE nodes CASCADE")
-            await conn.execute("TRUNCATE review_queue")
+            # Kind-aware review reset (ADR-048 §7, refines ADR-042 §2): the capture/graph-derived
+            # kinds (entity-ambiguity / vocab-proposal / dedup-proposal) are re-minted by the replay
+            # + nightly sweeps, so they're cleared; `stance-candidate` is PRESERVED — its backing
+            # (chat sessions) is never touched by capture replay and the watermark won't re-file it,
+            # so a parked human decision must survive. DELETE (not TRUNCATE) to scope by kind.
+            await conn.execute(
+                "DELETE FROM review_queue WHERE kind <> $1", KIND_STANCE_CANDIDATE
+            )
             await conn.execute("UPDATE captures SET node_paths = '{}'")
 
     async def capture_ids_chronological(self) -> list[str]:

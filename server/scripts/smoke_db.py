@@ -42,6 +42,7 @@ from app.services.agent_runs import (
     child_run_scope,
 )
 from app.services.capture_store import INDEXED, KIND_TEXT, PgCaptureStore
+from app.services.review_queue import KIND_STANCE_CANDIDATE, PgReviewQueue, ReviewItem
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
 
@@ -560,6 +561,36 @@ async def check_chat_distill(db: Database) -> None:
         await db.pool.execute("DELETE FROM chat_sessions WHERE id = $1", sid)
 
 
+async def check_review_queue_reopen(db: Database) -> None:
+    """M6 task 2 (ADR-048 §7): the real ``PgReviewQueue.resolve`` guard is decidable = ``pending`` ∪
+    ``maybe`` (the ``status = ANY($::text[])`` SQL a fake can't validate). A parked ``maybe`` must
+    re-open to a later verdict; ``resolved`` must be terminal."""
+    print("\n== PgReviewQueue.resolve maybe-reopen (M6 task 2) ==")
+    q = PgReviewQueue(db)
+    rid = await q.enqueue(
+        ReviewItem(
+            kind=KIND_STANCE_CANDIDATE,
+            payload={"candidate_text": "smoke stance", "anchor_at": "2026-07-10T00:00:00+00:00"},
+            excerpt="smoke", source="chat", source_ref="smoke-session",
+        )
+    )
+    try:
+        parked = await q.resolve(rid, status="maybe", resolution={"verdict": "maybe"})
+        check("pending → maybe transitions", parked is True)
+        row = await q.get(rid)
+        check("item is parked as maybe", row is not None and row.status == "maybe", str(row))
+
+        reopened = await q.resolve(rid, status="resolved", resolution={"verdict": "agree"})
+        check("maybe re-opens → resolved (the guard fix)", reopened is True)
+        row2 = await q.get(rid)
+        check("re-opened item is now resolved", row2 is not None and row2.status == "resolved")
+
+        terminal = await q.resolve(rid, status="discarded", resolution={"verdict": "disagree"})
+        check("resolved is terminal (no-op resolve)", terminal is False)
+    finally:
+        await db.pool.execute("DELETE FROM review_queue WHERE id = $1", rid)
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -824,6 +855,7 @@ async def main() -> int:
         await check_oauth(db)
         await check_agent_runs_linkage(db)
         await check_chat_distill(db)
+        await check_review_queue_reopen(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

@@ -48,8 +48,9 @@ async def list_review(
     kind: str | None = None,
     service: ReviewService = Depends(get_review_service),
 ) -> list[ReviewItemResponse]:
-    """Newest-first review items. ``status`` defaults to ``pending``; ``all`` (or empty) drops the
-    filter. ``kind`` optionally narrows to one kind (``entity-ambiguity`` / ``vocab-proposal``)."""
+    """Newest-first review items. ``status`` defaults to ``pending`` (pass ``maybe`` to list parked,
+    re-openable items; ``all`` or empty drops the filter). ``kind`` optionally narrows to one kind
+    (``entity-ambiguity`` / ``vocab-proposal`` / ``stance-candidate`` / ``dedup-proposal``)."""
     items = await service.list_items(status=status, kind=kind)
     return [_to_response(item) for item in items]
 

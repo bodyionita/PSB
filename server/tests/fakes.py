@@ -524,7 +524,8 @@ class FakeReviewQueue:
     """In-memory review queue — the write (``enqueue``) + read/resolve (``list_items``/``get``/
     ``resolve``) surfaces over one dict of rows, keyed by id. ``items`` keeps the filed
     :class:`ReviewItem`s (write-path assertions); ``records`` holds the full rows the read path
-    returns. Mirrors the guarded ``pending``-only transition of the real store."""
+    returns. Mirrors the real store's guarded transition — decidable = ``pending`` ∪ ``maybe``
+    (ADR-048 §7); ``resolved``/``discarded`` are terminal."""
 
     def __init__(self) -> None:
         self.items: list[ReviewItem] = []
@@ -566,7 +567,7 @@ class FakeReviewQueue:
         from dataclasses import replace
 
         row = self.records.get(review_id)
-        if row is None or row.status != "pending":
+        if row is None or row.status not in ("pending", "maybe"):  # decidable ∪ maybe (ADR-048 §7)
             return False
         self.records[review_id] = replace(row, status=status, resolution=resolution)
         return True
