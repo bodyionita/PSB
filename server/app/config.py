@@ -138,6 +138,14 @@ class Settings(BaseSettings):
     # next sweep — the re-file guard keeps a re-scan idempotent, ADR-049 §5).
     dedup_max_pairs_per_run: int = 200
 
+    # --- Inbox drainer (M6 task 6, 04-pipelines §3b, ADR-048 §10) ---
+    # Nightly job: re-run the organizer over captures still materialized as an `inbox/` fallback
+    # (organize was down / produced no valid nodes at ingest), so a now-richer entity registry can
+    # resolve a previously-unorganizable capture into real typed nodes (replaced only on success;
+    # a still-failing capture stays in `inbox/`). Bound on how many captures one run re-organizes
+    # (a run's budget; the rest wait for the next run — the scan is idempotent, ADR-048 §10).
+    inbox_drain_max_per_run: int = 200
+
     # --- Planes (ADR-005 surviving half — attributes, not folders) ---
     planes: CsvList = Field(
         default=["Professional", "Personal", "Family", "Friends", "Health", "Ideas"]

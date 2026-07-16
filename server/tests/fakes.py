@@ -942,6 +942,18 @@ class FakeCaptureStore:
         )
         return ordered[:limit]
 
+    async def list_inbox_materialized(
+        self, *, folder: str, limit: int
+    ) -> list[CaptureRecord]:
+        prefix = f"{folder}/"
+        matching = [
+            r
+            for r in self.records.values()
+            if r.removed_at is None and any(p.startswith(prefix) for p in r.node_paths)
+        ]
+        matching.sort(key=lambda r: r.created_at or datetime.now(UTC))  # oldest-first (mirrors SQL)
+        return matching[:limit]
+
     async def mark_status(self, capture_id: str, status: str) -> None:
         self.records[capture_id].status = status
 

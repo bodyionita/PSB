@@ -396,6 +396,16 @@ class CapturePipeline:
             raise CaptureNotFound(capture_id)
         self._spawn(self._reorganize(capture_id))
 
+    async def reorganize_capture_now(self, capture_id: str) -> None:
+        """Re-organize a capture and AWAIT it inline — the nightly inbox drainer's entry (ADR-048
+        §10). Same core as :meth:`reorganize_capture` (``_replace_notes_via_reorganize``: replace
+        the notes only on a successful organize, keep them on the inbox fallback, skip a
+        one-tap-removed capture, own ``agent_runs`` row), but **blocking** instead of the admin
+        path's background spawn — the drainer sweeps many captures under a per-run bound and must
+        know when each finishes to report an accurate outcome and let the CLI/pipeline drain
+        deterministically. Idempotent (rule 6); never raises past the shared core's own guard."""
+        await self._reorganize(capture_id)
+
     async def retry_capture(self, capture_id: str) -> None:
         """Re-run a ``failed`` capture from its first incomplete step (03-api; 409 otherwise).
 

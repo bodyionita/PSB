@@ -801,6 +801,48 @@ async def check_dedup_sweep(db: Database) -> None:
         await db.pool.execute("DELETE FROM nodes WHERE id = ANY($1::uuid[])", ids)
 
 
+async def check_inbox_drain(db: Database) -> None:
+    """M6 task 6 (ADR-048 §10): the real ``PgCaptureStore.list_inbox_materialized`` SQL — the
+    un-fakeable ``EXISTS (unnest(node_paths) … LIKE folder/%)`` inbox predicate + the ``removed_at``
+    tombstone filter + the oldest-first ``LIMIT`` bound. The read is GLOBAL, so we assert on our
+    own seeded ids (subset) — pre-existing dev inbox captures never break it. Cleaned up finally."""
+    print("\n== PgCaptureStore.list_inbox_materialized (M6 task 6 — inbox drainer) ==")
+    captures = PgCaptureStore(db)
+    now = datetime.now(UTC)
+    old = "eeeeeeee-0000-0000-0000-0000000000a1"        # inbox, oldest of ours
+    new = "eeeeeeee-0000-0000-0000-0000000000a2"        # inbox, newer
+    organized = "eeeeeeee-0000-0000-0000-0000000000a3"  # real nodes only — excluded
+    removed = "eeeeeeee-0000-0000-0000-0000000000a4"    # inbox but tombstoned — excluded
+    ids = [old, new, organized, removed]
+    try:
+        await captures.create(capture_id=old, kind=KIND_TEXT, status=INDEXED,
+                              created_at=now - timedelta(hours=2))
+        await captures.set_node_paths(old, ["inbox/old--aa.md"])
+        await captures.create(capture_id=new, kind=KIND_TEXT, status=INDEXED,
+                              created_at=now - timedelta(hours=1))
+        await captures.set_node_paths(new, ["inbox/new--bb.md"])
+        await captures.create(capture_id=organized, kind=KIND_TEXT, status=INDEXED,
+                              created_at=now)
+        await captures.set_node_paths(organized, ["memory/real--cc.md", "person/x--dd.md"])
+        await captures.create(capture_id=removed, kind=KIND_TEXT, status=INDEXED,
+                              created_at=now - timedelta(hours=3))
+        await captures.set_node_paths(removed, ["inbox/removed--ee.md"])
+        await db.pool.execute("UPDATE captures SET removed_at = now() WHERE id = $1", removed)
+
+        got = await captures.list_inbox_materialized(folder="inbox", limit=200)
+        mine = [r.id for r in got if r.id in ids]
+        check("inbox-materialized captures selected oldest-first; organized + removed excluded",
+              mine == [old, new], str(mine))
+        # The LIMIT bounds a run (global read → assert the count, not which id).
+        capped = await captures.list_inbox_materialized(folder="inbox", limit=1)
+        check("the LIMIT bounds one run's selection", len(capped) == 1, str(len(capped)))
+        # A different configured folder matches its own prefix, not `inbox/` (config-driven).
+        other = await captures.list_inbox_materialized(folder="dropbox", limit=200)
+        check("a non-matching folder selects none of ours", all(r.id not in ids for r in other))
+    finally:
+        await db.pool.execute("DELETE FROM captures WHERE id = ANY($1::uuid[])", ids)
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -1068,6 +1110,7 @@ async def main() -> int:
         await check_review_queue_reopen(db)
         await check_auto_recorded(db)
         await check_dedup_sweep(db)
+        await check_inbox_drain(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

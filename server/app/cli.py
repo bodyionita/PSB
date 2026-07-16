@@ -51,6 +51,9 @@ CHAT_DISTILL = "chat-distill"
 # The dedup sweep (ADR-049, M6 task 5): file dedup-proposal review items for near-duplicate content
 # nodes. Not yet a pipeline step (M6 task 8) — standalone verb = the run-now + local-test path.
 DEDUP_SWEEP = "dedup-sweep"
+# The inbox drainer (ADR-048 §10, M6 task 6): re-organize `inbox/`-materialized captures against the
+# now-richer registry. Not yet a pipeline step (M6 task 8) — standalone verb = run-now + local-test.
+INBOX_DRAIN = "inbox-drain"
 # The reprocess-all-from-raw op (ADR-042). Destructive of derived state but confirm is implicit at
 # the CLI (an operator running it deliberately) — raw + approved vocab are preserved.
 REPROCESS = "reprocess-all"
@@ -63,6 +66,7 @@ JOBS: tuple[str, ...] = (
     IDENTITY_CAPSULE,
     CHAT_DISTILL,
     DEDUP_SWEEP,
+    INBOX_DRAIN,
     REPROCESS,
 )
 
@@ -158,6 +162,15 @@ async def run_job(name: str) -> None:
             from .dedup.sweep import build_dedup_sweep_service
 
             await build_dedup_sweep_service(settings, db).run_scheduled()
+        elif name == INBOX_DRAIN:
+            # Re-organize goes through the single writer (rule 2b), so the drainer drives a real
+            # capture pipeline. Run it, then flush the store backup so this one-shot commits the
+            # resolved nodes (the in-app nightly's long-lived debounce handles that itself; a CLI
+            # process exits too soon — the reprocess-all pattern).
+            from .inbox.drain import build_inbox_drain_service
+
+            await build_inbox_drain_service(settings, db, store_backup).run_scheduled()
+            await store_backup.backup_now("inbox-drain")
         else:
             jobs = build_backup_jobs(settings, db, store_backup)
             await getattr(jobs, BACKUP_JOBS[name])()
