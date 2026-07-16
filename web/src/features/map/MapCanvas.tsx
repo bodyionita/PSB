@@ -3,7 +3,7 @@
 // topics another"), emoji=type marks, plane-coloured halos + hub rings, and canonical/derived/
 // superseded edge styling. Single-click a neighbor = re-center; click the focal = open the drawer;
 // click a "+N" node = show more of that zone. Hover peek uses the library's native tooltips.
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph2D, { type ForceGraphMethods } from 'react-force-graph-2d';
 import { useTheme } from '../../theme/theme-context';
 import { THEMES } from '../../theme/themes';
@@ -83,12 +83,17 @@ export function MapCanvas({
 
   const isHub = (n: MapNode): boolean => (n.type ? entityRef.current.has(n.type) : false);
 
-  // Wire the force layout once the kapsule has initialised: a custom 'zone' force pulls each
-  // neighbor toward its sector target (tx/ty), keeping the stock charge + link forces for organic
-  // spacing. The focal node is pinned (fx/fy=0) so it never drifts.
+  // Wire the force layout once the kapsule exists: a custom 'zone' force pulls each neighbor toward
+  // its sector target (tx/ty), keeping the stock charge + link forces for organic spacing; the focal
+  // node is pinned (fx/fy=0). The ref is only populated once ForceGraph2D renders, which is gated on
+  // a non-zero measured size — so this depends on width/height (not `[]`, which would run during the
+  // first size-0 render when the ref is still null and never re-run). Wired once via the guard.
+  const wiredRef = useRef(false);
+  const [ready, setReady] = useState(false);
   useEffect(() => {
     const fg = fgRef.current;
-    if (!fg) return;
+    if (!fg || wiredRef.current) return;
+    wiredRef.current = true;
     const store: { nodes: MapNode[] } = { nodes: [] };
     const zoneForce: D3Force = (alpha: number) => {
       for (const n of store.nodes) {
@@ -104,16 +109,18 @@ export function MapCanvas({
     (fg.d3Force as (name: string, fn: D3Force) => void)('zone', zoneForce);
     (fg.d3Force('charge') as unknown as D3Force | undefined)?.strength?.(-170);
     (fg.d3Force('link') as unknown as D3Force | undefined)?.distance?.(150);
-  }, []);
+    setReady(true);
+  }, [width, height]);
 
-  // Re-center: reheat the sim and fit the fresh neighborhood into view once it settles.
+  // Re-center: reheat the sim and fit the fresh neighborhood into view once it settles. Also runs on
+  // the first view (when `ready` flips true) so the initial fit isn't lost to the mount/size race.
   const fitPending = useRef(false);
   useEffect(() => {
     const fg = fgRef.current;
-    if (!fg) return;
+    if (!fg || !ready) return;
     fitPending.current = true;
     fg.d3ReheatSimulation();
-  }, [focalId]);
+  }, [focalId, ready]);
 
   const drawNode = (node: MapNode, ctx: CanvasRenderingContext2D, scale: number) => {
     const pal = paletteRef.current;
@@ -189,6 +196,15 @@ export function MapCanvas({
     ctx.fill();
   };
 
+  // Per-edge colour, shared by the line and its arrowhead so a dimmed/superseded edge stays dimmed.
+  const linkColor = (l: MapLink): string => {
+    const pal = paletteRef.current;
+    if (l.more) return pal.more;
+    if (l.until) return pal.superseded;
+    if (l.origin === 'derived') return pal.derived;
+    return pal.canonical;
+  };
+
   if (width === 0 || height === 0) return null;
 
   return (
@@ -207,20 +223,12 @@ export function MapCanvas({
       }
       nodeCanvasObject={drawNode}
       nodePointerAreaPaint={drawPointerArea}
-      linkColor={(l) =>
-        l.more
-          ? paletteRef.current.more
-          : l.until
-            ? paletteRef.current.superseded
-            : l.origin === 'derived'
-              ? paletteRef.current.derived
-              : paletteRef.current.canonical
-      }
+      linkColor={linkColor}
       linkWidth={(l) => (l.more ? 1 : l.origin === 'derived' ? 0.8 : 1.3)}
       linkLineDash={(l) => (l.more ? [2, 3] : l.until ? [4, 3] : null)}
       linkDirectionalArrowLength={(l) => (l.more || l.origin === 'derived' ? 0 : 3.5)}
       linkDirectionalArrowRelPos={1}
-      linkDirectionalArrowColor={() => paletteRef.current.canonical}
+      linkDirectionalArrowColor={linkColor}
       linkLabel={(l) =>
         l.more
           ? ''

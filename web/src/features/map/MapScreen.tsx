@@ -5,7 +5,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { api } from '../../api/client';
-import type { MapNeighborItem, SearchResultItem } from '../../api/types';
+import type { MapNeighborItem, NeighborCenter, SearchResultItem } from '../../api/types';
 import { NodePreview, PlaneBadge } from '../../ui/NodePreview';
 import { baseName } from '../../ui/nodeDetail';
 import { typeIcon, typeLabel } from '../../ui/nodeTypes';
@@ -68,9 +68,15 @@ export function MapScreen({
   // Per-zone "show more" appends, reset whenever the focal node changes.
   const [extra, setExtra] = useState<Record<string, { neighbors: MapNeighborItem[]; cursor: string | null }>>({});
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // The node we're re-centering to, known from the carried neighbor data before its own neighbors
+  // fetch resolves (ADR-051 §5). Drives the caption chip + current breadcrumb during the placeholder
+  // window so they show the destination immediately (the canvas keeps the old neighborhood until the
+  // swap) instead of the old node appearing twice.
+  const [navTarget, setNavTarget] = useState<Crumb | null>(null);
 
   const neighbors = useNeighbors(focalId);
   const center = neighbors.data?.center ?? null;
+  const inTransit = neighbors.isPlaceholderData;
   const typesQuery = useTypes();
   const entityTypes = useMemo(
     () => new Set(typesQuery.data?.entity_like_types ?? []),
@@ -84,9 +90,15 @@ export function MapScreen({
       setTrail([]);
       setExtra({});
       setDrawerOpen(false);
+      setNavTarget({ id: seed, title: null, type: null });
     }
     if (seed) onSeedConsumed();
   }, [seed, focalId, onSeedConsumed]);
+
+  // Drop the transit target once its own neighborhood has loaded (the swap is complete).
+  useEffect(() => {
+    if (center && navTarget && center.node_id === navTarget.id) setNavTarget(null);
+  }, [center, navTarget]);
 
   // Persist the last-centered node so an empty map can offer to restore it.
   useEffect(() => {
@@ -100,6 +112,9 @@ export function MapScreen({
     }
   }, [center]);
 
+  // Current graph nodes, for looking up a clicked neighbor's known title/type/plane at re-center.
+  const graphNodesRef = useRef<MapNode[]>([]);
+
   const recenter = useCallback(
     (nodeId: string) => {
       if (nodeId === focalId) return;
@@ -107,6 +122,8 @@ export function MapScreen({
       if (center) {
         setTrail((t) => [...t, { id: center.node_id, title: center.title, type: center.type }]);
       }
+      const n = graphNodesRef.current.find((g) => g.id === nodeId);
+      setNavTarget({ id: nodeId, title: n?.title ?? null, type: n?.type ?? null });
       setFocalId(nodeId);
       setExtra({});
       setDrawerOpen(false);
@@ -119,25 +136,33 @@ export function MapScreen({
     const target = trail[index];
     if (!target) return;
     setTrail((t) => t.slice(0, index));
+    setNavTarget(target);
     setFocalId(target.id);
     setExtra({});
     setDrawerOpen(false);
   };
 
+  // In-flight guard: a fast double-click on a "+N" node must not fetch + append the same page twice.
+  const showMoreBusy = useRef<Set<string>>(new Set());
   const showMore = useCallback(
     async (rel: string, cursor: string | null) => {
-      if (!focalId) return;
-      const page = await api.nodeNeighborPage(focalId, rel, cursor);
-      setExtra((prev) => {
-        const cur = prev[rel] ?? { neighbors: [], cursor: null };
-        return {
-          ...prev,
-          [rel]: {
-            neighbors: [...cur.neighbors, ...page.neighbors],
-            cursor: page.next_cursor,
-          },
-        };
-      });
+      if (!focalId || showMoreBusy.current.has(rel)) return;
+      showMoreBusy.current.add(rel);
+      try {
+        const page = await api.nodeNeighborPage(focalId, rel, cursor);
+        setExtra((prev) => {
+          const cur = prev[rel] ?? { neighbors: [], cursor: null };
+          return {
+            ...prev,
+            [rel]: {
+              neighbors: [...cur.neighbors, ...page.neighbors],
+              cursor: page.next_cursor,
+            },
+          };
+        });
+      } finally {
+        showMoreBusy.current.delete(rel);
+      }
     },
     [focalId],
   );
@@ -186,11 +211,25 @@ export function MapScreen({
     for (const id of [...byId.keys()]) if (!wanted.has(id)) byId.delete(id);
     return { nodes, links: desired.links };
   }, [center, neighbors.data, extra]);
+  graphNodesRef.current = graph.nodes;
 
   const { ref: hostRef, size } = useSize();
 
-  const crumbs: Crumb[] = center
-    ? [...trail, { id: center.node_id, title: center.title, type: center.type }]
+  // While a re-center is in flight the canvas keeps the old neighborhood, but the caption + current
+  // breadcrumb show the destination (from the carried neighbor data) so they never lag or double up.
+  const displayCenter: NeighborCenter | null =
+    inTransit && navTarget && navTarget.id === focalId
+      ? {
+          node_id: navTarget.id,
+          type: navTarget.type ?? '',
+          title: navTarget.title,
+          plane: null,
+          planes: [],
+        }
+      : center;
+
+  const crumbs: Crumb[] = displayCenter
+    ? [...trail, { id: displayCenter.node_id, title: displayCenter.title, type: displayCenter.type }]
     : trail;
 
   return (
@@ -260,13 +299,15 @@ export function MapScreen({
             }}
           >
             <span aria-hidden style={{ fontSize: 18 }}>
-              {typeIcon(center.type)}
+              {typeIcon((displayCenter ?? center).type)}
             </span>
             <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 700 }}>
-              {center.title ?? baseName(center.node_id)}
+              {(displayCenter ?? center).title ?? baseName((displayCenter ?? center).node_id)}
             </span>
-            <span style={{ fontSize: 12, color: 'var(--muted)' }}>{typeLabel(center.type)}</span>
-            <PlaneBadge plane={center.plane} />
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+              {typeLabel((displayCenter ?? center).type)}
+            </span>
+            <PlaneBadge plane={(displayCenter ?? center).plane} />
           </div>
 
           <AnimatePresence>
