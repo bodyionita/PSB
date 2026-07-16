@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .chat.distill_store import PgChatDistillStore
+from .chat.distiller import ChatDistillerService
 from .chat.service import build_chat_service
 from .chat.store import PgChatStore
 from .config import Settings, get_settings
@@ -289,6 +291,20 @@ async def lifespan(app: FastAPI):
         run_store=run_store,
         vocab=vocabulary_service,
         chat_ingest=pipeline,
+    )
+
+    # Chat-distiller (M6, ADR-048): the stance-gated pass that turns idle chat sessions into
+    # memories. Scheduled as a nightly pipeline step (task 8) and driven on demand by
+    # `POST /chat/sessions/{id}/remember` (task 3). Built after the pipeline — its endorsed branch
+    # materializes `source=chat` captures through it (the single writer, ADR-048 §1) — reusing the
+    # shared review queue / routing / run store.
+    app.state.chat_distiller_service = ChatDistillerService(
+        settings=settings,
+        distill_store=PgChatDistillStore(db),
+        ingest=pipeline,
+        review_queue=review_queue,
+        routing=app.state.model_routing,
+        run_store=run_store,
     )
 
     # Reprocess-all-from-raw (ADR-042, M3 task 11): the standing data-survival op. Constructed after

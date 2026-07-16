@@ -544,6 +544,26 @@ async def check_chat_distill(db: Database) -> None:
         check("advance_watermark upserts in place (one row)", row["last_message_at"] == newer,
               str(row))
 
+        # session_state (M6 task 3 — the on-demand `remember` path): by-id watermark + newest, no
+        # idle filter. Here the watermark is at the newest message, so remember would skip.
+        state = await store.session_state(sid)
+        check("session_state returns watermark + newest for a known session",
+              state is not None and state.watermark == newer and state.newest_at == newer,
+              str(state))
+        unknown = await store.session_state("dddddddd-0000-0000-0000-0000000000d1")
+        check("session_state returns None for an unknown session (→404)", unknown is None,
+              str(unknown))
+        # A session that exists but has no messages: known (not None) but newest_at NULL → the
+        # remember endpoint skips (nothing to distill), never 404.
+        empty_sid = await chat.create_session()
+        try:
+            empty_state = await store.session_state(empty_sid)
+            check("session_state: empty session is known with newest_at=None (→skip, not 404)",
+                  empty_state is not None and empty_state.newest_at is None
+                  and empty_state.watermark is None, str(empty_state))
+        finally:
+            await db.pool.execute("DELETE FROM chat_sessions WHERE id = $1", empty_sid)
+
         # captures.source_ref: an endorsed chat capture carries source=chat + source_ref=session-id.
         cap_id = "cccccccc-0000-0000-0000-0000000000c1"
         cap_ids.append(cap_id)

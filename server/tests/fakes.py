@@ -1012,9 +1012,21 @@ class FakeChatDistillStore:
         *,
         sessions=None,
         messages=None,
+        known=None,
+        watermarks=None,
     ) -> None:
         self._sessions = list(sessions or [])  # list[DistillableSession]
         self._messages = dict(messages or {})  # session_id -> list[ChatMessageRecord]
+        # Which session ids exist (for `session_state` → None means 404). Defaults to the union of
+        # the preset roster + any session with messages, so most tests need not pass it explicitly.
+        self._known = set(known or set()) | set(self._messages) | {
+            s.session_id for s in self._sessions
+        }
+        # Per-session watermark for the on-demand `session_state` path; `advance_watermark` updates
+        # it in place so a remember-then-remember test sees the delta shrink (idempotency).
+        self._watermarks: dict = dict(watermarks or {})
+        for s in self._sessions:
+            self._watermarks.setdefault(s.session_id, s.watermark)
         self.idle_cutoff_arg = None
         self.delta_calls: list[dict] = []
         self.advanced: list[dict] = []
@@ -1022,6 +1034,21 @@ class FakeChatDistillStore:
     async def distillable_sessions(self, *, idle_cutoff, limit):
         self.idle_cutoff_arg = idle_cutoff
         return self._sessions[:limit]
+
+    async def session_state(self, session_id):
+        from app.chat.distill_store import SessionDistillState
+
+        if session_id not in self._known:
+            return None
+        msgs = self._messages.get(session_id, [])
+        newest = max(
+            (m.created_at for m in msgs if m.created_at is not None), default=None
+        )
+        return SessionDistillState(
+            session_id=session_id,
+            watermark=self._watermarks.get(session_id),
+            newest_at=newest,
+        )
 
     async def delta_messages(self, session_id, *, after, limit):
         self.delta_calls.append({"session_id": session_id, "after": after, "limit": limit})
@@ -1037,6 +1064,7 @@ class FakeChatDistillStore:
         self.advanced.append(
             {"session_id": session_id, "last_message_at": last_message_at, "run_id": run_id}
         )
+        self._watermarks[session_id] = last_message_at
 
 
 class FakeChatCaptureIngest:

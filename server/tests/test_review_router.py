@@ -12,10 +12,16 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.dependencies import get_review_service, require_session
+from app.config import Settings
+from app.dependencies import get_review_service, get_settings, require_session
 from app.routers import review
 from app.services.review_queue import KIND_ENTITY_AMBIGUITY, ReviewRecord
-from app.services.review_service import BadResolution, ReviewNotFound, ReviewNotPending
+from app.services.review_service import (
+    BadResolution,
+    BatchItemResult,
+    ReviewNotFound,
+    ReviewNotPending,
+)
 
 PREFIX = "/api/v1"
 NOW = datetime(2026, 7, 12, 12, 0, 0, tzinfo=UTC)
@@ -40,6 +46,7 @@ class FakeReviewService:
     def __init__(self) -> None:
         self.list_args: dict | None = None
         self.resolve_args: dict | None = None
+        self.batch_args: dict | None = None
         self.raises: Exception | None = None
 
     async def list_items(self, *, status=None, kind=None):
@@ -52,15 +59,24 @@ class FakeReviewService:
             raise self.raises
         return _record(review_id, status="resolved")
 
+    async def resolve_batch(self, ids, action):
+        self.batch_args = {"ids": ids, "action": action}
+        return [BatchItemResult(id=i, ok=True) for i in ids]
+
+
+def _make_client(fake: FakeReviewService, settings: Settings) -> TestClient:
+    app = FastAPI()
+    app.include_router(review.router, prefix=PREFIX)
+    app.dependency_overrides[get_review_service] = lambda: fake
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
 
 @pytest.fixture
 def client_and_service():
-    app = FastAPI()
-    app.include_router(review.router, prefix=PREFIX)
     fake = FakeReviewService()
-    app.dependency_overrides[get_review_service] = lambda: fake
-    app.dependency_overrides[require_session] = lambda: None
-    return TestClient(app), fake
+    return _make_client(fake, Settings()), fake
 
 
 def test_list_defaults_status_pending(client_and_service):
@@ -84,6 +100,47 @@ def test_resolve_delegates_and_serialises(client_and_service):
     assert resp.status_code == 200
     assert resp.json()["status"] == "resolved"
     assert fake.resolve_args == {"review_id": REVIEW_ID, "choice": "cand-a", "verdict": None}
+
+
+def test_batch_delegates_and_serialises(client_and_service):
+    client, fake = client_and_service
+    ids = [REVIEW_ID, "cccccccc-cccc-4ccc-8ccc-cccccccccccc"]
+    resp = client.post(f"{PREFIX}/review/batch", json={"ids": ids, "action": "agree"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [r["id"] for r in body["results"]] == ids
+    assert all(r["ok"] and r["error"] is None for r in body["results"])
+    assert fake.batch_args == {"ids": ids, "action": "agree"}
+
+
+def test_batch_route_not_shadowed_by_review_id(client_and_service):
+    # /review/batch must hit the batch handler, not POST /review/{id} with id="batch".
+    client, fake = client_and_service
+    resp = client.post(f"{PREFIX}/review/batch", json={"ids": [REVIEW_ID], "action": "maybe"})
+    assert resp.status_code == 200
+    assert fake.batch_args is not None and fake.resolve_args is None
+
+
+def test_batch_empty_ids_is_422(client_and_service):
+    client, _ = client_and_service
+    resp = client.post(f"{PREFIX}/review/batch", json={"ids": [], "action": "agree"})
+    assert resp.status_code == 422
+
+
+def test_batch_malformed_id_is_422(client_and_service):
+    client, _ = client_and_service
+    resp = client.post(f"{PREFIX}/review/batch", json={"ids": ["not-a-uuid"], "action": "agree"})
+    assert resp.status_code == 422
+
+
+def test_batch_over_cap_is_422_before_any_resolve():
+    # A batch larger than review_batch_max is rejected wholesale (422) before any side effect.
+    fake = FakeReviewService()
+    client = _make_client(fake, Settings(review_batch_max=1))
+    ids = [REVIEW_ID, "cccccccc-cccc-4ccc-8ccc-cccccccccccc"]
+    resp = client.post(f"{PREFIX}/review/batch", json={"ids": ids, "action": "agree"})
+    assert resp.status_code == 422
+    assert fake.batch_args is None  # never delegated
 
 
 def test_resolve_malformed_id_is_422(client_and_service):

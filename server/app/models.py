@@ -233,6 +233,17 @@ class ChatSessionDetail(BaseModel):
     messages: list[ChatMessageItem] = Field(default_factory=list)
 
 
+class RememberResponse(BaseModel):
+    """The on-demand distill result (POST /chat/sessions/{id}/remember, ADR-048 §6). Either the pass
+    ran — ``endorsed``/``to_review`` counts (each ``0+``; endorsed captures organize in the
+    background) with ``skipped=None`` — or it was a no-op (``skipped`` = the reason, counts null).
+    Same salience + stance gate as the nightly run; advances the same watermark."""
+
+    endorsed: int | None = None
+    to_review: int | None = None
+    skipped: str | None = None
+
+
 # --- Settings: model routing (03-api.md §Settings, ADR-025 / ADR-043) ---
 class RoutingModelItem(BaseModel):
     """A pickable chat model for a routing group's dropdowns (GET /settings). ``id`` is the MODEL id
@@ -316,6 +327,33 @@ class ReviewResolveRequest(BaseModel):
 
     choice: str | None = None
     verdict: str | None = None
+
+
+class ReviewBatchRequest(BaseModel):
+    """Batch resolution body for POST /review/batch (ADR-048 §8): apply one ``action`` string to
+    many items, best-effort per item. The action is the kind's resolution term — a ``verdict``
+    (``agree``/``disagree``/``maybe`` for stance-candidate, ``approve``/``reject`` for vocab) or an
+    entity-ambiguity ``choice`` (``maybe`` / a candidate id); each item's resolver reads the field
+    that fits its kind, so an action invalid for an item just fails that item (recorded in
+    ``results``), never the batch."""
+
+    ids: list[UUID] = Field(min_length=1)
+    action: str = Field(min_length=1)
+
+
+class ReviewBatchResultItem(BaseModel):
+    """One item's outcome in a batch resolve (POST /review/batch): ``ok`` with no ``error``, or
+    ``ok=false`` + a short reason (unknown / already resolved / invalid for the kind)."""
+
+    id: str
+    ok: bool
+    error: str | None = None
+
+
+class ReviewBatchResponse(BaseModel):
+    """The per-item results of a batch resolve (POST /review/batch), in request order."""
+
+    results: list[ReviewBatchResultItem] = Field(default_factory=list)
 
 
 # --- Activity (03-api.md §Activity feed) ---

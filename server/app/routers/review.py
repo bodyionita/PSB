@@ -15,8 +15,15 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..dependencies import get_review_service, require_session
-from ..models import ReviewItemResponse, ReviewResolveRequest
+from ..config import Settings
+from ..dependencies import get_review_service, get_settings, require_session
+from ..models import (
+    ReviewBatchRequest,
+    ReviewBatchResponse,
+    ReviewBatchResultItem,
+    ReviewItemResponse,
+    ReviewResolveRequest,
+)
 from ..services.review_queue import ReviewRecord
 from ..services.review_service import (
     BadResolution,
@@ -53,6 +60,29 @@ async def list_review(
     (``entity-ambiguity`` / ``vocab-proposal`` / ``stance-candidate`` / ``dedup-proposal``)."""
     items = await service.list_items(status=status, kind=kind)
     return [_to_response(item) for item in items]
+
+
+@router.post("/batch", response_model=ReviewBatchResponse)
+async def resolve_batch(
+    request: ReviewBatchRequest,
+    service: ReviewService = Depends(get_review_service),
+    settings: Settings = Depends(get_settings),
+) -> ReviewBatchResponse:
+    """Resolve many items at once with one ``action`` (ADR-048 §8), **best-effort per item**: every
+    id gets a result (``ok`` or a short ``error`` reason), and one bad item never fails the batch.
+    Declared before ``/{review_id}`` so ``/review/batch`` isn't captured as a malformed uuid id.
+    ``422`` if the batch exceeds ``review_batch_max`` (rule 9 — bounds a runaway request)."""
+    if len(request.ids) > settings.review_batch_max:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"batch too large (max {settings.review_batch_max} ids)",
+        )
+    results = await service.resolve_batch([str(i) for i in request.ids], request.action)
+    return ReviewBatchResponse(
+        results=[
+            ReviewBatchResultItem(id=r.id, ok=r.ok, error=r.error) for r in results
+        ]
+    )
 
 
 @router.post("/{review_id}", response_model=ReviewItemResponse)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, Request, status
 
+from .chat.distiller import ChatDistillerService
 from .chat.service import ChatService
 from .config import Settings
 from .db import Database
@@ -83,6 +84,10 @@ def get_search_service(request: Request) -> SearchService:
 
 def get_chat_service(request: Request) -> ChatService:
     return request.app.state.chat_service
+
+
+def get_chat_distiller_service(request: Request) -> ChatDistillerService:
+    return request.app.state.chat_distiller_service
 
 
 def get_derived_edge_graph(request: Request) -> DerivedEdgeGraph:

@@ -112,6 +112,32 @@ Output ONLY a JSON object of this exact shape, nothing else:
 """
 
 
+class SessionNotFound(Exception):
+    """A ``remember`` was requested for a ``session_id`` that doesn't exist (→ 404, ADR-048 §6)."""
+
+
+@dataclass(frozen=True)
+class RememberOutcome:
+    """The result of an on-demand ``remember`` pass on ONE session (POST …/remember, ADR-048 §6).
+    ``skipped_reason`` is set (and the counts are 0) only when the watermark did NOT advance — no
+    new messages after the watermark, or the conspect chain was down (retry later). A pass that ran
+    but found nothing memory-worthy is ``endorsed=0, to_review=0`` with no skip (it *did* run)."""
+
+    endorsed: int
+    to_review: int
+    skipped_reason: str | None = None
+
+    @property
+    def skipped(self) -> bool:
+        return self.skipped_reason is not None
+
+    @classmethod
+    def from_session(cls, outcome: SessionOutcome) -> RememberOutcome:
+        if not outcome.advanced:
+            return cls(endorsed=0, to_review=0, skipped_reason=outcome.skipped_reason)
+        return cls(endorsed=len(outcome.endorsed), to_review=len(outcome.review))
+
+
 @dataclass(frozen=True)
 class DistillCandidate:
     """One normalized candidate parsed from the distill response."""
@@ -268,6 +294,55 @@ class ChatDistillerService:
         except Exception as exc:  # noqa: BLE001 — end the run failed with context, never crash
             logger.exception("chat-distiller run failed")
             await self._safe_finish(run_id, exc)
+
+    async def remember(self, session_id: str) -> RememberOutcome:
+        """Distill ONE session on demand (POST /chat/sessions/{id}/remember, ADR-048 §6).
+
+        The **same** single distill pass, same salience + stance gate, on the delta-after-watermark
+        — a manual trigger changes *timing*, not judgment (no force-endorse). It advances the same
+        ``chat_distill_state`` watermark, so the nightly run then skips this delta (idempotent with
+        the scheduled path). Endorsed candidates materialize ``captures`` that organize in the
+        background (the pipeline's fast-ack path), so this returns as soon as the pass is routed.
+
+        Raises :class:`SessionNotFound` (→ 404) for an unknown session; a known session with nothing
+        new past the watermark returns a ``skipped`` outcome (nothing to distill)."""
+        state = await self._store.session_state(session_id)
+        if state is None:
+            raise SessionNotFound(session_id)
+        if state.newest_at is None or (
+            state.watermark is not None and state.newest_at <= state.watermark
+        ):
+            # Known session, but no message past the watermark — nothing to distill (the delta would
+            # be empty). Skip without opening a run or calling the model.
+            return RememberOutcome(endorsed=0, to_review=0, skipped_reason="no new messages")
+
+        # Open a run for visibility (vision P8) so the on-demand pass is auditable and the watermark
+        # carries its run id; a row-open failure degrades to an unattributed pass (rule 7).
+        try:
+            run_id: str | None = await self._runs.start(AGENT)
+        except Exception:  # noqa: BLE001 — DB down at row-open: distill anyway, unattributed
+            logger.exception("could not open agent_runs row for remember; running unattributed")
+            run_id = None
+
+        session = DistillableSession(
+            session_id=session_id, watermark=state.watermark, newest_at=state.newest_at
+        )
+        session_outcome = await self._distill_session(session, run_id)
+        if run_id is not None:
+            outcome = DistillOutcome()
+            outcome.add(session_outcome)
+            try:
+                await self._runs.finish(
+                    run_id,
+                    status=SUCCEEDED,
+                    summary=outcome.summary(),
+                    details=outcome.as_dict(),
+                    model_used=outcome.model_used,
+                    fallback_used=outcome.fallback_used,
+                )
+            except Exception:  # noqa: BLE001 — the pass already ran; closing the row is best-effort
+                logger.exception("could not close remember agent_runs row %s", run_id)
+        return RememberOutcome.from_session(session_outcome)
 
     async def _distill_all(self, run_id: str | None) -> DistillOutcome:
         now = datetime.now(UTC)

@@ -15,6 +15,7 @@ from app.chat.distill_store import DistillableSession
 from app.chat.distiller import (
     AGENT,
     ChatDistillerService,
+    SessionNotFound,
     _anchor_time,
     _has_hedge,
     parse_distill_candidates,
@@ -399,6 +400,147 @@ async def test_oversized_delta_is_batched_oldest_first_not_skipped():
     run = _run(runs)
     assert run.details["truncated"] == 1
     assert run.details["sessions"][0]["truncated"] is True
+
+
+# --- on-demand remember (M6 task 3, ADR-048 §6) -------------------------------------------------
+
+
+def _remember_service(
+    *,
+    reply: str,
+    messages,
+    available: bool = True,
+    ingest_down: bool = False,
+    watermarks=None,
+    known=None,
+    settings: Settings | None = None,
+):
+    """A distiller wired for the on-demand `remember` path — the fake store is seeded by session
+    membership + per-session watermark (not the distillable roster, which `remember` bypasses)."""
+    routing, provider = _routing(reply, available=available)
+    store = FakeChatDistillStore(messages=messages, watermarks=watermarks, known=known)
+    ingest = FakeChatCaptureIngest(down=ingest_down)
+    review = FakeReviewQueue()
+    runs = FakeAgentRunStore()
+    service = ChatDistillerService(
+        settings=settings or Settings(),
+        distill_store=store,
+        ingest=ingest,
+        review_queue=review,
+        routing=routing,
+        run_store=runs,
+    )
+    return service, store, ingest, review, runs, provider
+
+
+@pytest.mark.asyncio
+async def test_remember_endorsed_returns_counts_and_advances_watermark():
+    reply = (
+        '{"candidates": [{"candidate_text": "The user ships on Fridays.",'
+        '"stance": "endorsed", "salience": "high", "evidence_excerpt": "ship on Fridays"}]}'
+    )
+    messages = {"s1": [_msg("m1", "user", "we ship on Fridays now", minutes=0)]}
+    service, store, ingest, review, runs, _ = _remember_service(reply=reply, messages=messages)
+
+    outcome = await service.remember("s1")
+
+    assert not outcome.skipped
+    assert outcome.endorsed == 1 and outcome.to_review == 0
+    assert len(ingest.captures) == 1 and ingest.captures[0]["session_id"] == "s1"
+    # Advanced to the session's last (only) message, stamped with the on-demand run's id (P8).
+    run = _run(runs)
+    assert store.advanced == [
+        {"session_id": "s1", "last_message_at": messages["s1"][0].created_at, "run_id": run.id}
+    ]
+    assert run.agent == AGENT and run.status == "succeeded"
+    assert run.details["endorsed"] == 1 and run.details["sessions_distilled"] == 1
+
+
+@pytest.mark.asyncio
+async def test_remember_unclear_returns_review_count():
+    reply = (
+        '{"candidates": [{"candidate_text": "The user may adopt Rust.",'
+        '"stance": "unclear", "salience": "med", "evidence_excerpt": "not sure about Rust",'
+        '"why_unclear": "hedged"}]}'
+    )
+    messages = {"s1": [_msg("m1", "user", "thinking about Rust maybe", minutes=0)]}
+    service, store, ingest, review, runs, _ = _remember_service(reply=reply, messages=messages)
+
+    outcome = await service.remember("s1")
+
+    assert not outcome.skipped
+    assert outcome.endorsed == 0 and outcome.to_review == 1
+    assert ingest.captures == [] and len(review.items) == 1
+    assert review.items[0].kind == KIND_STANCE_CANDIDATE
+    assert store.advanced  # materialized → watermark advanced
+
+
+@pytest.mark.asyncio
+async def test_remember_unknown_session_raises_not_found():
+    service, *_ = _remember_service(reply='{"candidates": []}', messages={"s1": []})
+    with pytest.raises(SessionNotFound):
+        await service.remember("ghost")
+
+
+@pytest.mark.asyncio
+async def test_remember_no_new_messages_skips_without_run_or_model_call():
+    # Watermark already at/after the newest message → nothing to distill: no run, no model call.
+    msg = _msg("m1", "user", "already distilled", minutes=0)
+    service, store, ingest, review, runs, provider = _remember_service(
+        reply='{"candidates": []}',
+        messages={"s1": [msg]},
+        watermarks={"s1": msg.created_at},
+    )
+
+    outcome = await service.remember("s1")
+
+    assert outcome.skipped and outcome.skipped_reason == "no new messages"
+    assert outcome.endorsed == 0 and outcome.to_review == 0
+    assert store.advanced == [] and store.delta_calls == []  # never touched the delta
+    assert runs.runs == {}  # no run opened for a no-op remember
+
+
+@pytest.mark.asyncio
+async def test_remember_session_with_no_messages_skips():
+    service, store, ingest, review, runs, _ = _remember_service(
+        reply='{"candidates": []}', messages={}, known={"s1"}
+    )
+
+    outcome = await service.remember("s1")
+
+    assert outcome.skipped and outcome.skipped_reason == "no new messages"
+    assert runs.runs == {}
+
+
+@pytest.mark.asyncio
+async def test_remember_chain_down_skips_and_keeps_watermark():
+    messages = {"s1": [_msg("m1", "user", "something worth remembering", minutes=0)]}
+    service, store, ingest, review, runs, _ = _remember_service(
+        reply="unused", messages=messages, available=False
+    )
+
+    outcome = await service.remember("s1")
+
+    assert outcome.skipped and outcome.skipped_reason == "conspect chain unavailable"
+    assert store.advanced == []  # not advanced → a later run retries (idempotent, ADR-048 §6)
+    assert _run(runs).status == "succeeded"  # the pass ran; the session was skipped
+
+
+@pytest.mark.asyncio
+async def test_remember_is_idempotent_second_call_is_a_skip():
+    reply = (
+        '{"candidates": [{"candidate_text": "The user likes filter coffee.",'
+        '"stance": "endorsed", "evidence_excerpt": "filter coffee"}]}'
+    )
+    messages = {"s1": [_msg("m1", "user", "I like filter coffee", minutes=0)]}
+    service, store, ingest, review, runs, _ = _remember_service(reply=reply, messages=messages)
+
+    first = await service.remember("s1")
+    second = await service.remember("s1")
+
+    assert first.endorsed == 1
+    assert second.skipped and second.skipped_reason == "no new messages"
+    assert len(ingest.captures) == 1  # the second call re-distilled nothing (watermark advanced)
 
 
 @pytest.mark.asyncio

@@ -176,6 +176,9 @@ class Settings(BaseSettings):
     # Upper bound on the admin Review list (GET /review) — a personal store's pending queue is
     # small, so one page suffices; bounds a runaway response if it ever isn't.
     review_list_max: int = 200
+    # Upper bound on one POST /review/batch (ADR-048 §8) — a triage batch is small; bounds a runaway
+    # request that would resolve items sequentially with real side effects (rule 9, like above).
+    review_batch_max: int = 200
 
     # --- Graph-store backup / durability (ADR-014; ex-`vault_*`, renamed at M3 — ADR-031) ---
     # The server only ever fast-forward pushes to this remote/branch; never force/rebase/reset.

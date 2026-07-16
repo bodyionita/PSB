@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -65,7 +66,23 @@ logger = logging.getLogger(__name__)
 
 # Re-exported for the review router, which imports the resolution exceptions from here; they now
 # live in review_queue (shared with the Vocabulary service). Keep the names importable.
-__all__ = ["ReviewService", "ReviewNotFound", "ReviewNotPending", "BadResolution"]
+__all__ = [
+    "ReviewService",
+    "ReviewNotFound",
+    "ReviewNotPending",
+    "BadResolution",
+    "BatchItemResult",
+]
+
+
+@dataclass(frozen=True)
+class BatchItemResult:
+    """One item's outcome in a batch resolve (POST /review/batch, ADR-048 §8) — ``ok`` or a short
+    ``error`` reason. Best-effort: every id gets a result; one bad item never aborts the batch."""
+
+    id: str
+    ok: bool
+    error: str | None = None
 
 
 class VocabGovernance(VocabularyProvider, Protocol):
@@ -168,6 +185,36 @@ class ReviewService:
         await self._store.resolve(review_id, status=new_status, resolution=resolution)
         updated = await self._store.get(review_id)
         return updated if updated is not None else record
+
+    async def resolve_batch(self, ids: list[str], action: str) -> list[BatchItemResult]:
+        """Resolve many items with one ``action`` string, **best-effort per item** (POST
+        /review/batch, ADR-048 §8) — returns one result per id, in order.
+
+        Reuses the single-item :meth:`resolve` unchanged: the ``action`` is passed as **both**
+        ``choice`` and ``verdict``, and each kind's resolver reads only the field that fits it
+        (``choice`` for entity-ambiguity picks, ``verdict`` for stance-candidate / vocab-proposal) —
+        so a homogeneous batch (the common case: triaging stance candidates) resolves cleanly, and
+        an action that doesn't fit an item's kind fails just that item (``ok=false`` + reason)
+        without aborting the rest (rule 7)."""
+        results: list[BatchItemResult] = []
+        for review_id in ids:
+            try:
+                await self.resolve(review_id, choice=action, verdict=action)
+                results.append(BatchItemResult(id=review_id, ok=True))
+            except ReviewNotFound:
+                results.append(BatchItemResult(id=review_id, ok=False, error="not found"))
+            except ReviewNotPending:
+                results.append(
+                    BatchItemResult(id=review_id, ok=False, error="already resolved")
+                )
+            except BadResolution as exc:
+                results.append(BatchItemResult(id=review_id, ok=False, error=str(exc)))
+            except Exception as exc:  # noqa: BLE001 — one bad item never aborts the batch (rule 7)
+                logger.exception("review batch: item %s failed", review_id)
+                results.append(
+                    BatchItemResult(id=review_id, ok=False, error=f"{type(exc).__name__}: {exc}")
+                )
+        return results
 
     # --- entity-ambiguity ---------------------------------------------------------------
 

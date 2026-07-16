@@ -33,6 +33,18 @@ class DistillableSession:
     newest_at: datetime
 
 
+@dataclass(frozen=True)
+class SessionDistillState:
+    """The distill state of ONE session, fetched by id for the on-demand ``remember`` path (ADR-048
+    §6) regardless of idle-eligibility. ``newest_at`` is ``None`` when the session exists but has no
+    messages yet (nothing to distill). The session existing at all (vs. ``session_state`` returning
+    ``None``) is what separates a 404 from a skip in the endpoint."""
+
+    session_id: str
+    watermark: datetime | None
+    newest_at: datetime | None
+
+
 class ChatDistillStore(Protocol):
     """The chat-distiller persistence surface: which sessions are due, their delta, watermark."""
 
@@ -58,6 +70,13 @@ class ChatDistillStore(Protocol):
     ) -> None:
         """Upsert the session's watermark to ``last_message_at`` (idempotent — a re-run with no
         newer activity leaves the delta empty and the session no longer eligible)."""
+        ...
+
+    async def session_state(self, session_id: str) -> SessionDistillState | None:
+        """One session's watermark + newest-message time, by id, for the on-demand ``remember``
+        path (ADR-048 §6) — no idle-eligibility filter. ``None`` when the session id is unknown (→
+        404); a known session with no messages returns ``newest_at=None`` (→ skip, nothing to
+        distill)."""
         ...
 
 
@@ -116,6 +135,32 @@ class PgChatDistillStore:
                 limit,
             )
         return [_message(r) for r in rows]
+
+    async def session_state(self, session_id: str) -> SessionDistillState | None:
+        async with self._db.acquire() as conn:
+            # LEFT JOINs so an existing session with no watermark and/or no messages still returns a
+            # row (distinguishing "unknown session" → no row → 404 from "nothing to distill" →
+            # newest_at NULL → skip). Grouped on the session + its scalar watermark.
+            row = await conn.fetchrow(
+                """
+                SELECT s.id,
+                       st.last_message_at AS watermark,
+                       max(m.created_at)  AS newest_at
+                  FROM chat_sessions s
+                  LEFT JOIN chat_distill_state st ON st.session_id = s.id
+                  LEFT JOIN chat_messages m ON m.session_id = s.id
+                 WHERE s.id = $1
+                 GROUP BY s.id, st.last_message_at
+                """,
+                session_id,
+            )
+        if row is None:
+            return None
+        return SessionDistillState(
+            session_id=str(row["id"]),
+            watermark=row["watermark"],
+            newest_at=row["newest_at"],
+        )
 
     async def advance_watermark(
         self, session_id: str, *, last_message_at: datetime, run_id: str | None

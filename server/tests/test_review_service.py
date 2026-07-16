@@ -455,6 +455,51 @@ async def test_stance_agree_unconfigured_is_bad_resolution(tmp_path: Path):
         await service.resolve(rid, verdict="agree")
 
 
+# --- batch resolution (M6 task 3, ADR-048 §8) ---------------------------------------------
+
+
+async def test_batch_agree_resolves_every_stance_item(tmp_path: Path):
+    ingest = FakeChatCaptureIngest()
+    service, review = _stance_build(tmp_path, ingest=ingest)
+    r1 = await review.enqueue(_stance_item())
+    r2 = await review.enqueue(_stance_item())
+
+    results = await service.resolve_batch([r1, r2], "agree")
+
+    assert [(x.id, x.ok, x.error) for x in results] == [(r1, True, None), (r2, True, None)]
+    assert len(ingest.captures) == 2  # each item routed through the auto-endorse path
+    assert review.records[r1].status == "resolved" and review.records[r2].status == "resolved"
+
+
+async def test_batch_is_best_effort_per_item(tmp_path: Path):
+    # One good item, one already-terminal, one unknown id: every id gets a result, none aborts the
+    # batch (ADR-048 §8 / rule 7).
+    ingest = FakeChatCaptureIngest()
+    service, review = _stance_build(tmp_path, ingest=ingest)
+    good = await review.enqueue(_stance_item())
+    done = await review.enqueue(_stance_item())
+    await service.resolve(done, verdict="disagree")  # already terminal (discarded)
+    unknown = "11111111-1111-4111-8111-111111111111"
+
+    results = await service.resolve_batch([good, done, unknown], "disagree")
+
+    by_id = {r.id: r for r in results}
+    assert by_id[good].ok is True and by_id[good].error is None
+    assert by_id[done].ok is False and by_id[done].error == "already resolved"
+    assert by_id[unknown].ok is False and by_id[unknown].error == "not found"
+    assert review.records[good].status == "discarded"
+
+
+async def test_batch_action_invalid_for_kind_fails_that_item(tmp_path: Path):
+    service, review = _stance_build(tmp_path, ingest=FakeChatCaptureIngest())
+    rid = await review.enqueue(_stance_item())
+
+    [res] = await service.resolve_batch([rid], "perhaps")
+
+    assert res.ok is False and "verdict" in (res.error or "")  # the BadResolution reason surfaces
+    assert review.records[rid].status == "pending"  # untouched → still decidable
+
+
 # --- lifecycle + listing ------------------------------------------------------------------
 
 

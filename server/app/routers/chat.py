@@ -18,8 +18,14 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from ..chat.distiller import ChatDistillerService, SessionNotFound
 from ..chat.service import ChatAnswer, ChatService, ChatSessionNotFound
-from ..dependencies import get_chat_service, get_model_routing, require_session
+from ..dependencies import (
+    get_chat_distiller_service,
+    get_chat_service,
+    get_model_routing,
+    require_session,
+)
 from ..models import (
     ChatMessageItem,
     ChatModelItem,
@@ -29,6 +35,7 @@ from ..models import (
     ChatSessionDetail,
     ChatSessionItem,
     ChatSourceItem,
+    RememberResponse,
 )
 from ..providers.registry import RegistryExhausted
 from ..services.model_routing import ModelRoutingService
@@ -113,6 +120,28 @@ async def get_session(
             for m in messages
         ],
     )
+
+
+@router.post("/chat/sessions/{session_id}/remember", response_model=RememberResponse)
+async def remember_session(
+    session_id: uuid.UUID,
+    distiller: ChatDistillerService = Depends(get_chat_distiller_service),
+) -> RememberResponse:
+    """Distill this session now (M6, ADR-048 §6): the **same** single distill pass, synchronously,
+    on the delta-after-watermark — same salience + stance gate (no force-endorse), advancing the
+    same watermark so it stays idempotent with the nightly run. Endorsed candidates organize in the
+    background. Returns the ``{endorsed, to_review}`` counts, or ``{skipped}`` when there is nothing
+    new past the watermark / the model chain is down. ``422`` malformed id; ``404`` unknown session.
+    """
+    try:
+        outcome = await distiller.remember(str(session_id))
+    except SessionNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="chat session not found"
+        ) from None
+    if outcome.skipped:
+        return RememberResponse(skipped=outcome.skipped_reason)
+    return RememberResponse(endorsed=outcome.endorsed, to_review=outcome.to_review)
 
 
 def _to_response(answer: ChatAnswer) -> ChatResponse:

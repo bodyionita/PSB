@@ -10,9 +10,15 @@ import uuid
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.chat.distiller import RememberOutcome, SessionNotFound
 from app.chat.service import ChatService
 from app.config import Settings
-from app.dependencies import get_chat_service, get_model_routing, require_session
+from app.dependencies import (
+    get_chat_distiller_service,
+    get_chat_service,
+    get_model_routing,
+    require_session,
+)
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.registry import ProviderRegistry
 from app.routers import chat as chat_router
@@ -156,6 +162,66 @@ def test_post_chat_empty_message_is_422():
     service, routing, _ = _build()
     resp = _client(service, routing).post(f"{PREFIX}/chat", json={"message": ""})
     assert resp.status_code == 422
+
+
+# --- POST /chat/sessions/{id}/remember (M6 task 3, ADR-048 §6) ------------------------------------
+
+
+class _StubDistiller:
+    """A stand-in ChatDistillerService for the router's HTTP mapping — the pass logic is covered in
+    test_chat_distiller; here we only assert outcome → response + error mapping."""
+
+    def __init__(self, *, outcome: RememberOutcome | None = None, not_found: bool = False) -> None:
+        self._outcome = outcome
+        self._not_found = not_found
+        self.calls: list[str] = []
+
+    async def remember(self, session_id: str) -> RememberOutcome:
+        self.calls.append(session_id)
+        if self._not_found:
+            raise SessionNotFound(session_id)
+        assert self._outcome is not None
+        return self._outcome
+
+
+def _remember_client(distiller: _StubDistiller) -> TestClient:
+    app = FastAPI()
+    app.include_router(chat_router.router, prefix=PREFIX)
+    app.dependency_overrides[get_chat_distiller_service] = lambda: distiller
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def test_remember_returns_counts_when_the_pass_ran():
+    distiller = _StubDistiller(outcome=RememberOutcome(endorsed=2, to_review=1))
+    sid = str(uuid.uuid4())
+    resp = _remember_client(distiller).post(f"{PREFIX}/chat/sessions/{sid}/remember")
+    assert resp.status_code == 200
+    assert resp.json() == {"endorsed": 2, "to_review": 1, "skipped": None}
+    assert distiller.calls == [sid]
+
+
+def test_remember_returns_skipped_reason_on_noop():
+    distiller = _StubDistiller(
+        outcome=RememberOutcome(endorsed=0, to_review=0, skipped_reason="no new messages")
+    )
+    resp = _remember_client(distiller).post(f"{PREFIX}/chat/sessions/{uuid.uuid4()}/remember")
+    assert resp.status_code == 200
+    assert resp.json() == {"endorsed": None, "to_review": None, "skipped": "no new messages"}
+
+
+def test_remember_unknown_session_is_404():
+    resp = _remember_client(_StubDistiller(not_found=True)).post(
+        f"{PREFIX}/chat/sessions/{uuid.uuid4()}/remember"
+    )
+    assert resp.status_code == 404
+
+
+def test_remember_malformed_session_id_is_422():
+    distiller = _StubDistiller(outcome=RememberOutcome(endorsed=0, to_review=0))
+    resp = _remember_client(distiller).post(f"{PREFIX}/chat/sessions/not-a-uuid/remember")
+    assert resp.status_code == 422
+    assert distiller.calls == []  # never reached the service
 
 
 # --- GET /chat/models -----------------------------------------------------------------------------
