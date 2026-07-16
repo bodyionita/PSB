@@ -19,6 +19,7 @@ import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from app.chat.distill_store import PgChatDistillStore
 from app.chat.store import PgChatStore
 from app.config import Settings
 from app.db import Database
@@ -40,6 +41,7 @@ from app.services.agent_runs import (
     PgAgentRunStore,
     child_run_scope,
 )
+from app.services.capture_store import INDEXED, KIND_TEXT, PgCaptureStore
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
 
@@ -480,6 +482,84 @@ async def check_agent_runs_linkage(db: Database) -> None:
             )
 
 
+async def check_chat_distill(db: Database) -> None:
+    """M6 task 1 (ADR-048): the real ``PgChatDistillStore`` (idle-eligibility query, delta-after-
+    watermark, upsert) + the ``captures.source_ref`` column — the un-fakeable GROUP BY/LEFT JOIN SQL
+    and jsonb-less watermark upsert (migration 013)."""
+    print("\n== PgChatDistillStore + captures.source_ref (M6 task 1 — migration 013) ==")
+    chat = PgChatStore(db)
+    store = PgChatDistillStore(db)
+    captures = PgCaptureStore(db)
+    now = datetime.now(UTC)
+    sid = await chat.create_session()
+    cap_ids: list[str] = []
+    try:
+        # Three idle messages (2 days old) so the session is distillable at a 12h cutoff. Explicit
+        # created_at (add_message defaults to now()) so the watermark math is deterministic.
+        times = [now - timedelta(days=2) + timedelta(minutes=i) for i in range(3)]
+        for i, (role, ts) in enumerate(zip(["user", "assistant", "user"], times, strict=True)):
+            await db.pool.execute(
+                "INSERT INTO chat_messages (session_id, role, content, created_at)"
+                " VALUES ($1, $2, $3, $4)",
+                sid, role, f"smoke turn {i}", ts,
+            )
+        cutoff = now - timedelta(hours=12)
+
+        due = await store.distillable_sessions(idle_cutoff=cutoff, limit=200)
+        mine = next((d for d in due if d.session_id == sid), None)
+        check("idle session with no watermark is distillable",
+              mine is not None and mine.watermark is None and mine.newest_at == times[2], str(mine))
+
+        delta_all = await store.delta_messages(sid, after=None, limit=300)
+        check("delta (after=None) returns all msgs oldest-first",
+              [m.content for m in delta_all] == ["smoke turn 0", "smoke turn 1", "smoke turn 2"],
+              str([m.content for m in delta_all]))
+        delta_after = await store.delta_messages(sid, after=times[1], limit=300)
+        check("delta after a watermark returns only newer msgs",
+              [m.content for m in delta_after] == ["smoke turn 2"], str(delta_after))
+
+        # Advance to the newest — the session is no longer distillable (max == watermark, not >).
+        await store.advance_watermark(sid, last_message_at=times[2], run_id=None)
+        due2 = await store.distillable_sessions(idle_cutoff=cutoff, limit=200)
+        check("session drops out after the watermark advances (idempotent)",
+              all(d.session_id != sid for d in due2), str([d.session_id for d in due2]))
+
+        # A new message after the watermark makes it eligible again; the upsert overwrites in place.
+        newer = now - timedelta(days=1)
+        await db.pool.execute(
+            "INSERT INTO chat_messages (session_id, role, content, created_at)"
+            " VALUES ($1,$2,$3,$4)",
+            sid, "user", "smoke turn 3", newer,
+        )
+        due3 = await store.distillable_sessions(idle_cutoff=cutoff, limit=200)
+        mine3 = next((d for d in due3 if d.session_id == sid), None)
+        check("new activity after the watermark re-eligibles the session",
+              mine3 is not None and mine3.watermark == times[2] and mine3.newest_at == newer,
+              str(mine3))
+        await store.advance_watermark(sid, last_message_at=newer, run_id=None)
+        row = await db.pool.fetchrow(
+            "SELECT last_message_at FROM chat_distill_state WHERE session_id = $1", sid
+        )
+        check("advance_watermark upserts in place (one row)", row["last_message_at"] == newer,
+              str(row))
+
+        # captures.source_ref: an endorsed chat capture carries source=chat + source_ref=session-id.
+        cap_id = "cccccccc-0000-0000-0000-0000000000c1"
+        cap_ids.append(cap_id)
+        await captures.create(
+            capture_id=cap_id, kind=KIND_TEXT, status=INDEXED,
+            raw_text="The user decided X.", source="chat", source_ref=sid,
+        )
+        got = await captures.get(cap_id)
+        check("captures.source_ref round-trips (source=chat, source_ref=session-id)",
+              got is not None and got.source == "chat" and got.source_ref == sid, str(got))
+    finally:
+        if cap_ids:
+            await db.pool.execute("DELETE FROM captures WHERE id = ANY($1::uuid[])", cap_ids)
+        # Deleting the session cascades chat_messages + chat_distill_state (FK ON DELETE CASCADE).
+        await db.pool.execute("DELETE FROM chat_sessions WHERE id = $1", sid)
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -743,6 +823,7 @@ async def main() -> int:
         await check_model_routing_migration(db)
         await check_oauth(db)
         await check_agent_runs_linkage(db)
+        await check_chat_distill(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

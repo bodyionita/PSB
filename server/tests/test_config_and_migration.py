@@ -116,7 +116,7 @@ def test_production_rejects_insecure_default_secrets():
     Settings(environment="development")
 
 
-def test_compute_head_is_migration_012():
-    # M5.5 task 1 adds revision 012 (agent_runs.parent_run_id, ADR-047 §5); head advances to it
-    # from 011 (captures.source column, ADR-046 §4).
-    assert compute_head() == "012"
+def test_compute_head_is_migration_013():
+    # M6 task 1 adds revision 013 (chat_distill_state + captures.source_ref, ADR-048); head advances
+    # to it from 012 (agent_runs.parent_run_id, ADR-047 §5).
+    assert compute_head() == "013"

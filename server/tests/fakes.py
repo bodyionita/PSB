@@ -915,6 +915,7 @@ class FakeCaptureStore:
         audio_path: str | None = None,
         created_at: datetime | None = None,
         source: str | None = None,
+        source_ref: str | None = None,
     ) -> CaptureRecord:
         now = created_at or datetime.now(UTC)
         record = CaptureRecord(
@@ -926,6 +927,7 @@ class FakeCaptureStore:
             created_at=now,
             updated_at=now,
             source=source,
+            source_ref=source_ref,
         )
         self.records[capture_id] = record
         return record
@@ -995,6 +997,71 @@ class FakeCapsuleStore:
     async def save(self, blob: CapsuleBlob) -> None:
         self.saved.append(blob)
         self.blob = blob
+
+
+class FakeChatDistillStore:
+    """In-memory ChatDistillStore for chat-distiller tests — no live DB (08 testing policy).
+
+    ``sessions`` is the preset distillable roster; ``messages`` maps a session id → its full message
+    list (delta filtering by the ``after`` watermark is replicated so the service's delta handling
+    is exercised). ``advanced`` records each watermark write so a test can assert skips."""
+
+    def __init__(
+        self,
+        *,
+        sessions=None,
+        messages=None,
+    ) -> None:
+        self._sessions = list(sessions or [])  # list[DistillableSession]
+        self._messages = dict(messages or {})  # session_id -> list[ChatMessageRecord]
+        self.idle_cutoff_arg = None
+        self.delta_calls: list[dict] = []
+        self.advanced: list[dict] = []
+
+    async def distillable_sessions(self, *, idle_cutoff, limit):
+        self.idle_cutoff_arg = idle_cutoff
+        return self._sessions[:limit]
+
+    async def delta_messages(self, session_id, *, after, limit):
+        self.delta_calls.append({"session_id": session_id, "after": after, "limit": limit})
+        msgs = [
+            m
+            for m in self._messages.get(session_id, [])
+            if after is None or (m.created_at is not None and m.created_at > after)
+        ]
+        msgs.sort(key=lambda m: (m.created_at or datetime.now(UTC), m.id))
+        return msgs[:limit] if limit is not None else msgs  # oldest-first (see PgChatDistillStore)
+
+    async def advance_watermark(self, session_id, *, last_message_at, run_id):
+        self.advanced.append(
+            {"session_id": session_id, "last_message_at": last_message_at, "run_id": run_id}
+        )
+
+
+class FakeChatCaptureIngest:
+    """In-memory ChatCaptureIngest — records each endorsed candidate the distiller materializes as a
+    ``source=chat`` capture (text + session id + the anchoring created_at). ``down`` raises so the
+    best-effort path can be exercised."""
+
+    def __init__(self, *, down: bool = False) -> None:
+        self.captures: list[dict] = []
+        self._down = down
+        self._seq = 0
+
+    async def create_chat_capture(self, text, *, session_id, created_at) -> str:
+        if self._down:
+            raise RuntimeError("ingest boom")
+        self._seq += 1
+        capture_id = f"cap-{self._seq}"
+        self.captures.append(
+            {
+                "capture_id": capture_id,
+                "text": text,
+                "session_id": session_id,
+                "created_at": created_at,
+            }
+        )
+        return capture_id
 
 
 class FakeCapsuleSourceStore:

@@ -87,6 +87,14 @@ logger = logging.getLogger(__name__)
 # Node-frontmatter `source` for a capture created via the MCP `capture` tool (ADR-046 §4). The web
 # surfaces leave the capture `source` NULL and fall back to the kind (`text`/`voice`).
 SOURCE_MCP = "mcp"
+# Node-frontmatter `source` for a capture materialized from an endorsed chat-distiller candidate
+# (ADR-048 §1). The capture's `source_ref` carries the originating chat-session id.
+SOURCE_CHAT = "chat"
+# Fixed namespace for the DETERMINISTIC chat-capture id (uuid5 over session-id + the normalized
+# memory statement). A re-distill of the same delta — a prior distiller run that materialized some
+# candidates then failed before advancing its watermark — yields the SAME id, so the conflict-safe
+# insert collapses it instead of writing a duplicate memory (rule 6: retries are always safe).
+_CHAT_CAPTURE_NS = uuid.UUID("b1d9e5c2-4a3f-5e6d-8b7a-0c1d2e3f4a5b")
 
 # Audio container extensions accepted by POST /capture/voice (03-api.md).
 ALLOWED_AUDIO_EXTS = frozenset({"m4a", "webm", "ogg", "mp3", "wav"})
@@ -206,10 +214,12 @@ class CapturePipeline:
         self._tz = ZoneInfo(settings.scheduler_tz)
         # Strong refs to in-flight background tasks so they are not GC'd mid-run.
         self._tasks: set[asyncio.Task] = set()
-        # MCP burst queue (ADR-046 §4 / ADR-031 #1): bounds how many MCP-source captures organize
-        # concurrently — beyond N the background processors wait their turn (the fast ack is
-        # unaffected). Web captures never take this semaphore, so the UI stays immediate.
-        self._mcp_burst = asyncio.Semaphore(max(1, settings.mcp_capture_max_inflight))
+        # Background-organize burst queue (ADR-046 §4 / ADR-031 #1): bounds how many non-interactive
+        # captures organize concurrently — the MCP `capture` tool (a connector burst) and the
+        # nightly chat-distiller (ADR-048 §1) both take it, so a spike can't stampede the organizer;
+        # beyond N the background processors wait their turn (the fast ack is unaffected). Web
+        # (text/voice) captures never take this semaphore, so the interactive UI stays immediate.
+        self._organize_burst = asyncio.Semaphore(max(1, settings.mcp_capture_max_inflight))
 
     # --- public API ---------------------------------------------------------------------
 
@@ -241,10 +251,47 @@ class CapturePipeline:
         self._spawn(self._process_burst_limited(capture_id))
         return capture_id
 
+    async def create_chat_capture(
+        self, text: str, *, session_id: str, created_at: datetime
+    ) -> str:
+        """Materialize an **endorsed** chat-distiller candidate as a capture (ADR-048 §1).
+
+        The candidate's clean memory statement becomes the capture ``raw`` (``source=chat``,
+        ``source_ref=<session-id>``, ``created_at`` = the anchoring message's time) and then flows
+        through the **existing organizer** (rule 2b — the single writer): a chat memory is
+        indistinguishable downstream from any other capture and is naturally replayed by
+        ``reprocess-all`` (P10). Persists the row (never-lose) before returning the id; the organize
+        runs in the background, burst-bounded so a night of distillation can't stampede the writer.
+
+        The id is **deterministic** over (session, normalized statement), so a re-distill of the
+        same delta (a prior run that materialized this candidate then failed before advancing the
+        watermark) is a no-op here — the capture already exists, so we skip both the re-insert and a
+        second organize, and no duplicate memory is written (rule 6). Recovering an *interrupted*
+        organize is the boot-time orphan sweep's job, not this method's.
+        """
+        capture_id = _chat_capture_id(session_id, text)
+        if await self._store.get(capture_id) is not None:
+            logger.info(
+                "chat capture %s already materialized (re-distill); skipping re-create", capture_id
+            )
+            return capture_id
+        await self._store.create(
+            capture_id=capture_id,
+            kind=KIND_TEXT,
+            status=RECEIVED,
+            raw_text=text,
+            created_at=created_at,
+            source=SOURCE_CHAT,
+            source_ref=session_id,
+        )
+        self._spawn(self._process_burst_limited(capture_id))
+        return capture_id
+
     async def _process_burst_limited(self, capture_id: str) -> None:
-        """Run ``_process`` under the MCP burst semaphore (ADR-031 #1) — the Nth+1 concurrent MCP
-        capture waits here for a slot, so a burst can't stampede the organizer."""
-        async with self._mcp_burst:
+        """Run ``_process`` under the background-organize burst semaphore (ADR-031 #1) — the Nth+1
+        concurrent non-interactive capture (MCP tool or chat-distiller) waits here for a slot, so a
+        burst can't stampede the organizer."""
+        async with self._organize_burst:
             await self._process(capture_id)
 
     @staticmethod
@@ -1003,3 +1050,67 @@ class CapturePipeline:
 
 def _audio_ext(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def _chat_capture_id(session_id: str, text: str) -> str:
+    """Deterministic capture id for an endorsed chat candidate — uuid5 over the session id + the
+    case-folded, whitespace-collapsed statement, so the same candidate re-distilled from the same
+    session yields the same id (idempotent materialization — rule 6)."""
+    normalized = " ".join(text.lower().split())
+    return str(uuid.uuid5(_CHAT_CAPTURE_NS, f"{session_id}\n{normalized}"))
+
+
+def build_capture_pipeline(
+    settings: Settings, db, store_backup: StoreBackup
+) -> CapturePipeline:
+    """Construct a standalone :class:`CapturePipeline` (full organizer wiring) for the CLI-driven
+    jobs that must go through the single writer (rule 2b) without the HTTP app — ``reprocess-all``
+    replay and the chat-distiller's endorsed-candidate ingest (ADR-042 / ADR-048). Mirrors the
+    ``main.py`` wiring but assembles only what an organize needs. Lazy imports keep the CLI's
+    minimal-context startup from pulling the whole app graph."""
+    from ..entities.resolver import EntityResolver
+    from ..entities.store import PgAliasStore
+    from ..indexing.indexer import Indexer
+    from ..indexing.store import PgIndexStore
+    from ..providers.registry import build_registry
+    from ..tags.store import PgTagStore
+    from ..vocab.consolidation import VocabConsolidation
+    from ..vocab.service import VocabularyService
+    from ..vocab.store import PgVocabularyStore
+    from .agent_runs import PgAgentRunStore
+    from .capture_store import PgCaptureStore
+    from .model_routing import build_model_routing
+    from .review_queue import PgReviewQueue
+
+    registry = build_registry(settings)
+    routing = build_model_routing(settings, db, registry)
+    run_store = PgAgentRunStore(db)
+    node_writer = NodeWriter(settings.graph_store_path)
+    review_queue = PgReviewQueue(db)
+    vocabulary_service = VocabularyService(
+        settings=settings,
+        vocab_store=PgVocabularyStore(db),
+        review_store=review_queue,
+        consolidation=VocabConsolidation(run_store=run_store),
+    )
+    entity_resolver = EntityResolver(
+        settings=settings,
+        alias_store=PgAliasStore(db),
+        review_queue=review_queue,
+        routing=routing,
+        vocab=vocabulary_service,
+    )
+    return CapturePipeline(
+        settings=settings,
+        store=PgCaptureStore(db),
+        routing=routing,
+        registry=registry,
+        node_writer=node_writer,
+        store_backup=store_backup,
+        run_store=run_store,
+        indexer=Indexer(settings=settings, store=PgIndexStore(db), registry=registry),
+        entity_resolver=entity_resolver,
+        review_queue=review_queue,
+        tag_vocabulary=PgTagStore(db),
+        vocab=vocabulary_service,
+    )

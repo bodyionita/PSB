@@ -28,6 +28,11 @@ from ..db import Database
 
 KIND_ENTITY_AMBIGUITY = "entity-ambiguity"
 KIND_VOCAB_PROPOSAL = "vocab-proposal"
+# M6 kinds (ADR-048): a stance-unclear chat-distilled memory awaiting agree/disagree/maybe, and a
+# near-duplicate node pair (M6 task 5). `stance-candidate` payloads carry names + text, never node
+# ids, so a reprocess that rebuilds the graph can't strand them (ADR-048 §7).
+KIND_STANCE_CANDIDATE = "stance-candidate"
+KIND_DEDUP_PROPOSAL = "dedup-proposal"
 
 # Lifecycle statuses (ADR-030 §3): items start ``pending`` and transition once, terminally.
 STATUS_PENDING = "pending"

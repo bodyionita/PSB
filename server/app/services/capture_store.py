@@ -43,9 +43,14 @@ class CaptureRecord:
     error: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
-    # The capture's origin surface (ADR-046 §4): `mcp` for MCP-tool captures; NULL for the web
-    # surfaces, which fall back to the capture kind (`text`/`voice`) as the node source.
+    # The capture's origin surface (ADR-046 §4): `mcp` for MCP-tool captures, `chat` for a
+    # chat-distilled memory (ADR-048 §1); NULL for the web surfaces, which fall back to the capture
+    # kind (`text`/`voice`) as the node source.
     source: str | None = None
+    # Opaque origin locator (mirrors `nodes.source_ref`, 02-data-model): the chat-session id for a
+    # `source=chat` capture (ADR-048 §1), so the chat→capture→node chain is traceable. NULL for the
+    # web/voice/MCP captures.
+    source_ref: str | None = None
 
 
 class CaptureStore(Protocol):
@@ -61,6 +66,7 @@ class CaptureStore(Protocol):
         audio_path: str | None = None,
         created_at: datetime | None = None,
         source: str | None = None,
+        source_ref: str | None = None,
     ) -> CaptureRecord: ...
 
     async def get(self, capture_id: str) -> CaptureRecord | None: ...
@@ -90,7 +96,7 @@ class CaptureStore(Protocol):
 
 _COLUMNS = (
     "id, kind, status, raw_text, audio_path, node_paths, "
-    "follow_up_question, follow_up_answer, error, created_at, updated_at, source"
+    "follow_up_question, follow_up_answer, error, created_at, updated_at, source, source_ref"
 )
 
 
@@ -108,6 +114,7 @@ def _record(row) -> CaptureRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         source=row["source"],
+        source_ref=row["source_ref"],
     )
 
 
@@ -127,12 +134,14 @@ class PgCaptureStore:
         audio_path: str | None = None,
         created_at: datetime | None = None,
         source: str | None = None,
+        source_ref: str | None = None,
     ) -> CaptureRecord:
         async with self._db.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                INSERT INTO captures (id, kind, status, raw_text, audio_path, created_at, source)
-                VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7)
+                INSERT INTO captures
+                    (id, kind, status, raw_text, audio_path, created_at, source, source_ref)
+                VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7, $8)
                 RETURNING {_COLUMNS}
                 """,
                 capture_id,
@@ -142,6 +151,7 @@ class PgCaptureStore:
                 audio_path,
                 created_at,
                 source,
+                source_ref,
             )
         return _record(row)
 

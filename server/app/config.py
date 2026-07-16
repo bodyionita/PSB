@@ -355,6 +355,24 @@ class Settings(BaseSettings):
     # Upper bound on the unpaginated `GET /chat/sessions` thread list, newest-first (03-api §Chat).
     chat_sessions_list_limit: int = 100
 
+    # --- Chat-distiller (M6 task 1, 04-pipelines §4, ADR-048). Stance-gated distillation of idle
+    # chat sessions into memories: a single `conspect` pass over each session's new turns emits
+    # user-stance candidates; endorsed → a `captures` row (source=chat) → organizer, unclear →
+    # a `stance-candidate` review item, rejected → run-log only. A `chat_distill_state` watermark
+    # makes re-distillation idempotent (delta-after-watermark). Not yet scheduled — wired into the
+    # nightly pipeline in M6 task 8. ---
+    # A session is distillable once its newest message is at least this many hours old (idle) — so a
+    # live conversation is never distilled mid-thread (idle-eligibility, ADR-048 §5).
+    chat_distill_idle_hours: float = 12.0
+    # Bound on how many idle sessions one run processes (a run's budget; the rest wait for next).
+    chat_distill_max_sessions_per_run: int = 50
+    # Bound on the delta messages fed to one distill prompt — a pathologically long span keeps its
+    # most-recent N (older turns dropped-and-logged, never silently). Personal sessions are small.
+    chat_distill_max_delta_messages: int = 300
+    # Bound on the candidates accepted from one distill response (guards a runaway model). The
+    # surplus beyond it is dropped-and-logged.
+    chat_distill_max_candidates: int = 20
+
     # --- MCP OAuth 2.1 authorization server (M5 task 3, ADR-046 §2). The `api` app is both the
     # authorization server and the resource server for the MCP surface; tokens are opaque + HMAC-
     # hashed in the DB (same discipline as web sessions), gated behind a password + explicit-consent

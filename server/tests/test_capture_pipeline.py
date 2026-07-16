@@ -167,6 +167,33 @@ async def test_mcp_capture_tags_source_and_processes(tmp_path: Path):
     assert "source: mcp" in node_text
 
 
+async def test_chat_capture_is_tagged_and_deterministic(tmp_path: Path):
+    # ADR-048 §1: an endorsed chat candidate becomes a source=chat / source_ref=session-id capture
+    # that flows through the organizer (source: chat on the node). The id is deterministic over
+    # (session, statement), so a re-distill of the same candidate collapses — no duplicate (rule 6).
+    pipeline, store, _, _, root = _make_pipeline(tmp_path)
+    sid = "11111111-2222-3333-4444-555555555555"
+    cid = await pipeline.create_chat_capture(
+        "I had a calm, productive day.", session_id=sid, created_at=CREATED
+    )
+    await pipeline.drain()
+
+    rec = store.records[cid]
+    assert rec.source == "chat"
+    assert rec.source_ref == sid
+    assert rec.status == INDEXED
+    assert "source: chat" in (root / rec.node_paths[0]).read_text(encoding="utf-8")
+
+    # Same (session, statement) again → same id, no new capture row (idempotent re-distill).
+    before = set(store.records)
+    cid2 = await pipeline.create_chat_capture(
+        "I had a calm, productive day.", session_id=sid, created_at=CREATED
+    )
+    await pipeline.drain()
+    assert cid2 == cid
+    assert set(store.records) == before  # no duplicate row
+
+
 async def test_written_nodes_are_indexed_and_outcome_logged(tmp_path: Path):
     indexer = FakeIndexer()
     runs = FakeAgentRunStore()

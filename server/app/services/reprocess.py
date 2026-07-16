@@ -293,65 +293,21 @@ def build_reprocess_service(
     only what the op needs, so a fresh process can drive the pass without the HTTP app."""
     # Imported here (not at module top) so the CLI's minimal context builds these lazily.
     from ..entities.profile_refresh import build_profile_refresh_service
-    from ..entities.resolver import EntityResolver
-    from ..entities.store import PgAliasStore
     from ..graph.service import DerivedEdgeGraph
     from ..graph.store import PgGraphStore
-    from ..indexing.indexer import Indexer
-    from ..indexing.store import PgIndexStore
-    from ..providers.registry import build_registry
-    from ..tags.store import PgTagStore
-    from ..vocab.consolidation import VocabConsolidation
-    from ..vocab.service import VocabularyService
-    from ..vocab.store import PgVocabularyStore
     from .agent_runs import PgAgentRunStore
-    from .capture_pipeline import CapturePipeline
-    from .capture_store import PgCaptureStore
-    from .model_routing import build_model_routing
-    from .review_queue import PgReviewQueue
+    from .capture_pipeline import build_capture_pipeline
 
-    registry = build_registry(settings)
-    routing = build_model_routing(settings, db, registry)
-    run_store = PgAgentRunStore(db)
-    index_store = PgIndexStore(db)
-    indexer = Indexer(settings=settings, store=index_store, registry=registry)
-    node_writer = NodeWriter(settings.graph_store_path)
-    review_queue = PgReviewQueue(db)
-    vocabulary_service = VocabularyService(
-        settings=settings,
-        vocab_store=PgVocabularyStore(db),
-        review_store=review_queue,
-        consolidation=VocabConsolidation(run_store=run_store),
-    )
-    entity_resolver = EntityResolver(
-        settings=settings,
-        alias_store=PgAliasStore(db),
-        review_queue=review_queue,
-        routing=routing,
-        vocab=vocabulary_service,
-    )
-    pipeline = CapturePipeline(
-        settings=settings,
-        store=PgCaptureStore(db),
-        routing=routing,
-        registry=registry,
-        node_writer=node_writer,
-        store_backup=store_backup,
-        run_store=run_store,
-        indexer=indexer,
-        entity_resolver=entity_resolver,
-        review_queue=review_queue,
-        tag_vocabulary=PgTagStore(db),
-        vocab=vocabulary_service,
-    )
-    graph = DerivedEdgeGraph(settings=settings, store=PgGraphStore(db))
+    # The full organizer pipeline (single writer, rule 2b) — shared factory with the chat-distiller
+    # CLI (rule 10, no parallel wiring). The reset/commit still need their own writer + graph refs.
+    pipeline = build_capture_pipeline(settings, db, store_backup)
     return ReprocessService(
         settings=settings,
         store=PgReprocessStore(db),
         reprocessor=pipeline,
-        node_writer=node_writer,
+        node_writer=NodeWriter(settings.graph_store_path),
         store_backup=store_backup,
-        run_store=run_store,
-        graph=graph,
+        run_store=PgAgentRunStore(db),
+        graph=DerivedEdgeGraph(settings=settings, store=PgGraphStore(db)),
         profile_refresh=build_profile_refresh_service(settings, db),
     )

@@ -45,12 +45,21 @@ REINDEX = "reindex"
 PROFILE_REFRESH = "profile-refresh"
 BACKFILL = "entity-backfill"
 IDENTITY_CAPSULE = "identity-capsule-refresh"
+# The chat-distiller (ADR-048, M6 task 1): distill idle chat sessions into stance-gated memories.
+# Not yet a pipeline step (M6 task 8) — this standalone verb is the run-now + local-test path.
+CHAT_DISTILL = "chat-distill"
 # The reprocess-all-from-raw op (ADR-042). Destructive of derived state but confirm is implicit at
 # the CLI (an operator running it deliberately) — raw + approved vocab are preserved.
 REPROCESS = "reprocess-all"
-# Every valid CLI job name (backup jobs + reindex + entity jobs + capsule + reprocess).
+# Every valid CLI job name (backup jobs + reindex + entity jobs + capsule + distill + reprocess).
 JOBS: tuple[str, ...] = (
-    *BACKUP_JOBS.keys(), REINDEX, PROFILE_REFRESH, BACKFILL, IDENTITY_CAPSULE, REPROCESS
+    *BACKUP_JOBS.keys(),
+    REINDEX,
+    PROFILE_REFRESH,
+    BACKFILL,
+    IDENTITY_CAPSULE,
+    CHAT_DISTILL,
+    REPROCESS,
 )
 
 
@@ -130,6 +139,16 @@ async def run_job(name: str) -> None:
         elif name == IDENTITY_CAPSULE:
             # DB-only (app_settings + reads), no store git — like profile-refresh.
             await build_identity_capsule_service(settings, db).run_scheduled()
+        elif name == CHAT_DISTILL:
+            # Endorsed candidates go through the organizer (single writer, rule 2b), so the
+            # distiller needs a real capture pipeline. Run it, then DRAIN the pipeline so the
+            # background organizes finish before this short-lived process exits.
+            from .chat.distiller import build_chat_distiller_service
+            from .services.capture_pipeline import build_capture_pipeline
+
+            pipeline = build_capture_pipeline(settings, db, store_backup)
+            await build_chat_distiller_service(settings, db, pipeline).run_scheduled()
+            await pipeline.drain()
         else:
             jobs = build_backup_jobs(settings, db, store_backup)
             await getattr(jobs, BACKUP_JOBS[name])()
