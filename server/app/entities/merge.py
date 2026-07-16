@@ -30,11 +30,10 @@ from dataclasses import dataclass, field
 
 from ..config import Settings
 from ..graph.node_writer import NodeWriter, merged_alias_union
-from ..indexing.indexer import NodeIndexer
 from ..services.agent_runs import FAILED, SUCCEEDED, AgentRunStore
-from ..services.store_backup import StoreCommitter
 from ..vocab.service import VocabularyProvider, effective_vocabulary
-from .entity_store import EntityNode, EntityStore, InboundEdge
+from .entity_store import EntityNode, EntityStore
+from .merge_core import MergeCore, MergeTarget
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +87,7 @@ class MergeProposal:
 
 
 class MergeService:
-    """Owns entity-merge propose (inventory) + apply (rewrite store → reindex → commit)."""
+    """Owns entity-merge propose (inventory) + apply (alias-union + the shared fold, ADR-049 §1)."""
 
     def __init__(
         self,
@@ -96,16 +95,16 @@ class MergeService:
         settings: Settings,
         entity_store: EntityStore,
         node_writer: NodeWriter,
-        indexer: NodeIndexer,
-        store_backup: StoreCommitter,
+        merge_core: MergeCore,
         run_store: AgentRunStore,
         vocab: VocabularyProvider | None = None,
     ) -> None:
         self._settings = settings
         self._entities = entity_store
+        # The alias union writes the survivor file directly (the entity-only half); the retarget →
+        # tombstone → reindex → commit half is the shared MergeCore (ADR-049 §1).
         self._writer = node_writer
-        self._indexer = indexer
-        self._backup = store_backup
+        self._core = merge_core
         self._runs = run_store
         # Effective entity-like types (seeds ∪ approved additions — ADR-027/035); None ⇒ seeds.
         self._vocab = vocab
@@ -141,65 +140,42 @@ class MergeService:
         return run_id
 
     async def _run_apply(self, run_id: str, loser: EntityNode, survivor: EntityNode) -> None:
-        """Retarget inbound edges → union aliases → tombstone the loser → reindex → commit+push.
+        """Union aliases onto the survivor, then fold the loser into it via the shared MergeCore
+        (retarget inbound edges → tombstone loser → reindex → commit+push, ADR-049 §1).
 
-        Never raises (rule 7): a per-file read/write error is logged + skipped; any unexpected
-        failure ends the run ``failed`` with context. Files are truth + git-revertible, so a partial
-        apply is safe to re-drive."""
+        The alias write simply moves ahead of the retarget vs the pre-extraction service — both are
+        disjoint frontmatter regions, so the end state is identical (ADR-049 §1). Never raises (rule
+        7): the core skips a per-file miss; any unexpected failure ends the run ``failed`` with
+        context. Files are truth + git-revertible, so a partial apply is safe to re-drive."""
         try:
-            inbound = await self._entities.inbound_canonical_edges(loser.id)
-            changed: list[str] = []
-            retargeted = 0
-            skipped = 0
-            for path in _distinct_source_paths(inbound):
-                try:
-                    count = await asyncio.to_thread(
-                        self._writer.retarget_edges, path, old_to=loser.id, new_to=survivor.id
-                    )
-                except FileNotFoundError:
-                    logger.warning("merge: source %s gone; edge not retargeted (skipped)", path)
-                    skipped += 1
-                    continue
-                if count:
-                    retargeted += count
-                    changed.append(path)
-
-            # Union the survivor's aliases with the loser's surface forms, then tombstone the loser.
+            # Union the survivor's aliases with the loser's surface forms (the entity-only half),
+            # then reindex that survivor file in the same fold pass via ``survivor_extra_paths``.
             new_aliases = merged_alias_union(
                 survivor.aliases, survivor.title, loser.aliases, loser.title
             )
+            survivor_paths: list[str] = []
             try:
                 await asyncio.to_thread(self._writer.set_aliases, survivor.store_path, new_aliases)
-                if survivor.store_path not in changed:
-                    changed.append(survivor.store_path)
+                survivor_paths.append(survivor.store_path)
             except FileNotFoundError:
                 logger.warning(
                     "merge: survivor file %s gone; aliases not unioned", survivor.store_path
                 )
 
-            await asyncio.to_thread(
-                self._writer.write_tombstone,
-                loser.store_path,
-                node_id=loser.id,
-                node_type=loser.type,
-                survivor_id=survivor.id,
-            )
-            if loser.store_path not in changed:
-                changed.append(loser.store_path)
-
-            index = await self._indexer.index_paths(changed) if changed else None
-            backup = await self._backup.backup_now(
-                f"merge {loser.id} → {survivor.id}"
+            result = await self._core.fold(
+                loser=_target(loser),
+                survivor=_target(survivor),
+                reason=f"merge {loser.id} → {survivor.id}",
+                survivor_extra_paths=survivor_paths,
             )
 
             summary = (
                 f"entity merge: {loser.title or loser.id} → {survivor.title or survivor.id} "
-                f"({retargeted} edge(s) retargeted across {len(changed)} file(s), "
-                f"{len(new_aliases)} alias(es) on survivor)"
+                f"({result.edges_retargeted} edge(s) retargeted across {result.files_changed} "
+                f"file(s), {len(new_aliases)} alias(es) on survivor)"
             )
-            if skipped:
-                summary += f", {skipped} source(s) skipped"
-            logger.info("%s (pushed=%s)", summary, backup.pushed)
+            if result.sources_skipped:
+                summary += f", {result.sources_skipped} source(s) skipped"
             await self._runs.finish(
                 run_id,
                 status=SUCCEEDED,
@@ -207,12 +183,12 @@ class MergeService:
                 details={
                     "loser": loser.id,
                     "survivor": survivor.id,
-                    "edges_retargeted": retargeted,
-                    "files_changed": len(changed),
-                    "sources_skipped": skipped,
+                    "edges_retargeted": result.edges_retargeted,
+                    "files_changed": result.files_changed,
+                    "sources_skipped": result.sources_skipped,
                     "survivor_aliases": new_aliases,
-                    "index": index.as_dict() if index is not None else None,
-                    "commit": {"committed": backup.committed, "pushed": backup.pushed},
+                    "index": result.index,
+                    "commit": {"committed": result.committed, "pushed": result.pushed},
                 },
             )
         except Exception as exc:  # noqa: BLE001 — end the run failed with context, never crash
@@ -267,10 +243,6 @@ def _side(node: EntityNode) -> MergeSide:
     return MergeSide(id=node.id, type=node.type, title=node.title, aliases=list(node.aliases))
 
 
-def _distinct_source_paths(inbound: list[InboundEdge]) -> list[str]:
-    """Distinct source store paths (a node with several edges to the loser is rewritten once)."""
-    seen: list[str] = []
-    for edge in inbound:
-        if edge.src_store_path not in seen:
-            seen.append(edge.src_store_path)
-    return seen
+def _target(node: EntityNode) -> MergeTarget:
+    """Project an ``EntityNode`` onto the core's minimal ``MergeTarget`` (id/type/title/path)."""
+    return MergeTarget(id=node.id, type=node.type, title=node.title, store_path=node.store_path)

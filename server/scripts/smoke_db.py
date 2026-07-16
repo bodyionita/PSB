@@ -24,6 +24,7 @@ from app.chat.distill_store import PgChatDistillStore
 from app.chat.store import PgChatStore
 from app.config import Settings
 from app.db import Database
+from app.dedup.store import PgDedupStore
 from app.entities.entity_store import PgEntityStore
 from app.entities.profile_store import PgProfileStore
 from app.entities.store import PgAliasStore
@@ -678,6 +679,128 @@ async def check_auto_recorded(db: Database) -> None:
         )
 
 
+async def check_dedup_sweep(db: Database) -> None:
+    """M6 task 5 (ADR-049 §3–§6): the real ``PgDedupStore`` candidate SQL + re-file guard + survivor
+    degree — the un-fakeable strict-AND gate (HNSW top-K cosine ⋀ shared entity hub ⋀ occurred-
+    overlap), the ``array_agg`` shared-entity LATERAL, the ``payload->>`` guard match, and the
+    canonical-degree subquery. Seeds its own ``dddddddd::`` nodes/edges, cleaned up in a finally."""
+    print("\n== PgDedupStore candidate SQL + re-file guard + survivor degree (M6 task 5) ==")
+    store = PgDedupStore(db)
+    now = datetime.now(UTC)
+    # Two entity hubs + five content memories. A~B qualify (high cosine, share hub P, dates
+    # overlap); C shares P + high cosine but a DISJOINT occurred window; D has high cosine + overlap
+    # but links a DIFFERENT hub (no shared entity); F shares P + overlap but a LOW-cosine vector.
+    p = "dddddddd-0000-0000-0000-0000000000a0"
+    p2 = "dddddddd-0000-0000-0000-0000000000a9"
+    a = "dddddddd-0000-0000-0000-0000000000a1"
+    b = "dddddddd-0000-0000-0000-0000000000a2"
+    c = "dddddddd-0000-0000-0000-0000000000a3"
+    d = "dddddddd-0000-0000-0000-0000000000a4"
+    f = "dddddddd-0000-0000-0000-0000000000a5"
+    g = "dddddddd-0000-0000-0000-0000000000a6"  # UNDATED (occurred_start NULL) — never excludes
+    ids = [p, p2, a, b, c, d, f, g]
+    low_cos = [0.0] * DIM  # orthogonal-ish to vec(0.10) → cosine ≈ 0.20, below the 0.90 floor
+    low_cos[0], low_cos[1] = 0.10, 1.0
+    a_created = datetime(2026, 1, 1, tzinfo=UTC)
+    b_created = datetime(2026, 6, 1, tzinfo=UTC)
+    try:
+        async with db.transaction() as conn:
+            await conn.execute(
+                """
+                INSERT INTO nodes (id, store_path, type, title, planes, tags, aliases, merged_into,
+                    occurred_start, occurred_end, content_hash, embedding, node_created_at,
+                    indexed_at)
+                VALUES
+                 ($1,'dddddddd::person/p.md','person','Ana','{}','{}','{}',NULL,
+                  NULL,NULL,'h_p',$8,$14,$14),
+                 ($2,'dddddddd::person/p2.md','person','Bob','{}','{}','{}',NULL,
+                  NULL,NULL,'h_p2',$8,$14,$14),
+                 ($3,'dddddddd::memory/a.md','memory','coffee with Ana','{}','{}','{}',NULL,
+                  '2026-02-01','2026-02-28','h_a',$9,$12,$14),
+                 ($4,'dddddddd::memory/b.md','memory','coffee w/ Ana','{}','{}','{}',NULL,
+                  '2026-02-15',NULL,'h_b',$10,$13,$14),
+                 ($5,'dddddddd::memory/c.md','memory','met Ana last year','{}','{}','{}',NULL,
+                  '2025-01-01','2025-01-05','h_c',$9,$14,$14),
+                 ($6,'dddddddd::memory/d.md','memory','lunch with Bob','{}','{}','{}',NULL,
+                  '2026-02-10',NULL,'h_d',$9,$14,$14),
+                 ($7,'dddddddd::memory/f.md','memory','unrelated Ana note','{}','{}','{}',NULL,
+                  '2026-02-12',NULL,'h_f',$11,$14,$14),
+                 ($15,'dddddddd::memory/g.md','memory','coffee, Ana (undated)','{}','{}','{}',NULL,
+                  NULL,NULL,'h_g',$9,$14,$14)
+                """,
+                p, p2, a, b, c, d, f,
+                vec(0.10), vec(0.10), vec(0.11), low_cos, a_created, b_created, now, g,
+            )
+            await conn.execute(
+                """
+                INSERT INTO edges (src_id, dst_id, rel, origin, score) VALUES
+                 ($1,$2,'involves','canonical',NULL),
+                 ($3,$2,'involves','canonical',NULL),
+                 ($4,$2,'involves','canonical',NULL),
+                 ($5,$6,'involves','canonical',NULL),
+                 ($7,$2,'involves','canonical',NULL),
+                 ($8,$2,'involves','canonical',NULL)
+                """,
+                a, p, b, c, d, p2, f, g,
+            )
+
+        watermark = now - timedelta(days=365)
+        pairs = await store.candidate_pairs(
+            content_types=["memory"], entity_like_types=["person"],
+            watermark=watermark, min_cosine=0.90, candidate_k=10,
+        )
+        canon = {tuple(sorted((x.node_a, x.node_b))) for x in pairs}
+        check("A~B near-dup pair surfaces (cosine ⋀ shared hub ⋀ overlap)",
+              tuple(sorted((a, b))) in canon, str(canon))
+        # C is dated 2025 (disjoint from A/B's 2026-02 windows) → excluded from its DATED partners.
+        check("disjoint dated occurred windows exclude the pair (A/B vs C)",
+              tuple(sorted((a, c))) not in canon and tuple(sorted((b, c))) not in canon, str(canon))
+        check("no shared entity hub excludes the pair (D → different hub)",
+              not any(d in pair for pair in canon), str(canon))
+        check("below-floor cosine excludes the pair (F orthogonal)",
+              not any(f in pair for pair in canon), str(canon))
+        # G is UNDATED: a null occurred_start on either side never excludes (ADR-049 §3) — so A~G
+        # still reaches review, but occurred_overlap is False (no positive date signal).
+        check("undated node never excluded: A~G surfaces despite G's null occurred_start",
+              tuple(sorted((a, g))) in canon, str(canon))
+        ag = next(x for x in pairs if {x.node_a, x.node_b} == {a, g})
+        check("A~G signals: occurred_overlap False (G undated, not a date signal)",
+              ag.occurred_overlap is False and p in ag.shared_entity_ids, str(ag))
+        ab = next(x for x in pairs if {x.node_a, x.node_b} == {a, b})
+        check("A~B signals: cosine ≥ 0.90, shared hub P, occurred_overlap True",
+              ab.cosine >= 0.90 and p in ab.shared_entity_ids
+              and "Ana" in ab.shared_entity_titles and ab.occurred_overlap is True, str(ab))
+
+        # survivor_stats: canonical degree (in+out) + created times for the default-survivor pick.
+        stats = await store.survivor_stats([a, b])
+        check("survivor_stats degree = 1 each (one canonical edge to the hub)",
+              stats[a].degree == 1 and stats[b].degree == 1, str(stats))
+        check("survivor_stats carries node_created_at (A older than B)",
+              stats[a].node_created_at == a_created and stats[b].node_created_at == b_created,
+              str(stats))
+
+        # Re-file guard: a filed dedup-proposal for the canonical pair blocks a re-propose.
+        na, nb = sorted((a, b))
+        await db.pool.execute(
+            """
+            INSERT INTO review_queue (kind, payload, source)
+            VALUES ('dedup-proposal', $1::jsonb, 'dedup-sweep')
+            """,
+            json.dumps({"node_a": na, "node_b": nb}),
+        )
+        check("proposal_exists true for the filed canonical pair (re-file guard)",
+              await store.proposal_exists(na, nb))
+        check("proposal_exists false for an unrelated pair",
+              not await store.proposal_exists(na, "dddddddd-0000-0000-0000-0000000000ee"))
+    finally:
+        await db.pool.execute(
+            "DELETE FROM review_queue WHERE kind = 'dedup-proposal'"
+            " AND payload->>'node_a' = ANY($1::text[])", sorted((a, b))[:1]
+        )
+        await db.pool.execute("DELETE FROM edges WHERE src_id = ANY($1::uuid[])", ids)
+        await db.pool.execute("DELETE FROM nodes WHERE id = ANY($1::uuid[])", ids)
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -944,6 +1067,7 @@ async def main() -> int:
         await check_chat_distill(db)
         await check_review_queue_reopen(db)
         await check_auto_recorded(db)
+        await check_dedup_sweep(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

@@ -48,6 +48,9 @@ IDENTITY_CAPSULE = "identity-capsule-refresh"
 # The chat-distiller (ADR-048, M6 task 1): distill idle chat sessions into stance-gated memories.
 # Not yet a pipeline step (M6 task 8) — this standalone verb is the run-now + local-test path.
 CHAT_DISTILL = "chat-distill"
+# The dedup sweep (ADR-049, M6 task 5): file dedup-proposal review items for near-duplicate content
+# nodes. Not yet a pipeline step (M6 task 8) — standalone verb = the run-now + local-test path.
+DEDUP_SWEEP = "dedup-sweep"
 # The reprocess-all-from-raw op (ADR-042). Destructive of derived state but confirm is implicit at
 # the CLI (an operator running it deliberately) — raw + approved vocab are preserved.
 REPROCESS = "reprocess-all"
@@ -59,6 +62,7 @@ JOBS: tuple[str, ...] = (
     BACKFILL,
     IDENTITY_CAPSULE,
     CHAT_DISTILL,
+    DEDUP_SWEEP,
     REPROCESS,
 )
 
@@ -149,6 +153,11 @@ async def run_job(name: str) -> None:
             pipeline = build_capture_pipeline(settings, db, store_backup)
             await build_chat_distiller_service(settings, db, pipeline).run_scheduled()
             await pipeline.drain()
+        elif name == DEDUP_SWEEP:
+            # DB-only (candidate reads + review-queue writes, no store git) — like profile-refresh.
+            from .dedup.sweep import build_dedup_sweep_service
+
+            await build_dedup_sweep_service(settings, db).run_scheduled()
         else:
             jobs = build_backup_jobs(settings, db, store_backup)
             await getattr(jobs, BACKUP_JOBS[name])()

@@ -15,6 +15,7 @@ import pytest
 from app.config import Settings
 from app.entities.entity_store import EntityNode, InboundEdge
 from app.entities.merge import BadMerge, MergeNodeNotFound, MergeService
+from app.entities.merge_core import MergeCore
 from app.graph.node_writer import NodeDocument, NodeEdge, NodeWriter
 from app.indexing.frontmatter import parse_node_metadata
 from tests.fakes import FakeAgentRunStore, FakeCommitBackup, FakeEntityStore, FakeIndexer
@@ -61,12 +62,16 @@ def _write_memory(writer: NodeWriter, node_id: str, edges: tuple[NodeEdge, ...])
 
 
 def _service(tmp_path, entity_store, writer, indexer, backup, runs) -> MergeService:
+    # The entity-merge composes the shared MergeCore (retarget → tombstone → reindex → commit) with
+    # its alias-union (ADR-049 §1); build the core over the same fakes so the fold is exercised.
+    core = MergeCore(
+        entity_store=entity_store, node_writer=writer, indexer=indexer, store_backup=backup
+    )
     return MergeService(
         settings=_settings(tmp_path),
         entity_store=entity_store,
         node_writer=writer,
-        indexer=indexer,
-        store_backup=backup,
+        merge_core=core,
         run_store=runs,
     )
 

@@ -20,9 +20,12 @@ from .chat.service import build_chat_service
 from .chat.store import PgChatStore
 from .config import Settings, get_settings
 from .db import Database
+from .dedup.store import PgDedupStore
+from .dedup.sweep import DedupSweepService
 from .entities.backfill import BackfillService
 from .entities.entity_store import PgEntityStore
 from .entities.merge import MergeService
+from .entities.merge_core import MergeCore
 from .entities.profile_refresh import ProfileRefreshService
 from .entities.profile_store import PgProfileStore
 from .entities.resolver import EntityResolver
@@ -226,12 +229,30 @@ async def lifespan(app: FastAPI):
     # merge/backfill jobs share the node writer + indexer + store backup so they rewrite files then
     # reindex + force-commit (store is truth, rule 1).
     entity_store = PgEntityStore(db)
-    app.state.merge_service = MergeService(
-        settings=settings,
+    # The shared merge-core (ADR-049 §1): retarget inbound edges → tombstone loser → reindex →
+    # force commit+push. Entity-merge composes it with an alias-union; content-merge (dedup
+    # resolution, below) folds with it alone. One instance shared by both callers.
+    merge_core = MergeCore(
         entity_store=entity_store,
         node_writer=node_writer,
         indexer=indexer,
         store_backup=store_backup,
+    )
+    app.state.merge_service = MergeService(
+        settings=settings,
+        entity_store=entity_store,
+        node_writer=node_writer,
+        merge_core=merge_core,
+        run_store=run_store,
+        vocab=vocabulary_service,
+    )
+    # Nightly dedup sweep (M6 task 5, ADR-049): near-duplicate content nodes file a dedup-proposal
+    # the user resolves (merge/keep/link) via the Review surface below. DB-only (candidate reads +
+    # review-queue writes); scheduled as a `nightly` pipeline step in M6 task 8.
+    app.state.dedup_sweep_service = DedupSweepService(
+        settings=settings,
+        dedup_store=PgDedupStore(db),
+        review_queue=review_queue,
         run_store=run_store,
         vocab=vocabulary_service,
     )
@@ -294,6 +315,11 @@ async def lifespan(app: FastAPI):
         run_store=run_store,
         vocab=vocabulary_service,
         chat_ingest=pipeline,
+        # Dedup-proposal resolution (M6 task 5, ADR-049): `merge` folds via the shared core (built
+        # above), `entity_store` fetches the pair; `link`/`keep` use the node writer/index already
+        # wired. The Review surface is where a dedup decision becomes graph structure.
+        entity_store=entity_store,
+        merge_core=merge_core,
     )
 
     # Auto-recorded registry (M6 task 4, ADR-048 §11/§12): backs the chat-scoped "recently auto-

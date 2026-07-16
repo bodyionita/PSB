@@ -1119,6 +1119,47 @@ class FakeAutoRecordedStore:
         return []
 
 
+class FakeDedupStore:
+    """In-memory DedupStore for dedup-sweep tests — no live DB (08 testing policy).
+
+    ``candidates`` is the preset candidate scan (records the args so a test can assert the watermark
+    + content/entity types reached the SQL); ``existing`` is the set of canonical ``(a, b)`` pairs a
+    ``dedup-proposal`` already exists for (the re-file guard); ``stats`` maps a node id to its
+    :class:`NodeMergeStat` for the default-survivor pick."""
+
+    def __init__(
+        self,
+        *,
+        candidates=None,
+        existing=None,
+        stats=None,
+    ) -> None:
+        self._candidates = list(candidates or [])  # list[DedupCandidate]
+        self._existing = {tuple(p) for p in (existing or set())}  # {(a, b)} canonical
+        self._stats = dict(stats or {})  # id -> NodeMergeStat
+        self.candidate_args: dict | None = None
+        self.survivor_stats_arg: list[str] | None = None
+
+    async def candidate_pairs(
+        self, *, content_types, entity_like_types, watermark, min_cosine, candidate_k
+    ):
+        self.candidate_args = {
+            "content_types": list(content_types),
+            "entity_like_types": list(entity_like_types),
+            "watermark": watermark,
+            "min_cosine": min_cosine,
+            "candidate_k": candidate_k,
+        }
+        return list(self._candidates)
+
+    async def proposal_exists(self, node_a: str, node_b: str) -> bool:
+        return (node_a, node_b) in self._existing
+
+    async def survivor_stats(self, node_ids):
+        self.survivor_stats_arg = list(node_ids)
+        return {nid: self._stats[nid] for nid in node_ids if nid in self._stats}
+
+
 class FakeCapsuleSourceStore:
     """In-memory CapsuleSourceStore (M5 task 2): returns preset hubs/memories/insights, bounded by
     the requested limit so a test can assert the config caps are honored."""

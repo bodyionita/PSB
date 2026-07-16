@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
+from app.entities.entity_store import EntityNode
+from app.entities.merge_core import MergeCore
 from app.entities.resolver import EntityResolver, Mention, mention_key
 from app.entities.store import EntityCandidate
 from app.graph.node_writer import NodeDocument, NodeWriter
@@ -23,6 +25,7 @@ from app.indexing.frontmatter import parse_node_metadata
 from app.indexing.store import NodeUpsert
 from app.providers.registry import ProviderRegistry
 from app.services.review_queue import (
+    KIND_DEDUP_PROPOSAL,
     KIND_ENTITY_AMBIGUITY,
     KIND_STANCE_CANDIDATE,
     KIND_VOCAB_PROPOSAL,
@@ -43,6 +46,8 @@ from .fakes import (
     FakeAliasStore,
     FakeChatCaptureIngest,
     FakeChatProvider,
+    FakeCommitBackup,
+    FakeEntityStore,
     FakeIndexer,
     FakeIndexStore,
     FakeReviewQueue,
@@ -498,6 +503,187 @@ async def test_batch_action_invalid_for_kind_fails_that_item(tmp_path: Path):
 
     assert res.ok is False and "verdict" in (res.error or "")  # the BadResolution reason surfaces
     assert review.records[rid].status == "pending"  # untouched → still decidable
+
+
+# --- dedup-proposal resolution (M6 task 5, ADR-049) ---------------------------------------
+
+
+def _dedup_build(tmp_path: Path):
+    """A ReviewService wired for dedup resolution: a real NodeWriter + FakeIndexStore (for the
+    `link` edge write + get_index_state), a FakeEntityStore + a real MergeCore over fakes (for the
+    `merge` fold). Returns the service + the collaborators tests assert on."""
+    settings = _settings(tmp_path)
+    writer = NodeWriter(settings.graph_store_path)
+    review = FakeReviewQueue()
+    index = FakeIndexStore()
+    indexer = FakeIndexer()
+    backup = FakeStoreBackup()  # link uses request_commit
+    commit = FakeCommitBackup()  # the core force-commits (backup_now)
+    entity_store = FakeEntityStore()
+    core = MergeCore(
+        entity_store=entity_store, node_writer=writer, indexer=indexer, store_backup=commit
+    )
+    service = ReviewService(
+        settings=settings,
+        review_store=review,
+        index_store=index,
+        indexer=indexer,
+        node_writer=writer,
+        store_backup=backup,
+        run_store=FakeAgentRunStore(),
+        entity_store=entity_store,
+        merge_core=core,
+    )
+    return service, review, index, indexer, backup, commit, entity_store, writer, settings
+
+
+def _seed_content_node(writer: NodeWriter, index: FakeIndexStore, node_id: str, node_type: str):
+    """Write a real content node file + register it in the index; returns the store path."""
+    [w] = writer.write_nodes(
+        [NodeDocument(
+            id=node_id, type=node_type, title=f"{node_type} {node_id}", body="b",
+            created_local=CREATED, source="text",
+        )]
+    )
+    index.nodes[node_id] = NodeUpsert(
+        id=node_id, store_path=w.store_path, type=node_type, content_hash="h"
+    )
+    return w.store_path
+
+
+DEDUP_A = "11111111-1111-4111-8111-111111111111"
+DEDUP_B = "22222222-2222-4222-8222-222222222222"
+
+
+def _dedup_item(node_a=DEDUP_A, node_b=DEDUP_B, default_survivor=DEDUP_A) -> ReviewItem:
+    return ReviewItem(
+        kind=KIND_DEDUP_PROPOSAL,
+        payload={
+            "node_a": node_a,
+            "node_b": node_b,
+            "signals": {"cosine": 0.95, "shared_entity_ids": ["e1"],
+                        "shared_entity_titles": ["Ana"], "occurred_overlap": True},
+            "default_survivor": default_survivor,
+        },
+        excerpt="possible duplicate",
+        source="dedup-sweep",
+    )
+
+
+async def test_dedup_merge_folds_loser_into_default_survivor(tmp_path: Path):
+    service, review, index, indexer, backup, commit, entity_store, writer, settings = _dedup_build(
+        tmp_path
+    )
+    a_path = _seed_content_node(writer, index, DEDUP_A, "memory")
+    b_path = _seed_content_node(writer, index, DEDUP_B, "insight")
+    entity_store.nodes = {
+        DEDUP_A: EntityNode(DEDUP_A, "memory", "memory A", a_path, [], None),
+        DEDUP_B: EntityNode(DEDUP_B, "insight", "insight B", b_path, [], None),
+    }
+    rid = await review.enqueue(_dedup_item(default_survivor=DEDUP_A))
+
+    record = await service.resolve(rid, action="merge")
+
+    assert record.status == "resolved"
+    assert record.resolution == {"action": "merge", "survivor": DEDUP_A, "loser": DEDUP_B}
+    # The default survivor (A) is kept; B is tombstoned onto A (cross-type merge allowed).
+    b_meta = parse_node_metadata(
+        (Path(settings.graph_store_path) / Path(*b_path.split("/"))).read_text("utf-8"),
+        store_path=b_path, fallback_created=CREATED,
+    )
+    assert b_meta.merged_into == DEDUP_A
+    assert commit.reasons and "dedup merge" in commit.reasons[0]
+
+
+async def test_dedup_merge_honours_explicit_survivor(tmp_path: Path):
+    service, review, index, indexer, backup, commit, entity_store, writer, settings = _dedup_build(
+        tmp_path
+    )
+    a_path = _seed_content_node(writer, index, DEDUP_A, "memory")
+    b_path = _seed_content_node(writer, index, DEDUP_B, "memory")
+    entity_store.nodes = {
+        DEDUP_A: EntityNode(DEDUP_A, "memory", "A", a_path, [], None),
+        DEDUP_B: EntityNode(DEDUP_B, "memory", "B", b_path, [], None),
+    }
+    rid = await review.enqueue(_dedup_item(default_survivor=DEDUP_A))
+
+    # Override the default survivor: fold A into B instead.
+    record = await service.resolve(rid, action="merge", survivor=DEDUP_B)
+
+    assert record.resolution == {"action": "merge", "survivor": DEDUP_B, "loser": DEDUP_A}
+    a_meta = parse_node_metadata(
+        (Path(settings.graph_store_path) / Path(*a_path.split("/"))).read_text("utf-8"),
+        store_path=a_path, fallback_created=CREATED,
+    )
+    assert a_meta.merged_into == DEDUP_B
+
+
+async def test_dedup_link_writes_canonical_similar_edge(tmp_path: Path):
+    service, review, index, indexer, backup, commit, entity_store, writer, settings = _dedup_build(
+        tmp_path
+    )
+    a_path = _seed_content_node(writer, index, DEDUP_A, "memory")
+    _seed_content_node(writer, index, DEDUP_B, "insight")
+    rid = await review.enqueue(_dedup_item())
+
+    record = await service.resolve(rid, action="link")
+
+    assert record.status == "resolved"
+    assert record.resolution == {"action": "link"}
+    # A canonical `similar` edge node_a → node_b lives in node_a's frontmatter (survives the derived
+    # recompute — ADR-049 §2). One edge; the neighbor read unions both directions.
+    assert _edges_of(settings.graph_store_path, a_path) == {("similar", DEDUP_B)}
+    assert indexer.calls == [[a_path]]
+    assert backup.reasons == ["review: link similar (dedup)"]
+    assert commit.reasons == []  # link is additive; no force-commit fold
+
+
+async def test_dedup_keep_discards_without_writing(tmp_path: Path):
+    service, review, index, indexer, backup, commit, entity_store, writer, settings = _dedup_build(
+        tmp_path
+    )
+    rid = await review.enqueue(_dedup_item())
+
+    record = await service.resolve(rid, action="keep")
+
+    assert record.status == "discarded"
+    assert record.resolution == {"action": "keep"}
+    assert indexer.calls == [] and backup.reasons == [] and commit.reasons == []
+
+
+async def test_dedup_bad_action_rejected(tmp_path: Path):
+    service, review, *_ = _dedup_build(tmp_path)
+    rid = await review.enqueue(_dedup_item())
+    with pytest.raises(BadResolution):
+        await service.resolve(rid, action="frobnicate")
+
+
+async def test_dedup_survivor_not_in_pair_rejected(tmp_path: Path):
+    service, review, *_ = _dedup_build(tmp_path)
+    rid = await review.enqueue(_dedup_item())
+    with pytest.raises(BadResolution):
+        await service.resolve(rid, action="merge", survivor="not-in-pair")
+
+
+async def test_dedup_merge_unknown_node_rejected(tmp_path: Path):
+    # The pair references a node the entity store doesn't know (e.g. removed since filing).
+    service, review, *_ = _dedup_build(tmp_path)
+    rid = await review.enqueue(_dedup_item())  # entity_store.nodes is empty
+    with pytest.raises(BadResolution):
+        await service.resolve(rid, action="merge")
+
+
+async def test_dedup_batch_keep_clears_proposals(tmp_path: Path):
+    # A homogeneous batch of dedup proposals resolves via `action` (default survivor, no explicit).
+    service, review, *_ = _dedup_build(tmp_path)
+    r1 = await review.enqueue(_dedup_item(node_a=DEDUP_A, node_b=DEDUP_B))
+    r2 = await review.enqueue(_dedup_item(node_a="33333333-3333-4333-8333-333333333333",
+                                          node_b="44444444-4444-4444-8444-444444444444"))
+
+    results = await service.resolve_batch([r1, r2], "keep")
+
+    assert all(r.ok for r in results)
+    assert review.records[r1].status == "discarded" and review.records[r2].status == "discarded"
 
 
 # --- lifecycle + listing ------------------------------------------------------------------

@@ -93,10 +93,15 @@ async def resolve_review(
 ) -> ReviewItemResponse:
     """Resolve one item per its kind. ``422`` malformed id; ``404`` unknown; ``409`` already
     resolved; ``400`` a body invalid for the item's kind. Materializes the pending edge (entity
-    pick/new) or queues vocab consolidation (approve) before flipping the item's status."""
+    pick/new), queues vocab consolidation (approve), materializes the stance agree capture, or
+    folds/links a dedup-proposal (ADR-049) before flipping the item's status."""
     try:
         record = await service.resolve(
-            str(review_id), choice=request.choice, verdict=request.verdict
+            str(review_id),
+            choice=request.choice,
+            verdict=request.verdict,
+            action=request.action,
+            survivor=request.survivor,
         )
     except ReviewNotFound:
         raise HTTPException(

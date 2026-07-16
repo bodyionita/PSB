@@ -339,10 +339,15 @@ class ReviewResolveRequest(BaseModel):
     """Resolution body for POST /review/{id}; the meaningful field depends on the item's kind.
 
     entity-ambiguity → ``choice`` (a candidate node id | ``"new"`` | ``"maybe"``); vocab-proposal →
-    ``verdict`` (``"approve"`` | ``"reject"``). The server validates per kind (400 otherwise)."""
+    ``verdict`` (``"approve"`` | ``"reject"``); stance-candidate → ``verdict``
+    (``"agree"``/``"disagree"``/``"maybe"``); dedup-proposal (ADR-049) → ``action``
+    (``"merge"``/``"keep"``/``"link"``) with an optional ``survivor`` (a node id, defaulting to the
+    payload's ``default_survivor`` for a merge). The server validates per kind (400 otherwise)."""
 
     choice: str | None = None
     verdict: str | None = None
+    action: str | None = None
+    survivor: str | None = None
 
 
 class ReviewBatchRequest(BaseModel):

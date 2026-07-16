@@ -53,8 +53,14 @@ class FakeReviewService:
         self.list_args = {"status": status, "kind": kind}
         return [_record()]
 
-    async def resolve(self, review_id, *, choice=None, verdict=None):
-        self.resolve_args = {"review_id": review_id, "choice": choice, "verdict": verdict}
+    async def resolve(self, review_id, *, choice=None, verdict=None, action=None, survivor=None):
+        self.resolve_args = {
+            "review_id": review_id,
+            "choice": choice,
+            "verdict": verdict,
+            "action": action,
+            "survivor": survivor,
+        }
         if self.raises is not None:
             raise self.raises
         return _record(review_id, status="resolved")
@@ -99,7 +105,24 @@ def test_resolve_delegates_and_serialises(client_and_service):
     resp = client.post(f"{PREFIX}/review/{REVIEW_ID}", json={"choice": "cand-a"})
     assert resp.status_code == 200
     assert resp.json()["status"] == "resolved"
-    assert fake.resolve_args == {"review_id": REVIEW_ID, "choice": "cand-a", "verdict": None}
+    assert fake.resolve_args == {
+        "review_id": REVIEW_ID,
+        "choice": "cand-a",
+        "verdict": None,
+        "action": None,
+        "survivor": None,
+    }
+
+
+def test_resolve_passes_dedup_action_and_survivor(client_and_service):
+    # A dedup-proposal resolution forwards `action` + `survivor` through the router (ADR-049).
+    client, fake = client_and_service
+    resp = client.post(
+        f"{PREFIX}/review/{REVIEW_ID}", json={"action": "merge", "survivor": "node-x"}
+    )
+    assert resp.status_code == 200
+    assert fake.resolve_args["action"] == "merge"
+    assert fake.resolve_args["survivor"] == "node-x"
 
 
 def test_batch_delegates_and_serialises(client_and_service):

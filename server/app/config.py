@@ -122,6 +122,22 @@ class Settings(BaseSettings):
     # Bound on one backfill run's auto-adds + review items (guards a runaway alias match).
     backfill_max_links: int = 200
 
+    # --- Dedup sweep (M6 task 5, 04-pipelines §3b, ADR-049) ---
+    # Nightly all-source near-duplicate sweep: recently-ingested **content** nodes whose HNSW top-K
+    # neighbour clears a strict AND of high cosine + a shared canonical edge to a common entity hub
+    # + occurred-overlap (a null occurred_start never excludes) file a `dedup-proposal` review item
+    # the user resolves with merge/keep/link (ADR-049). Watermarked off `agent_runs` (no migration).
+    # Cosine floor for the pair (nodes.embedding). High so only genuine near-dups reach review.
+    dedup_min_cosine: float = Field(default=0.90, ge=0.0, le=1.0)
+    # Per recent driver node, how many nearest neighbours the HNSW top-K considers as candidates.
+    dedup_candidate_k: int = 10
+    # First run / run-store-hiccup fallback window: examine content nodes indexed within this many
+    # days (the watermark = the last successful run's start once one exists — ADR-049 §4).
+    dedup_window_days: int = 1
+    # Bound on how many `dedup-proposal` items one run files (a run's budget; the rest wait for the
+    # next sweep — the re-file guard keeps a re-scan idempotent, ADR-049 §5).
+    dedup_max_pairs_per_run: int = 200
+
     # --- Planes (ADR-005 surviving half — attributes, not folders) ---
     planes: CsvList = Field(
         default=["Professional", "Personal", "Family", "Friends", "Health", "Ideas"]

@@ -39,6 +39,8 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from ..config import Settings
+from ..entities.entity_store import EntityStore
+from ..entities.merge_core import MergeCore, MergeTarget
 from ..entities.resolver import significant_tokens
 from ..entities.store import normalize_alias
 from ..graph.node_writer import NodeDocument, NodeEdge, NodeWriter
@@ -48,6 +50,7 @@ from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .agent_runs import AgentRunStore
 from .review_queue import (
     DECIDABLE_STATUSES,
+    KIND_DEDUP_PROPOSAL,
     KIND_ENTITY_AMBIGUITY,
     KIND_STANCE_CANDIDATE,
     KIND_VOCAB_PROPOSAL,
@@ -61,6 +64,12 @@ from .review_queue import (
     ReviewRecord,
 )
 from .store_backup import StoreBackup
+
+# The canonical edge a dedup ``link`` writes (ADR-049 §2): "related but distinct — keep both,
+# connect them." Reuses the one relatedness concept the system has (the derived layer already
+# computes `similar` = close-in-embedding); a human `link` is exactly that, confirmed — and a
+# *canonical* `similar` survives the nightly derived recompute (which only touches derived rows).
+DEDUP_LINK_REL = "similar"
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +132,8 @@ class ReviewService:
         run_store: AgentRunStore,
         vocab: VocabGovernance | None = None,
         chat_ingest: ChatCaptureIngest | None = None,
+        entity_store: EntityStore | None = None,
+        merge_core: MergeCore | None = None,
     ) -> None:
         self._settings = settings
         self._store = review_store
@@ -131,6 +142,11 @@ class ReviewService:
         self._writer = node_writer
         self._backup = store_backup
         self._runs = run_store
+        # Dedup-proposal resolution (M6 task 5, ADR-049): `merge` folds the loser into the survivor
+        # via the shared MergeCore (content-merge = core alone); `entity_store` fetches the pair to
+        # build the fold targets. None ⇒ dedup merge unresolvable (older tests without dedup items).
+        self._entity_store = entity_store
+        self._merge_core = merge_core
         # Vocabulary governance (task 7): delegates the vocab-proposal branch + supplies the
         # effective entity-like types for minting. None ⇒ vocab-proposals unresolvable + seed-only
         # entity types (existing task-4 tests construct without it).
@@ -152,15 +168,26 @@ class ReviewService:
         )
 
     async def resolve(
-        self, review_id: str, *, choice: str | None = None, verdict: str | None = None
+        self,
+        review_id: str,
+        *,
+        choice: str | None = None,
+        verdict: str | None = None,
+        action: str | None = None,
+        survivor: str | None = None,
     ) -> ReviewRecord:
         """Resolve one review item (POST /review/{id}); returns the updated record.
 
-        Materialization (the entity edge, or the stance-candidate agree capture) runs before the
-        status transition, so a materialization failure leaves the item decidable (retryable) rather
-        than resolved-but-unapplied. Both are idempotent (the edge writes are; the agree capture has
-        a deterministic id, ADR-048 §1), so the (single-user) race where the guarded transition then
-        finds it already terminal is harmless.
+        The meaningful field is per-kind (``choice`` entity-ambiguity, ``verdict`` stance/vocab,
+        ``action``+``survivor`` dedup-proposal); each branch reads only its own, so a batch that
+        passes one string as all of them resolves the fitting kind and fails the rest cleanly.
+
+        Materialization (the entity edge, the stance agree capture, or the dedup merge/link) runs
+        before the status transition, so a failure leaves the item decidable (retryable) rather than
+        resolved-but-unapplied. The write paths are idempotent (edge writes skip duplicates; the
+        agree capture has a deterministic id, ADR-048 §1; a merge is a git-revertible tombstone), so
+        the (single-user) race where the guarded transition then finds it already terminal is
+        harmless.
         """
         record = await self._store.get(review_id)
         if record is None:
@@ -180,6 +207,8 @@ class ReviewService:
             new_status, resolution = await self._resolve_entity(record, choice)
         elif record.kind == KIND_STANCE_CANDIDATE:
             new_status, resolution = await self._resolve_stance_candidate(record, verdict)
+        elif record.kind == KIND_DEDUP_PROPOSAL:
+            new_status, resolution = await self._resolve_dedup(record, action, survivor)
         else:
             raise BadResolution(f"kind {record.kind!r} is not resolvable")
         await self._store.resolve(review_id, status=new_status, resolution=resolution)
@@ -190,16 +219,17 @@ class ReviewService:
         """Resolve many items with one ``action`` string, **best-effort per item** (POST
         /review/batch, ADR-048 §8) — returns one result per id, in order.
 
-        Reuses the single-item :meth:`resolve` unchanged: the ``action`` is passed as **both**
-        ``choice`` and ``verdict``, and each kind's resolver reads only the field that fits it
-        (``choice`` for entity-ambiguity picks, ``verdict`` for stance-candidate / vocab-proposal) —
-        so a homogeneous batch (the common case: triaging stance candidates) resolves cleanly, and
-        an action that doesn't fit an item's kind fails just that item (``ok=false`` + reason)
-        without aborting the rest (rule 7)."""
+        Reuses the single-item :meth:`resolve` unchanged: the ``action`` is passed as ``choice``,
+        ``verdict`` **and** ``action``, and each kind's resolver reads only the field that fits it
+        (``choice`` for entity-ambiguity picks, ``verdict`` for stance-candidate / vocab-proposal,
+        ``action`` for dedup-proposal merge/keep/link — a batch merge uses the default survivor, no
+        explicit ``survivor``) — so a homogeneous batch (triaging stance candidates, or clearing
+        dedup proposals) resolves cleanly, and an action that doesn't fit an item's kind fails just
+        that item (``ok=false`` + reason) without aborting the rest (rule 7)."""
         results: list[BatchItemResult] = []
         for review_id in ids:
             try:
-                await self.resolve(review_id, choice=action, verdict=action)
+                await self.resolve(review_id, choice=action, verdict=action, action=action)
                 results.append(BatchItemResult(id=review_id, ok=True))
             except ReviewNotFound:
                 results.append(BatchItemResult(id=review_id, ok=False, error="not found"))
@@ -336,6 +366,71 @@ class ReviewService:
             except ValueError:
                 logger.warning("stance-candidate %s: unparseable anchor_at %r", record.id, raw)
         return record.created_at
+
+    # --- dedup-proposal (M6 task 5, ADR-049) --------------------------------------------
+
+    async def _resolve_dedup(
+        self, record: ReviewRecord, action: str | None, survivor: str | None
+    ) -> tuple[str, dict]:
+        """Resolve a near-duplicate pair (ADR-049 §6): ``merge`` folds the loser into the survivor
+        via the shared :class:`MergeCore` (content-merge = the core alone — no alias union) →
+        ``resolved``; ``keep`` dismisses (not a dup) → ``discarded``; ``link`` writes a canonical
+        ``similar`` edge between the pair (kept distinct) → ``resolved``. Survivor = the request
+        ``survivor`` else the payload's ``default_survivor``; the loser is the other."""
+        act = (action or "").strip().lower()
+        node_a = str(record.payload.get("node_a") or "").strip()
+        node_b = str(record.payload.get("node_b") or "").strip()
+        if not node_a or not node_b:
+            raise BadResolution("dedup-proposal is missing its node pair")
+        if act == "keep":
+            logger.info("dedup-proposal %s kept (not a duplicate) → discarded", record.id)
+            return STATUS_DISCARDED, {"action": "keep"}
+        if act == "link":
+            await self._link_similar(node_a, node_b)
+            return STATUS_RESOLVED, {"action": "link"}
+        if act != "merge":
+            raise BadResolution("dedup-proposal requires an 'action' of merge|keep|link")
+
+        if self._merge_core is None or self._entity_store is None:  # pragma: no cover — app-wired
+            raise BadResolution("dedup-proposal merge is not configured")
+        survivor_id = (survivor or "").strip() or str(record.payload.get("default_survivor") or "")
+        if survivor_id not in (node_a, node_b):
+            raise BadResolution("'survivor' must be one of the pair (node_a / node_b)")
+        loser_id = node_b if survivor_id == node_a else node_a
+        loser = await self._entity_store.get_node(loser_id)
+        surv = await self._entity_store.get_node(survivor_id)
+        if loser is None or surv is None:
+            raise BadResolution("dedup-proposal references an unknown node")
+        if loser.merged_into is not None or surv.merged_into is not None:
+            raise BadResolution("dedup-proposal references an already-merged node")
+        # Content-merge = the core alone (no alias union — content nodes aren't the alias
+        # substrate); cross-content-type merges are allowed (a near-dup the organizer typed memory
+        # vs insight is still a dup — ADR-049 §6), so no type-equality check.
+        await self._merge_core.fold(
+            loser=MergeTarget(id=loser.id, type=loser.type, title=loser.title,
+                              store_path=loser.store_path),
+            survivor=MergeTarget(id=surv.id, type=surv.type, title=surv.title,
+                                 store_path=surv.store_path),
+            reason=f"dedup merge {loser.id} → {surv.id}",
+        )
+        return STATUS_RESOLVED, {"action": "merge", "survivor": survivor_id, "loser": loser_id}
+
+    async def _link_similar(self, node_a: str, node_b: str) -> None:
+        """Write a **canonical** ``similar`` edge ``node_a → node_b`` (ADR-049 §2) onto ``node_a``'s
+        file, then reindex + request a commit. One edge suffices — the neighbor read unions both
+        directions. The edge lives in frontmatter (rule 1), so it survives the nightly derived
+        recompute (which only wipes/rebuilds ``origin='derived'``), unlike a derived ``similar``."""
+        state = await self._index.get_index_state(node_a)
+        if state is None:
+            raise BadResolution("dedup-proposal node is not indexed; cannot link")
+        try:
+            await asyncio.to_thread(
+                self._writer.add_edges, state.store_path, [NodeEdge(rel=DEDUP_LINK_REL, to=node_b)]
+            )
+        except FileNotFoundError:
+            raise BadResolution("dedup-proposal node file is gone; cannot link") from None
+        await self._indexer.index_paths([state.store_path])
+        await self._backup.request_commit("review: link similar (dedup)")
 
     # --- entity-ambiguity materialization ------------------------------------------------
 
