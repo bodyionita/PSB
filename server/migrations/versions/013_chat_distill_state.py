@@ -10,12 +10,14 @@ Hand-authored plain SQL (ADR-011). Two additive changes for the chat-distiller
 * **`chat_distill_state`** — one row per distilled chat session holding a message-timestamp
   **watermark** (ADR-048 §5). A distiller run processes only messages after ``last_message_at``,
   so re-runs (crash recovery, manual-then-nightly, a reopened thread) are idempotent and a no-op
-  with no new activity. Idle-eligibility itself is derived live from ``max(chat_messages.created_at)``
-  — this table is purely the delta cursor. FK ``ON DELETE CASCADE`` so deleting a session drops its
+  with no new activity. Idle-eligibility itself is derived live from
+  ``max(chat_messages.created_at)`` — this table is purely the delta cursor. FK
+  ``ON DELETE CASCADE`` so deleting a session drops its
   cursor; ``run_id`` is a plain nullable uuid (the last distiller ``agent_runs`` id — informational,
   not a hard reference).
-* **`captures.source_ref`** — a nullable locator column mirroring ``nodes.source_ref`` (02-data-model).
-  An **endorsed** chat candidate materializes a ``captures`` row (``source=chat``) whose
+* **`captures.source_ref`** — a nullable locator column mirroring ``nodes.source_ref``
+  (02-data-model). An **endorsed** chat candidate materializes a ``captures`` row
+  (``source=chat``) whose
   ``source_ref`` is the originating **chat-session id** (ADR-048 §1), so the chat→capture→node chain
   is traceable for the M6 audit/remove surfaces without embedding node ids in chat state. NULL for
   the pre-existing web/voice/MCP captures (unchanged).
