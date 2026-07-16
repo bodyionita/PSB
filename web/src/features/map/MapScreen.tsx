@@ -2,7 +2,7 @@
 // with its 1-hop neighbors in rel-based zones; single-click a neighbor re-centers, breadcrumbs track
 // the path, clicking the focal opens the shared NodePreview drawer, and each zone's overflow pages
 // via a "+N" node. Empty state = an embedded search to start + restore-the-last-centered node.
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { api } from '../../api/client';
 import type { MapNeighborItem, NeighborCenter, SearchResultItem } from '../../api/types';
@@ -11,8 +11,11 @@ import { baseName } from '../../ui/nodeDetail';
 import { typeIcon, typeLabel } from '../../ui/nodeTypes';
 import { useSearch, useTypes, type Submitted } from '../search/useSearch';
 import { MapCanvas } from './MapCanvas';
+import { MapList } from './MapList';
 import { buildGraph, type EffectiveZone, type GraphData, type MapNode } from './graphModel';
 import { useNeighbors } from './useMap';
+
+type ViewMode = 'canvas' | 'list';
 
 const LAST_KEY = 'braindan.map.lastCenter';
 const FAIL_COLOR = '#ff6b6b';
@@ -83,6 +86,15 @@ export function MapScreen({
     [typesQuery.data],
   );
 
+  // View mode: canvas (the force sim) or the tappable list (ADR-051 §7). The list is both the
+  // `prefers-reduced-motion` fallback and a manual toggle — so the default follows the OS setting
+  // (the sim doesn't run under reduced motion) until the user explicitly overrides it, after which
+  // their choice sticks. `useReducedMotion` starts null pre-measure, so resolve it here, not in
+  // initial state.
+  const reducedMotion = useReducedMotion();
+  const [viewOverride, setViewOverride] = useState<ViewMode | null>(null);
+  const view: ViewMode = viewOverride ?? (reducedMotion ? 'list' : 'canvas');
+
   // A new seed (from a Search card / NodePreview edge) centers the map and starts a fresh trail.
   useEffect(() => {
     if (seed && seed !== focalId) {
@@ -142,12 +154,16 @@ export function MapScreen({
     setDrawerOpen(false);
   };
 
-  // In-flight guard: a fast double-click on a "+N" node must not fetch + append the same page twice.
+  // In-flight guard: a fast double-click on a "+N" node/button must not fetch + append the same page
+  // twice. The ref is the synchronous guard; `busyRels` mirrors it into render state so the list's
+  // "Show N more" button can show a loading label (the canvas "+N" node ignores it).
   const showMoreBusy = useRef<Set<string>>(new Set());
+  const [busyRels, setBusyRels] = useState<ReadonlySet<string>>(new Set());
   const showMore = useCallback(
     async (rel: string, cursor: string | null) => {
       if (!focalId || showMoreBusy.current.has(rel)) return;
       showMoreBusy.current.add(rel);
+      setBusyRels(new Set(showMoreBusy.current));
       try {
         const page = await api.nodeNeighborPage(focalId, rel, cursor);
         setExtra((prev) => {
@@ -162,6 +178,7 @@ export function MapScreen({
         });
       } finally {
         showMoreBusy.current.delete(rel);
+        setBusyRels(new Set(showMoreBusy.current));
       }
     },
     [focalId],
@@ -173,15 +190,22 @@ export function MapScreen({
     focalId: null,
     byId: new Map(),
   });
+  // Query zones with any locally-appended "show more" neighbors merged in — the single source both
+  // the canvas (buildGraph) and the list renderer read, so the two views stay in lockstep.
+  const effectiveZones: EffectiveZone[] = useMemo(
+    () =>
+      (neighbors.data?.zones ?? []).map((z) => {
+        const ex = extra[z.rel];
+        return ex
+          ? { rel: z.rel, neighbors: [...z.neighbors, ...ex.neighbors], total: z.total, next_cursor: ex.cursor }
+          : { rel: z.rel, neighbors: z.neighbors, total: z.total, next_cursor: z.next_cursor };
+      }),
+    [neighbors.data, extra],
+  );
+
   const graph: GraphData = useMemo(() => {
     if (!center) return { nodes: [], links: [] };
-    const zones: EffectiveZone[] = (neighbors.data?.zones ?? []).map((z) => {
-      const ex = extra[z.rel];
-      return ex
-        ? { rel: z.rel, neighbors: [...z.neighbors, ...ex.neighbors], total: z.total, next_cursor: ex.cursor }
-        : { rel: z.rel, neighbors: z.neighbors, total: z.total, next_cursor: z.next_cursor };
-    });
-    const desired = buildGraph(center, zones);
+    const desired = buildGraph(center, effectiveZones);
     if (prevRef.current.focalId !== center.node_id) {
       prevRef.current = { focalId: center.node_id, byId: new Map() };
     }
@@ -210,7 +234,7 @@ export function MapScreen({
     const wanted = new Set(desired.nodes.map((n) => n.id));
     for (const id of [...byId.keys()]) if (!wanted.has(id)) byId.delete(id);
     return { nodes, links: desired.links };
-  }, [center, neighbors.data, extra]);
+  }, [center, effectiveZones]);
   graphNodesRef.current = graph.nodes;
 
   const { ref: hostRef, size } = useSize();
@@ -239,6 +263,7 @@ export function MapScreen({
         {focalId && (
           <Breadcrumbs crumbs={crumbs} onGo={goCrumb} onHome={() => setFocalId(null)} />
         )}
+        {center && <ViewToggle view={view} onChange={setViewOverride} />}
       </div>
 
       {!focalId ? (
@@ -269,46 +294,60 @@ export function MapScreen({
             overflow: 'hidden',
           }}
         >
-          <MapCanvas
-            data={graph}
-            focalId={center.node_id}
-            width={size.w}
-            height={size.h}
-            entityTypes={entityTypes}
-            onRecenter={recenter}
-            onOpenCenter={() => setDrawerOpen(true)}
-            onShowMore={showMore}
-          />
+          {view === 'canvas' ? (
+            <>
+              <MapCanvas
+                data={graph}
+                focalId={center.node_id}
+                width={size.w}
+                height={size.h}
+                entityTypes={entityTypes}
+                onRecenter={recenter}
+                onOpenCenter={() => setDrawerOpen(true)}
+                onShowMore={showMore}
+              />
 
-          {/* Focal caption chip — renders immediately from the center header (no flash). */}
-          <div
-            style={{
-              position: 'absolute',
-              left: 14,
-              bottom: 14,
-              maxWidth: 'calc(100% - 28px)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '8px 12px',
-              borderRadius: 'var(--radius)',
-              background: 'var(--surface)',
-              border: '1px solid var(--surface-border)',
-              backdropFilter: 'blur(18px)',
-              WebkitBackdropFilter: 'blur(18px)',
-            }}
-          >
-            <span aria-hidden style={{ fontSize: 18 }}>
-              {typeIcon((displayCenter ?? center).type)}
-            </span>
-            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 700 }}>
-              {(displayCenter ?? center).title ?? baseName((displayCenter ?? center).node_id)}
-            </span>
-            <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-              {typeLabel((displayCenter ?? center).type)}
-            </span>
-            <PlaneBadge plane={(displayCenter ?? center).plane} />
-          </div>
+              {/* Focal caption chip — renders immediately from the center header (no flash). */}
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 14,
+                  bottom: 14,
+                  maxWidth: 'calc(100% - 28px)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 12px',
+                  borderRadius: 'var(--radius)',
+                  background: 'var(--surface)',
+                  border: '1px solid var(--surface-border)',
+                  backdropFilter: 'blur(18px)',
+                  WebkitBackdropFilter: 'blur(18px)',
+                }}
+              >
+                <span aria-hidden style={{ fontSize: 18 }}>
+                  {typeIcon((displayCenter ?? center).type)}
+                </span>
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 700 }}>
+                  {(displayCenter ?? center).title ?? baseName((displayCenter ?? center).node_id)}
+                </span>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                  {typeLabel((displayCenter ?? center).type)}
+                </span>
+                <PlaneBadge plane={(displayCenter ?? center).plane} />
+              </div>
+            </>
+          ) : (
+            <MapList
+              center={center}
+              zones={effectiveZones}
+              entityTypes={entityTypes}
+              onRecenter={recenter}
+              onOpenCenter={() => setDrawerOpen(true)}
+              onShowMore={showMore}
+              showMoreBusy={busyRels}
+            />
+          )}
 
           <AnimatePresence>
             {drawerOpen && (
@@ -383,6 +422,56 @@ function Breadcrumbs({
         );
       })}
     </nav>
+  );
+}
+
+// Canvas ⇄ list toggle (ADR-051 §7). Manual override on top of the reduced-motion default.
+function ViewToggle({ view, onChange }: { view: ViewMode; onChange: (v: ViewMode) => void }) {
+  const opts: { id: ViewMode; icon: string; label: string }[] = [
+    { id: 'canvas', icon: '✷', label: 'Canvas' },
+    { id: 'list', icon: '☰', label: 'List' },
+  ];
+  return (
+    <div
+      role="group"
+      aria-label="Map view"
+      style={{
+        display: 'flex',
+        flexShrink: 0,
+        gap: 2,
+        padding: 2,
+        borderRadius: 999,
+        border: '1px solid var(--surface-border)',
+        background: 'var(--surface)',
+      }}
+    >
+      {opts.map((o) => {
+        const active = o.id === view;
+        return (
+          <button
+            key={o.id}
+            onClick={() => onChange(o.id)}
+            aria-pressed={active}
+            title={`${o.label} view`}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              padding: '5px 10px',
+              borderRadius: 999,
+              border: 'none',
+              background: active ? 'var(--accent)' : 'transparent',
+              color: active ? 'var(--on-accent)' : 'var(--muted)',
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            <span aria-hidden>{o.icon}</span>
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
