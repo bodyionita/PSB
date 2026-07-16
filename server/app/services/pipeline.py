@@ -116,6 +116,8 @@ class PipelineOutcome:
     """Result of one pipeline run — feeds the parent ``agent_runs`` row + tests."""
 
     pipeline: str
+    # the parent agent_runs row the steps link back to (ADR-047 §5).
+    parent_run_id: str | None = None
     steps: list[_StepResult] = field(default_factory=list)
     halted_at: str | None = None
 
@@ -143,6 +145,7 @@ class PipelineOutcome:
     def as_dict(self) -> dict[str, object]:
         return {
             "pipeline": self.pipeline,
+            "parent_run_id": self.parent_run_id,
             "steps": [s.as_dict() for s in self.steps],
             "halted_at": self.halted_at,
         }
@@ -186,7 +189,7 @@ class PipelineRunner:
             return None
 
     async def _run_steps(self, parent_id: str) -> PipelineOutcome:
-        outcome = PipelineOutcome(pipeline=self._def.name)
+        outcome = PipelineOutcome(pipeline=self._def.name, parent_run_id=parent_id)
         for step in self._def.steps:
             result = await self._run_step(parent_id, step)
             outcome.steps.append(result)

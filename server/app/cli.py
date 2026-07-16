@@ -21,10 +21,12 @@ from .db import Database
 from .entities.backfill import build_backfill_service
 from .entities.profile_refresh import build_profile_refresh_service
 from .identity.service import build_identity_capsule_service
+from .services.agent_runs import PgAgentRunStore
 from .services.backup_jobs import build_backup_jobs
 from .services.git_repo import GitRepo
 from .services.reindex import build_reindex_service
 from .services.reprocess import build_reprocess_service
+from .services.scheduler import PipelineScheduler
 from .services.store_backup import StoreBackupService
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,52 @@ REPROCESS = "reprocess-all"
 JOBS: tuple[str, ...] = (
     *BACKUP_JOBS.keys(), REINDEX, PROFILE_REFRESH, BACKFILL, IDENTITY_CAPSULE, REPROCESS
 )
+
+
+async def run_pipeline(name: str) -> int:
+    """Run one whole pipeline (``nightly``/``weekly``) once, on demand — the ADR-047 run-now path.
+
+    Builds every step's service from the same ``build_*`` helpers the per-job CLI + the app use,
+    hands them to a :class:`PipelineScheduler` (never started — we only borrow its runner wiring),
+    and drives the chosen pipeline's :class:`PipelineRunner` to completion in this process. Prints
+    the parent run id + each step's status + child run id, so a VPS operator gets self-contained
+    evidence that one start drove the whole roster in order under a parent run (M5.5 Accept). Every
+    step is idempotent (rule 6); this does the same work the nightly cron would — reindex included.
+    """
+    settings = get_settings()
+    db = Database(settings)
+    await db.connect()
+    try:
+        store_backup = StoreBackupService(settings=settings, git=GitRepo(settings.graph_store_path))
+        await store_backup.ensure_ready()
+        scheduler = PipelineScheduler(
+            settings=settings,
+            jobs=build_backup_jobs(settings, db, store_backup),
+            run_store=PgAgentRunStore(db),
+            reindex=build_reindex_service(settings, db, store_backup),
+            profile_refresh=build_profile_refresh_service(settings, db),
+            backfill=build_backfill_service(settings, db, store_backup),
+            identity_capsule=build_identity_capsule_service(settings, db),
+        )
+        runners = {defn.name: runner for defn, runner in scheduler.pipeline_runners()}
+        if name not in runners:
+            sys.stderr.write(
+                f"unknown pipeline {name!r}; known: {', '.join(sorted(runners))}\n"
+            )
+            return 2
+        outcome = await runners[name].run()
+        if outcome is None:
+            logger.error("pipeline %s did not run (could not open its parent run)", name)
+            return 1
+        logger.info("%s", outcome.summary())
+        logger.info("parent run: %s", outcome.parent_run_id)
+        for s in outcome.steps:
+            logger.info("  step %-26s %-9s child_run=%s", s.name, s.status, s.child_run_id)
+        # A halt-aborted pipeline is a non-zero exit; a continue-only failure still exits 0 (the
+        # pipeline completed its roster — per-step failures are visible in the runs, ADR-047 §4).
+        return 1 if outcome.halted_at is not None else 0
+    finally:
+        await db.disconnect()
 
 
 async def run_job(name: str) -> None:
@@ -82,11 +130,22 @@ async def run_job(name: str) -> None:
         await db.disconnect()
 
 
+# The two schedulable pipelines (ADR-047) — run a whole roster once with `python -m app.cli
+# pipeline <name>`. The names must match the config `pipeline_defs()`.
+PIPELINES: tuple[str, ...] = ("nightly", "weekly")
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     args = argv if argv is not None else sys.argv[1:]
+    # `pipeline <name>` runs a whole pipeline once (ADR-047 run-now); everything else is one job.
+    if len(args) == 2 and args[0] == "pipeline":
+        return asyncio.run(run_pipeline(args[1]))
     if len(args) != 1 or args[0] not in JOBS:
-        sys.stderr.write(f"usage: python -m app.cli {{{'|'.join(JOBS)}}}\n")
+        sys.stderr.write(
+            f"usage: python -m app.cli {{{'|'.join(JOBS)}}}\n"
+            f"       python -m app.cli pipeline {{{'|'.join(PIPELINES)}}}\n"
+        )
         return 2
     asyncio.run(run_job(args[0]))
     return 0

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.cli import BACKUP_JOBS, JOBS, REINDEX, build_backup_jobs, main
+from app.cli import BACKUP_JOBS, JOBS, PIPELINES, REINDEX, build_backup_jobs, main
 from app.config import Settings
 from app.db import Database
 from app.services.backup_jobs import BackupJobs
@@ -16,7 +16,15 @@ from app.services.store_backup import StoreBackupService
 def test_main_rejects_bad_args():
     assert main([]) == 2
     assert main(["nonsense"]) == 2
-    assert main(["store-backup", "extra"]) == 2
+    assert main(["store-backup", "extra"]) == 2  # 2 args but not the `pipeline` verb → usage
+    assert main(["pipeline"]) == 2  # `pipeline` needs a name
+    assert main(["pipeline", "a", "b"]) == 2  # too many args
+
+
+def test_pipeline_names_match_the_config():
+    # `python -m app.cli pipeline <name>` accepts exactly the configured pipelines (ADR-047).
+    defined = {d.name for d in Settings(scheduler_tz="UTC").pipeline_defs()}
+    assert set(PIPELINES) == defined == {"nightly", "weekly"}
 
 
 def test_reindex_is_a_valid_cli_job():
