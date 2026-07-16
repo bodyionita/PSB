@@ -52,7 +52,7 @@ from .services.reindex import ReindexService
 from .services.reprocess import PgReprocessStore, ReprocessService
 from .services.review_queue import PgReviewQueue
 from .services.review_service import ReviewService
-from .services.scheduler import BackupScheduler
+from .services.scheduler import PipelineScheduler
 from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
 from .tags.store import PgTagStore
@@ -309,14 +309,17 @@ async def lifespan(app: FastAPI):
     # Boot recovery: any capture left in-flight by a restart is marked failed (retryable).
     await pipeline.sweep_orphans()
 
-    # Durability scheduler (ADR-010): the in-process APScheduler running the M1 backup jobs.
-    # Off unless enable_scheduler — exactly one prod instance runs it. Started inside the
-    # lifespan's event loop so the coroutine jobs fire on it.
-    scheduler: BackupScheduler | None = None
+    # Pipeline scheduler (ADR-047): the in-process APScheduler running the `nightly`/`weekly`
+    # pipelines — one cron per pipeline, steps sequential-on-completion (the ADR-010 window is now
+    # enforced by sequencing from a 03:00 start, not the retired per-job stagger). Off unless
+    # enable_scheduler — exactly one prod instance runs it. Started inside the lifespan's event loop
+    # so the coroutine steps fire on it.
+    scheduler: PipelineScheduler | None = None
     if settings.enable_scheduler:
-        scheduler = BackupScheduler(
+        scheduler = PipelineScheduler(
             settings=settings,
             jobs=build_backup_jobs(settings, db, store_backup),
+            run_store=run_store,
             reindex=reindex_service,
             profile_refresh=profile_refresh_service,
             backfill=backfill_service,

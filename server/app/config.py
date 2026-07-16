@@ -101,9 +101,9 @@ class Settings(BaseSettings):
     # organizes on the MCP surface, further captures wait their turn.
     mcp_capture_max_inflight: int = 2
     # Nightly derived-profile refresh (ADR-030 §4/ADR-032 §3): regenerate categorized
-    # observation profiles for entities whose 1-hop neighborhood changed. Runs in the
-    # ADR-010 window after the 03:40 reindex so the day's edges are in the DB.
-    profile_refresh_cron: str = "10 4 * * *"
+    # observation profiles for entities whose 1-hop neighborhood changed. A `nightly`-pipeline
+    # step after `reindex` (ADR-047) so the day's edges are in the DB before it reads them (the
+    # ordering is the pipeline's, not a per-job cron — see `pipeline_defs`).
     # Evidence-tiered profile depth (ADR-034): depth scales with graph degree so the nightly
     # LLM spend is structurally capped (once-mentioned entities never cost a model call).
     #   degree < snapshot_min          → tier `stub`     (mechanical, no LLM)
@@ -116,8 +116,7 @@ class Settings(BaseSettings):
     # Nightly entity backfill scan (ADR-030 §6): entities minted/alias-changed since the last
     # run are re-checked against recent memory nodes for alias matches — an exact alias match
     # (length ≥ ENTITY_ALIAS_MIN_FUZZY_LEN) auto-adds the edge (feed-flagged), a shorter one
-    # files an entity-ambiguity review item. After profile-refresh, before the 04:55 sweep.
-    backfill_cron: str = "20 4 * * *"
+    # files an entity-ambiguity review item. A `nightly`-pipeline step after profile-refresh (047).
     # Only re-scan memory nodes indexed within this window (ADR-030 §6 "recent … nodes").
     backfill_window_days: int = 30
     # Bound on one backfill run's auto-adds + review items (guards a runaway alias match).
@@ -401,34 +400,20 @@ class Settings(BaseSettings):
     # run late — the next night covers it (ADR-010). Tolerates in-window restart jitter.
     scheduler_misfire_grace_seconds: int = 3600
 
-    # --- Durability schedule (ADR-010 window, ADR-014 §1/§6). Standard 5-field crontab, all
-    # evaluated in scheduler_tz. Staggered inside 03:00–05:00 to avoid RAM stacking on the VPS;
-    # M2 fills rescan 03:40 (reindex_cron below); M3 fills 04:10 (profile_refresh_cron above —
-    # the retired daily-summary slot); still free: 03:00 (connectors) / 04:40 (reflection). ---
-    # Combined nightly reindex (M2, ADR-023 §4): git pull → rescan → recompute graph → commit+push.
-    # In the ADR-010 window, ahead of the summary jobs so search/graph reflect the day's captures.
-    reindex_cron: str = "40 3 * * *"  # nightly full rescan + derived-edge recompute (04 §4)
-    backup_data_sync_cron: str = "10 3 * * *"  # nightly /srv/data raw inputs → R2
-    backup_db_backup_cron: str = "25 3 * * *"  # nightly pg_dump → R2
-    integrity_drill_cron: str = "30 4 * * sun"  # weekly verify+clone drill (ADR-014 §6)
-    # Identity-capsule refresh (M5, ADR-046 §5): distil the ~300-token capsule over the day's fresh
-    # hubs — after profile-refresh (04:10) + backfill (04:20) so those land first, before the sweep.
-    identity_capsule_refresh_cron: str = "35 4 * * *"
-    backup_store_sweep_cron: str = "55 4 * * *"  # ADR-010 04:55 commit+push sweep
-    backup_store_bundle_cron: str = "57 4 * * *"  # WORM `git bundle` right after the sweep
+    # --- Pipelines (ADR-047: the pipeline is the scheduling primitive) ---
+    # The per-job staggered crons (ADR-010: reindex 03:40, data-sync 03:10, db-backup 03:25,
+    # profile-refresh 04:10, backfill 04:20, identity-capsule 04:35, store-sweep 04:55, bundle
+    # 04:57, weekly integrity-drill Sun 04:30) are **retired** (M5.5 task 2): the scheduler
+    # registers **one cron per pipeline** (ADR-047 §7), not one per job. The window is enforced by
+    # *sequencing from these starts*, not by the stagger — the `nightly` pipeline runs its steps
+    # back-to-back from 03:00, one step's RAM at a time (ADR-014 §1/§6 durability jobs are steps in
+    # it); the `weekly` integrity drill keeps its Sunday slot. Ordered steps + per-step `on_fail`
+    # live in `pipeline_defs()` below.
+    nightly_pipeline_cron: str = "0 3 * * *"
+    weekly_pipeline_cron: str = "30 4 * * sun"
     # /health `backups` leg degrades when the last successful integrity-drill is older than this
     # (weekly cadence + one night of grace) or the latest drill failed (ADR-014 §6).
     integrity_drill_max_age_days: int = 8
-
-    # --- Pipelines (ADR-047: the pipeline is the scheduling primitive) ---
-    # One cron per pipeline (ADR-047 §7), not one per job. The window (ADR-010) is enforced by
-    # *sequencing from these starts*, not by the retired per-job stagger: the `nightly` pipeline
-    # runs its steps back-to-back from 03:00, one step's RAM at a time; the `weekly` integrity drill
-    # keeps its Sunday slot. The ordered steps + per-step `on_fail` live in `pipeline_defs()` below.
-    # (The per-job `*_cron` settings above are wired into these pipelines by M5.5 task 2, which
-    # retires them as individual scheduler triggers.)
-    nightly_pipeline_cron: str = "0 3 * * *"
-    weekly_pipeline_cron: str = "30 4 * * sun"
 
     # --- Web / CORS (dev only; in prod Caddy same-origins the app) ---
     cors_origins: CsvList = Field(default=["http://localhost:5173"])

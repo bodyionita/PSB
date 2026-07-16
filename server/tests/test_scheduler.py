@@ -1,8 +1,11 @@
-"""BackupScheduler tests — job → schedule mapping (pure) + real registration (no jobs fire).
+"""PipelineScheduler tests — one cron per pipeline (ADR-047), pure runner mapping + real
+registration (no pipelines fire).
 
-The pure ``job_specs`` map tests without an event loop; ``start()`` is exercised against a real
-AsyncIOScheduler so the crontab defaults are actually parsed and the ADR-010 misfire wiring is
-asserted, but the clock is never advanced so no backup job runs.
+The pure ``pipeline_runners`` map tests without an event loop: it asserts the two pipelines, their
+step→job wiring, and that an unwired optional job is dropped from a pipeline's steps (not scheduled
+as a doomed ``missing`` step). ``start()`` is exercised against a real AsyncIOScheduler so the
+pipeline crons are actually parsed and the ADR-010 misfire/overlap wiring is asserted, but the clock
+is never advanced so nothing runs.
 """
 
 from __future__ import annotations
@@ -14,15 +17,32 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import Settings
-from app.identity.service import IdentityCapsuleService
 from app.services.backup_jobs import BackupJobs
-from app.services.reindex import ReindexService
-from app.services.scheduler import BackupScheduler
+from app.services.scheduler import PipelineScheduler
 from app.services.store_backup import StoreBackupService
 
 from .fakes import FakeAgentRunStore, FakeGitRepo, FakeObjectStore
 
-JOB_IDS = {"data-sync", "db-backup", "integrity-drill", "store-sweep", "store-backup"}
+# The full nightly roster (all optional jobs wired) + the weekly pipeline.
+NIGHTLY_STEPS = [
+    "data-sync",
+    "db-backup",
+    "reindex",
+    "profile-refresh",
+    "entity-backfill",
+    "identity-capsule-refresh",
+    "store-sweep",
+    "store-backup",
+]
+# With no optional agent-window jobs wired, only the five backup steps survive (two of them weekly).
+BACKUP_ONLY_NIGHTLY = ["data-sync", "db-backup", "store-sweep", "store-backup"]
+
+
+class _FakeJob:
+    """A stand-in agent-window job — the scheduler only reads its ``run_scheduled`` for the map."""
+
+    async def run_scheduled(self) -> None:  # pragma: no cover - never fired in these tests
+        return None
 
 
 def _jobs(tmp_path: Path) -> tuple[Settings, BackupJobs]:
@@ -36,93 +56,115 @@ def _jobs(tmp_path: Path) -> tuple[Settings, BackupJobs]:
     return settings, jobs
 
 
-def _reindex(settings: Settings) -> ReindexService:
-    # Only the run_scheduled coroutine is referenced by the scheduler; the deps can be None here.
-    return ReindexService(
-        settings=settings, indexer=None, graph=None, store_backup=None, run_store=None
+def _full_scheduler(tmp_path: Path, **over) -> PipelineScheduler:
+    """A scheduler with every optional agent-window job wired (the prod shape)."""
+    settings, jobs = _jobs(tmp_path)
+    return PipelineScheduler(
+        settings=settings,
+        jobs=jobs,
+        run_store=FakeAgentRunStore(),
+        reindex=_FakeJob(),
+        profile_refresh=_FakeJob(),
+        backfill=_FakeJob(),
+        identity_capsule=_FakeJob(),
+        **over,
     )
 
 
-def test_job_specs_cover_the_five_durability_jobs(tmp_path: Path):
+def test_pipeline_runners_cover_nightly_and_weekly_in_order(tmp_path: Path):
+    runners = _full_scheduler(tmp_path).pipeline_runners()
+    by_name = {d.name: d for d, _ in runners}
+
+    assert set(by_name) == {"nightly", "weekly"}
+    # steps preserved in dependency order (the migrated ADR-010 roster).
+    assert [s.name for s in by_name["nightly"].steps] == NIGHTLY_STEPS
+    assert [s.name for s in by_name["weekly"].steps] == ["integrity-drill"]
+    # every pipeline cron parses.
+    for defn, _ in runners:
+        assert CronTrigger.from_crontab(defn.cron)
+
+
+def test_step_funcs_map_to_the_intended_job_coroutines(tmp_path: Path):
     settings, jobs = _jobs(tmp_path)
-    specs = BackupScheduler(settings=settings, jobs=jobs).job_specs()
-
-    assert {s.id for s in specs} == JOB_IDS
-    by_id = {s.id: s.func for s in specs}
-    # ids map to the intended BackupJobs coroutine methods (guards against a wiring swap).
-    assert by_id["store-backup"] == jobs.run_store_bundle
-    assert by_id["integrity-drill"] == jobs.run_integrity_drill
-    assert by_id["db-backup"] == jobs.run_db_backup
-    assert by_id["data-sync"] == jobs.run_data_sync
-    assert by_id["store-sweep"] == jobs.run_store_sweep
-    # every crontab default parses (a bad string would raise here).
-    for s in specs:
-        assert CronTrigger.from_crontab(s.crontab)
-
-
-def test_reindex_job_is_added_when_a_reindex_service_is_given(tmp_path: Path):
-    settings, jobs = _jobs(tmp_path)
-    reindex = _reindex(settings)
-    specs = BackupScheduler(settings=settings, jobs=jobs, reindex=reindex).job_specs()
-
-    by_id = {s.id: s for s in specs}
-    assert set(by_id) == JOB_IDS | {"reindex"}
-    assert by_id["reindex"].func == reindex.run_scheduled
-    assert by_id["reindex"].crontab == settings.reindex_cron
-    assert CronTrigger.from_crontab(by_id["reindex"].crontab)
-
-
-def test_reindex_job_is_absent_without_a_reindex_service(tmp_path: Path):
-    settings, jobs = _jobs(tmp_path)
-    specs = BackupScheduler(settings=settings, jobs=jobs).job_specs()
-    assert {s.id for s in specs} == JOB_IDS  # backup-only when no reindex is wired
-
-
-def _capsule(settings: Settings) -> IdentityCapsuleService:
-    # Only the run_scheduled coroutine is referenced by the scheduler; the deps can be None here.
-    return IdentityCapsuleService(
-        settings=settings, capsule_store=None, sources=None, routing=None, run_store=None
+    reindex, profile, backfill, capsule = _FakeJob(), _FakeJob(), _FakeJob(), _FakeJob()
+    scheduler = PipelineScheduler(
+        settings=settings,
+        jobs=jobs,
+        run_store=FakeAgentRunStore(),
+        reindex=reindex,
+        profile_refresh=profile,
+        backfill=backfill,
+        identity_capsule=capsule,
     )
+    funcs = scheduler._step_funcs()
+    # backup jobs → BackupJobs methods; guards against a wiring swap.
+    assert funcs["data-sync"] == jobs.run_data_sync
+    assert funcs["db-backup"] == jobs.run_db_backup
+    assert funcs["store-sweep"] == jobs.run_store_sweep
+    assert funcs["store-backup"] == jobs.run_store_bundle
+    assert funcs["integrity-drill"] == jobs.run_integrity_drill
+    # agent-window jobs → their run_scheduled.
+    assert funcs["reindex"] == reindex.run_scheduled
+    assert funcs["profile-refresh"] == profile.run_scheduled
+    assert funcs["entity-backfill"] == backfill.run_scheduled
+    assert funcs["identity-capsule-refresh"] == capsule.run_scheduled
 
 
-def test_identity_capsule_job_is_added_when_the_service_is_given(tmp_path: Path):
+def test_unwired_optional_jobs_are_dropped_from_the_pipeline(tmp_path: Path):
+    # No reindex/profile/backfill/capsule wired: those steps must be OMITTED (not recorded as a
+    # failed `missing` step every night — ADR-047 §5), leaving only the backup steps.
     settings, jobs = _jobs(tmp_path)
-    capsule = _capsule(settings)
-    specs = BackupScheduler(
-        settings=settings, jobs=jobs, identity_capsule=capsule
-    ).job_specs()
+    scheduler = PipelineScheduler(settings=settings, jobs=jobs, run_store=FakeAgentRunStore())
+    by_name = {d.name: d for d, _ in scheduler.pipeline_runners()}
 
-    by_id = {s.id: s for s in specs}
-    assert set(by_id) == JOB_IDS | {"identity-capsule-refresh"}
-    assert by_id["identity-capsule-refresh"].func == capsule.run_scheduled
-    assert by_id["identity-capsule-refresh"].crontab == settings.identity_capsule_refresh_cron
-    assert CronTrigger.from_crontab(by_id["identity-capsule-refresh"].crontab)
+    assert [s.name for s in by_name["nightly"].steps] == BACKUP_ONLY_NIGHTLY
+    assert [s.name for s in by_name["weekly"].steps] == ["integrity-drill"]  # jobs always wired
 
 
-async def test_start_registers_all_jobs_then_shuts_down(tmp_path: Path):
-    settings, jobs = _jobs(tmp_path)
+def test_a_pipeline_with_no_wired_steps_is_skipped(tmp_path: Path):
+    # A pipeline whose every step is unwired must not be scheduled at all. Build a settings whose
+    # weekly pipeline references only an unknown job.
+    class _OnlyGhostWeekly(Settings):
+        def pipeline_defs(self):
+            from app.services.pipeline import CONTINUE, PipelineDef, PipelineStepDef
+
+            return (
+                PipelineDef(
+                    name="weekly",
+                    cron=self.weekly_pipeline_cron,
+                    steps=(PipelineStepDef("ghost-job", on_fail=CONTINUE),),
+                ),
+            )
+
+    settings = _OnlyGhostWeekly(graph_store_path=str(tmp_path / "store"), scheduler_tz="UTC")
+    _, jobs = _jobs(tmp_path)
+    scheduler = PipelineScheduler(settings=settings, jobs=jobs, run_store=FakeAgentRunStore())
+    assert scheduler.pipeline_runners() == []  # nothing schedulable
+
+
+async def test_start_registers_one_cron_per_pipeline_then_shuts_down(tmp_path: Path):
     aps = AsyncIOScheduler(timezone=ZoneInfo("UTC"))
-    scheduler = BackupScheduler(settings=settings, jobs=jobs, scheduler=aps)
+    scheduler = _full_scheduler(tmp_path, scheduler=aps)
 
     scheduler.start()
     try:
         assert aps.running
-        assert {j.id for j in aps.get_jobs()} == JOB_IDS
-        # Every job is scheduled (has a next fire time) and is a cron trigger.
+        # exactly one APScheduler job per pipeline (not per step/job).
+        assert {j.id for j in aps.get_jobs()} == {"nightly", "weekly"}
         for j in aps.get_jobs():
             assert j.next_run_time is not None
             assert isinstance(j.trigger, CronTrigger)
-        # ADR-010 wiring: missed fires are skipped within the grace window, never overlap,
-        # and a backlog coalesces to one run.
-        bundle = aps.get_job("store-backup")
-        assert bundle.misfire_grace_time == settings.scheduler_misfire_grace_seconds
-        assert bundle.max_instances == 1
-        assert bundle.coalesce is True
+        settings, _ = _jobs(tmp_path)
+        # ADR-010 / ADR-047 §3 wiring: missed fires skipped within grace, one run coalesced, and a
+        # pipeline never overlaps itself (so a long night can't stack on the next).
+        nightly = aps.get_job("nightly")
+        assert nightly.misfire_grace_time == settings.scheduler_misfire_grace_seconds
+        assert nightly.max_instances == 1
+        assert nightly.coalesce is True
     finally:
         scheduler.shutdown()  # clean teardown, must not raise
 
 
 async def test_shutdown_is_safe_when_never_started(tmp_path: Path):
-    settings, jobs = _jobs(tmp_path)
-    scheduler = BackupScheduler(settings=settings, jobs=jobs)
+    scheduler = _full_scheduler(tmp_path)
     scheduler.shutdown()  # must not raise
