@@ -590,6 +590,15 @@ class CapturePipeline:
                     run_id, RUN_SKIPPED, inter, summary=f"{label}: capture vanished"
                 )
                 return
+            if record.removed_at is not None:
+                # The capture was one-tap-removed (ADR-048 §11): nodes git-rm'd, capture tombstoned.
+                # Any replay from raw — the admin reorganize, a follow-up Pass-2, or the §10 inbox
+                # drainer that also drives `reorganize_capture` — must NOT resurrect it (the same
+                # exclusion `reprocess-all` applies). Skip without re-materializing.
+                await self._finish_run(
+                    run_id, RUN_SKIPPED, inter, summary=f"{label}: capture removed (skipped)"
+                )
+                return
             inter.kind = f"{record.kind}{kind_suffix}"
 
             await self._store.mark_status(capture_id, ORGANIZING)

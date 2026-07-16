@@ -51,6 +51,10 @@ class CaptureRecord:
     # `source=chat` capture (ADR-048 §1), so the chat→capture→node chain is traceable. NULL for the
     # web/voice/MCP captures.
     source_ref: str | None = None
+    # One-tap-remove tombstone (ADR-048 §11, M6 task 4): non-null once a chat-distilled node is
+    # removed (its file git-rm'd + `nodes`/`chunks`/`edges` deleted). Replay-excluded — `reprocess-
+    # all` skips a tombstoned capture so a removed memory can't resurrect. NULL for live captures.
+    removed_at: datetime | None = None
 
 
 class CaptureStore(Protocol):
@@ -96,7 +100,8 @@ class CaptureStore(Protocol):
 
 _COLUMNS = (
     "id, kind, status, raw_text, audio_path, node_paths, "
-    "follow_up_question, follow_up_answer, error, created_at, updated_at, source, source_ref"
+    "follow_up_question, follow_up_answer, error, created_at, updated_at, source, source_ref, "
+    "removed_at"
 )
 
 
@@ -115,6 +120,7 @@ def _record(row) -> CaptureRecord:
         updated_at=row["updated_at"],
         source=row["source"],
         source_ref=row["source_ref"],
+        removed_at=row["removed_at"],
     )
 
 

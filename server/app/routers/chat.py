@@ -16,17 +16,20 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from ..chat.auto_recorded import AutoRecordedService, AutoRecordNotFound
 from ..chat.distiller import ChatDistillerService, SessionNotFound
 from ..chat.service import ChatAnswer, ChatService, ChatSessionNotFound
 from ..dependencies import (
+    get_auto_recorded_service,
     get_chat_distiller_service,
     get_chat_service,
     get_model_routing,
     require_session,
 )
 from ..models import (
+    AutoRecordedItem,
     ChatMessageItem,
     ChatModelItem,
     ChatModelsResponse,
@@ -142,6 +145,47 @@ async def remember_session(
     if outcome.skipped:
         return RememberResponse(skipped=outcome.skipped_reason)
     return RememberResponse(endorsed=outcome.endorsed, to_review=outcome.to_review)
+
+
+@router.get("/chat/auto-recorded", response_model=list[AutoRecordedItem])
+async def list_auto_recorded(
+    limit: int = Query(default=50, ge=1, le=500),
+    service: AutoRecordedService = Depends(get_auto_recorded_service),
+) -> list[AutoRecordedItem]:
+    """The chat-scoped "recently auto-recorded" audit list (M6, ADR-048 §12): auto-endorsed chat
+    memories newest-first, feeding the one-tap-remove surface. Bounded by ``limit`` (config-capped).
+    """
+    items = await service.list_recent(limit)
+    return [
+        AutoRecordedItem(
+            capture_id=i.capture_id,
+            node_paths=i.node_paths,
+            title=i.title,
+            snippet=i.snippet,
+            salience=i.salience,
+            source_ref=i.source_ref,
+            created_at=i.created_at,
+        )
+        for i in items
+    ]
+
+
+@router.post("/chat/auto-recorded/{capture_id}/remove", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_auto_recorded(
+    capture_id: uuid.UUID,
+    service: AutoRecordedService = Depends(get_auto_recorded_service),
+) -> None:
+    """One-tap remove of an auto-endorsed chat memory (M6, ADR-048 §11): git-rm the node file(s) +
+    DB-delete (``nodes``/``chunks``/``edges``) + tombstone the capture (``removed_at``, replay-
+    excluded so it can't resurrect). Soft-delete — git history is kept. ``422`` malformed id;
+    ``404`` for an id that is not a live auto-recorded item (unknown / already removed / not
+    auto-endorsed)."""
+    try:
+        await service.remove(str(capture_id))
+    except AutoRecordNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="auto-recorded memory not found"
+        ) from None
 
 
 def _to_response(answer: ChatAnswer) -> ChatResponse:

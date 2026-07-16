@@ -159,6 +159,16 @@ class ChatCaptureIngest(Protocol):
     ) -> str: ...
 
 
+class AutoRecordSink(Protocol):
+    """The narrow slice of the auto-recorded registry the distiller writes to: register each
+    **auto-endorsed** capture so it shows in the "recently auto-recorded" audit list + gets a
+    one-tap remove (ADR-048 §11/12, M6 task 4). Only the distiller's endorsed branch records here —
+    an agree-from-review capture is user-vetted and deliberately does NOT, keeping the list
+    auto-endorsed only. Idempotent (the capture id is deterministic — a re-distill collapses)."""
+
+    async def record(self, capture_id: str, *, salience: str | None) -> None: ...
+
+
 @dataclass
 class SessionOutcome:
     """Per-session result — aggregated into the run summary + details (ADR-021 / vision P8)."""
@@ -264,6 +274,7 @@ class ChatDistillerService:
         review_queue: ReviewQueue,
         routing: ModelRoutingService,
         run_store: AgentRunStore,
+        auto_recorded: AutoRecordSink | None = None,
     ) -> None:
         self._settings = settings
         self._store = distill_store
@@ -271,6 +282,10 @@ class ChatDistillerService:
         self._review = review_queue
         self._routing = routing
         self._runs = run_store
+        # Audit registry for the "recently auto-recorded" list + one-tap remove (M6 task 4). None ⇒
+        # recording is skipped (older tests / a distiller built without the surface) — a best-effort
+        # audit trail, never load-bearing on the endorse itself (the capture is the durable record).
+        self._auto_recorded = auto_recorded
 
     async def run_scheduled(self) -> None:
         """Scheduler/CLI entry point. Opens the run, distills every due session, closes it; never
@@ -447,6 +462,7 @@ class ChatDistillerService:
                 capture_id = await self._ingest.create_chat_capture(
                     candidate.candidate_text, session_id=session.session_id, created_at=anchor
                 )
+                await self._record_auto_endorsed(capture_id, candidate.salience)
                 result.endorsed.append(capture_id)
             else:  # unclear
                 anchor = _anchor_time(candidate.evidence_excerpt, delta, default=anchor_default)
@@ -455,6 +471,19 @@ class ChatDistillerService:
                 )
                 if review_id is not None:
                     result.review.append(review_id)
+
+    async def _record_auto_endorsed(self, capture_id: str, salience: str | None) -> None:
+        """Register an auto-endorsed capture in the "recently auto-recorded" audit list (ADR-048
+        §12, M6 task 4). Best-effort (rule 7): the capture is already the durable record, so a
+        registry hiccup only costs the one-tap-remove affordance — it never fails the endorse."""
+        if self._auto_recorded is None:
+            return
+        try:
+            await self._auto_recorded.record(capture_id, salience=salience)
+        except Exception:  # noqa: BLE001 — the audit row is best-effort, never fails the run
+            logger.exception(
+                "chat-distiller: could not record auto-recorded %s (ignored)", capture_id
+            )
 
     async def _file_stance_candidate(
         self, session_id: str, candidate: DistillCandidate, anchor: datetime
@@ -636,6 +665,7 @@ def build_chat_distiller_service(
     from ..services.agent_runs import PgAgentRunStore
     from ..services.model_routing import build_model_routing
     from ..services.review_queue import PgReviewQueue
+    from .auto_recorded import PgAutoRecordedStore
     from .distill_store import PgChatDistillStore
 
     return ChatDistillerService(
@@ -645,4 +675,5 @@ def build_chat_distiller_service(
         review_queue=PgReviewQueue(db),
         routing=build_model_routing(settings, db, build_registry(settings)),
         run_store=PgAgentRunStore(db),
+        auto_recorded=PgAutoRecordedStore(db),
     )

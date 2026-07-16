@@ -29,6 +29,7 @@ from app.services.review_queue import KIND_STANCE_CANDIDATE
 
 from .fakes import (
     FakeAgentRunStore,
+    FakeAutoRecordedStore,
     FakeChatCaptureIngest,
     FakeChatDistillStore,
     FakeChatProvider,
@@ -71,6 +72,7 @@ def _service(
     available: bool = True,
     ingest_down: bool = False,
     settings: Settings | None = None,
+    auto_recorded=None,
 ):
     routing, provider = _routing(reply, available=available)
     store = FakeChatDistillStore(sessions=sessions, messages=messages)
@@ -84,6 +86,7 @@ def _service(
         review_queue=review,
         routing=routing,
         run_store=runs,
+        auto_recorded=auto_recorded,
     )
     return service, store, ingest, review, runs, provider
 
@@ -211,6 +214,50 @@ async def test_endorsed_candidate_materializes_capture_and_advances_watermark():
     run = _run(runs)
     assert run.agent == AGENT and run.status == "succeeded"
     assert run.details["endorsed"] == 1 and run.details["sessions_distilled"] == 1
+
+
+@pytest.mark.asyncio
+async def test_endorsed_candidate_is_recorded_in_the_audit_registry():
+    # M6 task 4 (ADR-048 §12): the endorsed branch registers the auto-endorsed capture (id + coarse
+    # salience) in the "recently auto-recorded" audit list, keyed to the same deterministic capture.
+    reply = (
+        '{"candidates": [{"candidate_text": "The user decided to raise prices.",'
+        '"stance": "endorsed", "salience": "high",'
+        '"evidence_excerpt": "yes let us raise prices", "referenced_entity_names": []}]}'
+    )
+    auto = FakeAutoRecordedStore()
+    service, _, ingest, _, _, _ = _service(
+        reply=reply, sessions=[_SESSION], messages=_DELTA, auto_recorded=auto
+    )
+
+    await service.run_scheduled()
+
+    cap_id = ingest.captures[0]["capture_id"]
+    assert auto.recorded == {cap_id: "high"}
+
+
+@pytest.mark.asyncio
+async def test_recording_hiccup_does_not_fail_the_endorse():
+    # The audit row is best-effort (rule 7): a registry that raises must not lose the endorse — the
+    # capture is still materialized and the watermark still advances.
+    class _BoomStore(FakeAutoRecordedStore):
+        async def record(self, capture_id: str, *, salience):
+            raise RuntimeError("registry boom")
+
+    reply = (
+        '{"candidates": [{"candidate_text": "The user decided to raise prices.",'
+        '"stance": "endorsed", "salience": "high",'
+        '"evidence_excerpt": "yes let us raise prices", "referenced_entity_names": []}]}'
+    )
+    service, store, ingest, _, runs, _ = _service(
+        reply=reply, sessions=[_SESSION], messages=_DELTA, auto_recorded=_BoomStore()
+    )
+
+    await service.run_scheduled()
+
+    assert len(ingest.captures) == 1  # endorse survived the registry failure
+    assert store.advanced  # watermark still advanced
+    assert _run(runs).status == "succeeded"
 
 
 @pytest.mark.asyncio

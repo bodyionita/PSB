@@ -19,6 +19,7 @@ import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from app.chat.auto_recorded import PgAutoRecordedStore
 from app.chat.distill_store import PgChatDistillStore
 from app.chat.store import PgChatStore
 from app.config import Settings
@@ -42,6 +43,7 @@ from app.services.agent_runs import (
     child_run_scope,
 )
 from app.services.capture_store import INDEXED, KIND_TEXT, PgCaptureStore
+from app.services.reprocess import PgReprocessStore
 from app.services.review_queue import KIND_STANCE_CANDIDATE, PgReviewQueue, ReviewItem
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
@@ -611,6 +613,71 @@ async def check_review_queue_reopen(db: Database) -> None:
         await db.pool.execute("DELETE FROM review_queue WHERE id = $1", rid)
 
 
+async def check_auto_recorded(db: Database) -> None:
+    """M6 task 4 (ADR-048 §11/§12): the real ``PgAutoRecordedStore`` (audit JOIN + tombstone) +
+    reprocess replay-exclusion — the un-fakeable ``chat_auto_recorded`` ⋈ ``captures`` ⋈ ``nodes``
+    LATERAL title pick, the ``removed_at`` tombstone, and ``capture_ids_chronological`` excluding it
+    (migration 014)."""
+    print("\n== PgAutoRecordedStore audit list + remove tombstone (M6 task 4 — migration 014) ==")
+    captures = PgCaptureStore(db)
+    auto = PgAutoRecordedStore(db, snippet_max=200)
+    reprocess = PgReprocessStore(db)
+    # An auto-endorsed chat capture pointing at the seeded MEM1 (content) + ALEX (a person hub —
+    # skipped by the title pick), plus a live control capture that must stay replayable.
+    rec_id = "cccccccc-0000-0000-0000-0000000000a1"
+    live_id = "cccccccc-0000-0000-0000-0000000000a2"
+    try:
+        await captures.create(
+            capture_id=rec_id, kind=KIND_TEXT, status=INDEXED,
+            raw_text="The user met Alex at the office.", source="chat", source_ref="smoke-sess",
+        )
+        await captures.set_node_paths(rec_id, ["smoke::memory/m1.md", "smoke::person/alex.md"])
+        await captures.create(
+            capture_id=live_id, kind=KIND_TEXT, status=INDEXED,
+            raw_text="A second chat memory.", source="chat", source_ref="smoke-sess",
+        )
+
+        await auto.record(rec_id, salience="high")
+        await auto.record(rec_id, salience="low")  # idempotent — ON CONFLICT DO NOTHING
+        check("record is idempotent + is_recorded true", await auto.is_recorded(rec_id))
+        check("a non-recorded capture is not is_recorded", not await auto.is_recorded(live_id))
+
+        items = await auto.list_recent(200, entity_types=["person"])
+        mine = next((i for i in items if i.capture_id == rec_id), None)
+        check("audit list joins the primary CONTENT node title (hub skipped)",
+              mine is not None and mine.title == "Met Alex at the office", str(mine))
+        check("audit item carries node_paths + salience + source_ref + snippet",
+              mine is not None
+              and mine.node_paths == ["smoke::memory/m1.md", "smoke::person/alex.md"]
+              and mine.salience == "high" and mine.source_ref == "smoke-sess"
+              and mine.snippet == "The user met Alex at the office.", str(mine))
+
+        # The live control capture has no chat_auto_recorded row → never in the audit list.
+        check("a non-auto-recorded chat capture is absent from the audit list",
+              all(i.capture_id != live_id for i in items), str([i.capture_id for i in items]))
+
+        tombstoned = await auto.tombstone(rec_id)
+        check("tombstone stamps removed_at (live row)", tombstoned is True)
+        again = await auto.tombstone(rec_id)
+        check("second tombstone is a no-op (already removed)", again is False)
+
+        after = await auto.list_recent(200, entity_types=["person"])
+        check("tombstoned item drops out of the audit list",
+              all(i.capture_id != rec_id for i in after), str([i.capture_id for i in after]))
+
+        # Reprocess replay-exclusion (the P10-preserving guarantee): the removed capture is skipped,
+        # the live one still replays. capture_ids_chronological is a GLOBAL read → assert subset.
+        ids = set(await reprocess.capture_ids_chronological())
+        check("reprocess excludes the tombstoned capture but keeps the live one",
+              rec_id not in ids and live_id in ids,
+              f"removed_in={rec_id in ids} live_in={live_id in ids}")
+    finally:
+        # chat_auto_recorded cascades on the capture delete (FK ON DELETE CASCADE).
+        await db.pool.execute(
+            "DELETE FROM captures WHERE id = ANY($1::uuid[])", [rec_id, live_id]
+        )
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -876,6 +943,7 @@ async def main() -> int:
         await check_agent_runs_linkage(db)
         await check_chat_distill(db)
         await check_review_queue_reopen(db)
+        await check_auto_recorded(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

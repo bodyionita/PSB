@@ -8,7 +8,9 @@ retained raw input through the current pipeline, rather than leaving old derived
       →  one force commit + push
 
 **Reset contract (ADR-042 §2, refined by ADR-048 §7).** *Always kept:* raw ``captures``
-(text/audio/source_ref) + the graph-store git history (deletions are unlinks). *Preserved (human
+(text/audio/source_ref) + the graph-store git history (deletions are unlinks) — but a **tombstoned**
+capture (``removed_at`` set by one-tap remove, ADR-048 §11) is **not replayed**, so a deliberately
+removed memory stays gone across a reprocess. *Preserved (human
 governance):* approved vocabulary additions (``app_settings``); **``stance-candidate`` review
 items** (their backing chat sessions are never touched by capture replay, and the watermark won't
 re-file them — a parked human decision must survive); standing merges are reported (re-apply is a
@@ -69,7 +71,8 @@ class ReprocessStore(Protocol):
     """The DB reset + capture-order reads the op relies on (plain SQL, ADR-011)."""
 
     async def counts(self) -> tuple[int, int]:
-        """``(captures, nodes)`` for the confirm-preview."""
+        """``(captures, nodes)`` for the confirm-preview — captures counts the *replayable* set
+        (tombstoned/removed captures excluded, matching :meth:`capture_ids_chronological`)."""
         ...
 
     async def count_merges(self) -> int:
@@ -84,7 +87,8 @@ class ReprocessStore(Protocol):
         ...
 
     async def capture_ids_chronological(self) -> list[str]:
-        """Every capture id, oldest first — the replay order (ADR-042 §1)."""
+        """Every *non-tombstoned* capture id, oldest first — the replay order (ADR-042 §1). A
+        one-tap-removed capture (``removed_at`` set, ADR-048 §11) is excluded — can't resurrect."""
         ...
 
 
@@ -268,7 +272,11 @@ class PgReprocessStore:
 
     async def counts(self) -> tuple[int, int]:
         async with self._db.acquire() as conn:
-            captures = await conn.fetchval("SELECT count(*) FROM captures")
+            # Tombstoned captures (one-tap remove, ADR-048 §11) are replay-excluded, so the
+            # preview's "captures to replay" must match `capture_ids_chronological` — exclude them.
+            captures = await conn.fetchval(
+                "SELECT count(*) FROM captures WHERE removed_at IS NULL"
+            )
             nodes = await conn.fetchval("SELECT count(*) FROM nodes")
         return int(captures or 0), int(nodes or 0)
 
@@ -294,7 +302,11 @@ class PgReprocessStore:
 
     async def capture_ids_chronological(self) -> list[str]:
         async with self._db.acquire() as conn:
-            rows = await conn.fetch("SELECT id FROM captures ORDER BY created_at ASC, id ASC")
+            # Skip tombstoned captures (one-tap remove, ADR-048 §11): the raw is retained but
+            # replay-excluded, so a deliberately removed memory can't resurrect on a reprocess.
+            rows = await conn.fetch(
+                "SELECT id FROM captures WHERE removed_at IS NULL ORDER BY created_at ASC, id ASC"
+            )
         return [str(r["id"]) for r in rows]
 
 

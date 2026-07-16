@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .chat.auto_recorded import AutoRecordedService, PgAutoRecordedStore
 from .chat.distill_store import PgChatDistillStore
 from .chat.distiller import ChatDistillerService
 from .chat.service import build_chat_service
@@ -258,10 +259,12 @@ async def lifespan(app: FastAPI):
     app.state.backfill_service = backfill_service
 
     # Capture pipeline (ADR-019/026/030): in-process, nodes-to-store, backed by the real store
-    # backup. The tag store feeds the organizer prompt the live vocabulary (ADR-024 §1).
+    # backup. The tag store feeds the organizer prompt the live vocabulary (ADR-024 §1). One shared
+    # capture store (reused by the one-tap-remove op's node_paths lookup, M6 task 4).
+    capture_store = PgCaptureStore(db)
     pipeline = CapturePipeline(
         settings=settings,
-        store=PgCaptureStore(db),
+        store=capture_store,
         routing=app.state.model_routing,
         registry=app.state.registry,
         node_writer=node_writer,
@@ -293,11 +296,28 @@ async def lifespan(app: FastAPI):
         chat_ingest=pipeline,
     )
 
+    # Auto-recorded registry (M6 task 4, ADR-048 §11/§12): backs the chat-scoped "recently auto-
+    # recorded" audit list + the one-tap-remove op. The distiller's endorsed branch records into it;
+    # the remove op tombstones the capture + deletes the content nodes (hubs preserved, ADR-038).
+    auto_recorded_store = PgAutoRecordedStore(
+        db, snippet_max=settings.search_snippet_max_chars
+    )
+    app.state.auto_recorded_service = AutoRecordedService(
+        settings=settings,
+        store=auto_recorded_store,
+        captures=capture_store,
+        index_store=index_store,
+        node_writer=node_writer,
+        store_backup=store_backup,
+        vocab=vocabulary_service,
+    )
+
     # Chat-distiller (M6, ADR-048): the stance-gated pass that turns idle chat sessions into
     # memories. Scheduled as a nightly pipeline step (task 8) and driven on demand by
     # `POST /chat/sessions/{id}/remember` (task 3). Built after the pipeline — its endorsed branch
     # materializes `source=chat` captures through it (the single writer, ADR-048 §1) — reusing the
-    # shared review queue / routing / run store.
+    # shared review queue / routing / run store, and recording each auto-endorse in the audit
+    # registry (task 4).
     app.state.chat_distiller_service = ChatDistillerService(
         settings=settings,
         distill_store=PgChatDistillStore(db),
@@ -305,6 +325,7 @@ async def lifespan(app: FastAPI):
         review_queue=review_queue,
         routing=app.state.model_routing,
         run_store=run_store,
+        auto_recorded=auto_recorded_store,
     )
 
     # Reprocess-all-from-raw (ADR-042, M3 task 11): the standing data-survival op. Constructed after

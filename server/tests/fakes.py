@@ -1093,6 +1093,32 @@ class FakeChatCaptureIngest:
         return capture_id
 
 
+class FakeAutoRecordedStore:
+    """In-memory AutoRecordedStore (M6 task 4): records auto-endorsed capture ids + salience, tracks
+    which are tombstoned. ``record`` is idempotent (ON CONFLICT DO NOTHING semantics)."""
+
+    def __init__(self) -> None:
+        self.recorded: dict[str, str | None] = {}  # capture_id → salience
+        self.tombstoned: set[str] = set()
+        self.list_calls: list[tuple[int, list[str]]] = []
+
+    async def record(self, capture_id: str, *, salience: str | None) -> None:
+        self.recorded.setdefault(capture_id, salience)
+
+    async def is_recorded(self, capture_id: str) -> bool:
+        return capture_id in self.recorded
+
+    async def tombstone(self, capture_id: str) -> bool:
+        if capture_id in self.tombstoned:
+            return False
+        self.tombstoned.add(capture_id)
+        return True
+
+    async def list_recent(self, limit, *, entity_types):
+        self.list_calls.append((limit, list(entity_types)))
+        return []
+
+
 class FakeCapsuleSourceStore:
     """In-memory CapsuleSourceStore (M5 task 2): returns preset hubs/memories/insights, bounded by
     the requested limit so a test can assert the config caps are honored."""

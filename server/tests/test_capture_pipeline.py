@@ -302,6 +302,38 @@ async def test_reorganize_replaces_nodes(tmp_path: Path):
     assert any(r.details.get("kind", "").endswith("-reorganize") for r in runs.runs.values())
 
 
+async def test_reorganize_refuses_a_removed_capture(tmp_path: Path):
+    # ADR-048 §11 (M6 task 4): a one-tap-removed capture must NOT be resurrected by any replay —
+    # the admin reorganize (and the §10 inbox drainer that drives it) skip a tombstoned capture,
+    # so its git-rm'd nodes are never re-materialized (same exclusion reprocess-all applies).
+    def responder(messages):
+        if "organize a person's raw capture" in messages[0].content:
+            responder.calls += 1
+            return _organizer_json(title="Resurrected")
+        return "nudge?"
+
+    responder.calls = 0
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, store, _, runs, root = _make_pipeline(tmp_path, chat=chat)
+
+    cid = await pipeline.create_text_capture("some raw text", created_at=CREATED)
+    await pipeline.drain()
+    original = store.records[cid].node_paths[0]
+    organize_calls = responder.calls
+
+    # Tombstone the capture (as one-tap remove would) and attempt an admin reorganize.
+    store.records[cid].removed_at = datetime(2026, 7, 16, tzinfo=UTC)
+    await pipeline.reorganize_capture(cid)
+    await pipeline.drain()
+
+    # No re-organize ran; node_paths untouched; the attempt is logged as a skip.
+    assert responder.calls == organize_calls
+    assert store.records[cid].node_paths == [original]
+    assert any(
+        r.status == "skipped" and "removed" in (r.summary or "") for r in runs.runs.values()
+    )
+
+
 def _organizer_json_entity(title: str, entity_name: str = "Alex") -> str:
     node = {
         "title": title, "type": "memory", "plane": "Ideas", "planes": ["Ideas"],

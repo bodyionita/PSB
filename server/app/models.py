@@ -244,6 +244,22 @@ class RememberResponse(BaseModel):
     skipped: str | None = None
 
 
+class AutoRecordedItem(BaseModel):
+    """One auto-endorsed chat memory in the "recently auto-recorded" audit list (GET
+    /chat/auto-recorded, ADR-048 §12 / M6 task 4). Feeds the one-tap-remove surface. ``node_paths``
+    is empty + ``title`` null until the background organize lands; ``snippet`` previews the endorsed
+    statement; ``source_ref`` is the originating chat-session id; ``salience`` is the distiller's
+    coarse triage tag."""
+
+    capture_id: str
+    node_paths: list[str] = Field(default_factory=list)
+    title: str | None = None
+    snippet: str
+    salience: str | None = None
+    source_ref: str | None = None
+    created_at: datetime | None = None
+
+
 # --- Settings: model routing (03-api.md §Settings, ADR-025 / ADR-043) ---
 class RoutingModelItem(BaseModel):
     """A pickable chat model for a routing group's dropdowns (GET /settings). ``id`` is the MODEL id

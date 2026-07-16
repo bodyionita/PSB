@@ -375,6 +375,9 @@ class Settings(BaseSettings):
     # Bound on the candidates accepted from one distill response (guards a runaway model). The
     # surplus beyond it is dropped-and-logged.
     chat_distill_max_candidates: int = 20
+    # Bound on the chat-scoped "recently auto-recorded" audit list (GET /chat/auto-recorded, ADR-048
+    # §12 / M6 task 4). The one-tap-remove surface; the general Activity feed (M8) absorbs it later.
+    chat_auto_recorded_list_max: int = 100
 
     # --- MCP OAuth 2.1 authorization server (M5 task 3, ADR-046 §2). The `api` app is both the
     # authorization server and the resource server for the MCP surface; tokens are opaque + HMAC-

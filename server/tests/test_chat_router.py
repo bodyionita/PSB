@@ -10,10 +10,12 @@ import uuid
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.chat.auto_recorded import AutoRecordedItem, AutoRecordNotFound
 from app.chat.distiller import RememberOutcome, SessionNotFound
 from app.chat.service import ChatService
 from app.config import Settings
 from app.dependencies import (
+    get_auto_recorded_service,
     get_chat_distiller_service,
     get_chat_service,
     get_model_routing,
@@ -222,6 +224,89 @@ def test_remember_malformed_session_id_is_422():
     resp = _remember_client(distiller).post(f"{PREFIX}/chat/sessions/not-a-uuid/remember")
     assert resp.status_code == 422
     assert distiller.calls == []  # never reached the service
+
+
+# --- GET /chat/auto-recorded + POST .../remove (M6 task 4, ADR-048 §11/§12) ----------------------
+
+
+class _StubAutoRecorded:
+    """A stand-in AutoRecordedService for the router's HTTP mapping — the list/remove logic is
+    covered in test_auto_recorded; here we only assert wire shape + error/limit mapping."""
+
+    def __init__(
+        self, *, items: list[AutoRecordedItem] | None = None, not_found: bool = False
+    ) -> None:
+        self._items = items or []
+        self._not_found = not_found
+        self.list_calls: list[int | None] = []
+        self.remove_calls: list[str] = []
+
+    async def list_recent(self, limit: int | None = None) -> list[AutoRecordedItem]:
+        self.list_calls.append(limit)
+        return self._items
+
+    async def remove(self, capture_id: str) -> None:
+        self.remove_calls.append(capture_id)
+        if self._not_found:
+            raise AutoRecordNotFound(capture_id)
+
+
+def _auto_client(service: _StubAutoRecorded) -> TestClient:
+    app = FastAPI()
+    app.include_router(chat_router.router, prefix=PREFIX)
+    app.dependency_overrides[get_auto_recorded_service] = lambda: service
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def _item(cid: str) -> AutoRecordedItem:
+    return AutoRecordedItem(
+        capture_id=cid,
+        node_paths=[f"memory/2026-07-16--m--{cid}.md"],
+        title="The user decided X",
+        snippet="The user decided X.",
+        salience="high",
+        source_ref="sess-1",
+        created_at=None,
+    )
+
+
+def test_get_auto_recorded_lists_items_and_forwards_limit():
+    stub = _StubAutoRecorded(items=[_item("c1"), _item("c2")])
+    resp = _auto_client(stub).get(f"{PREFIX}/chat/auto-recorded?limit=25")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["capture_id"] for i in body] == ["c1", "c2"]
+    assert body[0]["salience"] == "high"
+    assert body[0]["node_paths"] == ["memory/2026-07-16--m--c1.md"]
+    assert stub.list_calls == [25]
+
+
+def test_get_auto_recorded_rejects_out_of_range_limit():
+    stub = _StubAutoRecorded()
+    assert _auto_client(stub).get(f"{PREFIX}/chat/auto-recorded?limit=0").status_code == 422
+    assert _auto_client(stub).get(f"{PREFIX}/chat/auto-recorded?limit=99999").status_code == 422
+
+
+def test_remove_auto_recorded_returns_204():
+    stub = _StubAutoRecorded()
+    cid = str(uuid.uuid4())
+    resp = _auto_client(stub).post(f"{PREFIX}/chat/auto-recorded/{cid}/remove")
+    assert resp.status_code == 204
+    assert stub.remove_calls == [cid]
+
+
+def test_remove_auto_recorded_unknown_is_404():
+    stub = _StubAutoRecorded(not_found=True)
+    resp = _auto_client(stub).post(f"{PREFIX}/chat/auto-recorded/{uuid.uuid4()}/remove")
+    assert resp.status_code == 404
+
+
+def test_remove_auto_recorded_malformed_id_is_422():
+    stub = _StubAutoRecorded()
+    resp = _auto_client(stub).post(f"{PREFIX}/chat/auto-recorded/not-a-uuid/remove")
+    assert resp.status_code == 422
+    assert stub.remove_calls == []  # never reached the service
 
 
 # --- GET /chat/models -----------------------------------------------------------------------------

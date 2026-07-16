@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, Request, status
 
+from .chat.auto_recorded import AutoRecordedService
 from .chat.distiller import ChatDistillerService
 from .chat.service import ChatService
 from .config import Settings
@@ -88,6 +89,10 @@ def get_chat_service(request: Request) -> ChatService:
 
 def get_chat_distiller_service(request: Request) -> ChatDistillerService:
     return request.app.state.chat_distiller_service
+
+
+def get_auto_recorded_service(request: Request) -> AutoRecordedService:
+    return request.app.state.auto_recorded_service
 
 
 def get_derived_edge_graph(request: Request) -> DerivedEdgeGraph:
