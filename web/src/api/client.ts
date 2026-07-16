@@ -17,6 +17,8 @@ import type {
   LoginResponse,
   MeResponse,
   ModelRoutingUpdate,
+  NeighborPageResponse,
+  NeighborZonesResponse,
   NodeDetailResponse,
   PlanesResponse,
   ProvidersResponse,
@@ -117,6 +119,17 @@ export const api = {
     }),
   getNode: (id: string) =>
     request<NodeDetailResponse>(`/nodes/${encodeURIComponent(id)}`),
+
+  // --- Map / neighbors (03-api.md §Search & graph, M7 / ADR-051 + ADR-052) ---
+  // No `rel` → the grouped first page (one zone per rel, each capped + total + next_cursor). With
+  // `rel` (+ optional cursor) → that single zone's next flat "show more" page.
+  nodeNeighbors: (id: string) =>
+    request<NeighborZonesResponse>(`/nodes/${encodeURIComponent(id)}/neighbors`),
+  nodeNeighborPage: (id: string, rel: string, cursor?: string | null) =>
+    request<NeighborPageResponse>(
+      `/nodes/${encodeURIComponent(id)}/neighbors?rel=${encodeURIComponent(rel)}` +
+        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''),
+    ),
 
   // --- Chat (03-api.md §Chat, M4 / ADR-025) ---
   chat: (body: ChatRequest) =>

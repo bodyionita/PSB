@@ -6,6 +6,7 @@ import { NodePreview, PlaneBadge } from '../../ui/NodePreview';
 import { baseName } from '../../ui/nodeDetail';
 import { Surface } from '../../ui/Surface';
 import { typeIcon, typeLabel } from '../../ui/nodeTypes';
+import { useMapNav } from '../map/mapNav';
 import { usePlanes, useSearch, useTypes, type Submitted } from './useSearch';
 
 // Search tab (06 §5): semantic search over the whole graph — no LLM. Query box + plane/type filter
@@ -49,6 +50,7 @@ function TagRow({ tags }: { tags: string[] }) {
 
 function NodeCard({ hit }: { hit: SearchResultItem }) {
   const [open, setOpen] = useState(false);
+  const mapNav = useMapNav();
   const title = hit.title ?? baseName(hit.store_path);
 
   return (
@@ -117,8 +119,32 @@ function NodeCard({ hit }: { hit: SearchResultItem }) {
           <TagRow tags={hit.tags} />
         </button>
 
+        {mapNav && (
+          <div style={{ marginTop: 12 }}>
+            <button
+              onClick={() => mapNav.openInMap(hit.node_id)}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                padding: '5px 12px',
+                borderRadius: 999,
+                border: '1px solid var(--surface-border)',
+                background: 'transparent',
+                color: 'var(--accent)',
+              }}
+            >
+              <span aria-hidden>✷</span> Explore in map
+            </button>
+          </div>
+        )}
+
         <AnimatePresence initial={false}>
-          {open && <NodePreview nodeId={hit.node_id} />}
+          {open && (
+            <NodePreview nodeId={hit.node_id} onOpenNode={mapNav ? mapNav.openInMap : undefined} />
+          )}
         </AnimatePresence>
       </Surface>
     </motion.div>

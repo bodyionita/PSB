@@ -4,6 +4,7 @@ import type { ChatSessionItem, ChatSourceItem } from '../../api/types';
 import { NodePreview, PlaneBadge } from '../../ui/NodePreview';
 import { baseName } from '../../ui/nodeDetail';
 import { Surface } from '../../ui/Surface';
+import { useMapNav } from '../map/mapNav';
 import { typeIcon, typeLabel } from '../../ui/nodeTypes';
 // usePlanes is the canonical meta read (shared cache key ['planes']); reused here for the composer's
 // retrieval-scoping chips rather than re-declared.
@@ -159,6 +160,7 @@ function SourceCard({
   onToggle: () => void;
   cardRef: (el: HTMLDivElement | null) => void;
 }) {
+  const mapNav = useMapNav();
   const title = source.title ?? baseName(source.store_path);
   const plane = source.planes[0] ?? null;
   return (
@@ -233,7 +235,9 @@ function SourceCard({
           </p>
         </button>
         <AnimatePresence initial={false}>
-          {open && <NodePreview nodeId={source.node_id} />}
+          {open && (
+            <NodePreview nodeId={source.node_id} onOpenNode={mapNav ? mapNav.openInMap : undefined} />
+          )}
         </AnimatePresence>
       </Surface>
     </div>

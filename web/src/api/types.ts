@@ -116,6 +116,60 @@ export interface NodeDetailResponse {
   edges: NodeEdgeItem[];
 }
 
+// --- Map / neighbors (03-api.md §Search & graph, M7 / ADR-051 + ADR-052) ---
+// One 1-hop neighbor in a map zone or "show more" page. Carries origin/dir/score/since/until plus
+// the endpoint's type/title/plane so the canvas renders arrowheads, faint-derived + dashed-superseded
+// (until) edges and the node mark (emoji=type, colour=plane) without a second fetch.
+export interface MapNeighborItem {
+  origin: 'canonical' | 'derived';
+  rel: string;
+  dir: 'out' | 'in';
+  node_id: string;
+  type: string | null;
+  title: string | null;
+  plane: string | null;
+  score: number | null;
+  since: string | null;
+  until: string | null;
+}
+
+// One `rel` zone of a center's neighborhood, capped at `map_zone_fanout` (ADR-052: keyed by `rel` —
+// the sole dual-origin rel `similar` collapses to one zone; each neighbor's own `origin` carries the
+// solid/faint styling, so there is no zone-level origin). `total` drives "show N more of M";
+// `next_cursor` pages the single-zone "show more" (null when the zone fit).
+export interface MapZone {
+  rel: string;
+  neighbors: MapNeighborItem[];
+  total: number;
+  next_cursor: string | null;
+}
+
+// The focal node's render header echoed by the grouped neighbors response.
+export interface NeighborCenter {
+  node_id: string;
+  type: string;
+  title: string | null;
+  plane: string | null;
+  planes: string[];
+}
+
+// Grouped first page of GET /nodes/{id}/neighbors (no `rel`). `center` is null + `zones` empty when
+// the node is unknown (empty neighborhood).
+export interface NeighborZonesResponse {
+  center: NeighborCenter | null;
+  zones: MapZone[];
+}
+
+// A single zone's flat "show more" page — GET /nodes/{id}/neighbors?rel=… — thin over the M5
+// rel-filtered keyset. `next_cursor` is null at the zone's end.
+export interface NeighborPageResponse {
+  center_id: string;
+  rel: string;
+  direction: string;
+  neighbors: MapNeighborItem[];
+  next_cursor: string | null;
+}
+
 // --- Chat (03-api.md §Chat, M4 / ADR-025 / ADR-043) ---
 // One cited node backing a chat answer — cited-only, renumbered `[1..m]` to match the answer's
 // inline markers. Shape mirrors the persisted source jsonb (GET /chat/sessions/{id}) and the live

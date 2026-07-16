@@ -48,30 +48,38 @@ function SectionLabel({ children }: { children: string }) {
   );
 }
 
-// One edge rendered as a jump-off chip (the Map makes these navigable at M7). Canonical edges are
-// solid + labelled by their `rel`; derived similarity edges are faint.
-function EdgeChip({ edge }: { edge: NodeEdgeItem }) {
+// One edge rendered as a jump-off chip. When `onOpen` is provided (the Map, and any surface that
+// wants the edges navigable — ADR-051 §8), the chip is a button that opens/re-centers on the other
+// endpoint; otherwise it's a static label. Canonical edges are solid + labelled by their `rel`;
+// derived similarity edges are faint.
+function EdgeChip({
+  edge,
+  onOpen,
+}: {
+  edge: NodeEdgeItem;
+  onOpen?: (nodeId: string) => void;
+}) {
   const derived = edge.origin === 'derived';
   const arrow = edge.dir === 'in' ? '←' : '→';
-  return (
-    <span
-      title={`${edge.dir === 'in' ? 'from' : 'to'} ${edge.title ?? edge.node_id}${
-        edge.since ? ` · since ${edge.since}` : ''
-      }`}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        fontSize: 12,
-        color: derived ? 'var(--muted)' : 'var(--text)',
-        background: 'var(--surface)',
-        border: derived ? '1px dashed var(--surface-border)' : '1px solid var(--surface-border)',
-        borderRadius: 999,
-        padding: '4px 10px',
-        maxWidth: '100%',
-        opacity: derived ? 0.75 : 1,
-      }}
-    >
+  const style = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: 12,
+    color: derived ? 'var(--muted)' : 'var(--text)',
+    background: 'var(--surface)',
+    border: derived ? '1px dashed var(--surface-border)' : '1px solid var(--surface-border)',
+    borderRadius: 999,
+    padding: '4px 10px',
+    maxWidth: '100%',
+    opacity: derived ? 0.75 : 1,
+    textAlign: 'left' as const,
+  };
+  const title = `${edge.dir === 'in' ? 'from' : 'to'} ${edge.title ?? edge.node_id}${
+    edge.since ? ` · since ${edge.since}` : ''
+  }`;
+  const inner = (
+    <>
       <span aria-hidden style={{ fontSize: 10, color: 'var(--muted)' }}>
         {arrow}
       </span>
@@ -97,12 +105,38 @@ function EdgeChip({ edge }: { edge: NodeEdgeItem }) {
       >
         {edge.title ?? baseName(edge.node_id)}
       </span>
+    </>
+  );
+
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        title={title}
+        onClick={() => onOpen(edge.node_id)}
+        style={{ ...style, color: derived ? 'var(--muted)' : 'var(--text)', cursor: 'pointer' }}
+      >
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <span title={title} style={style}>
+      {inner}
     </span>
   );
 }
 
 // The animated read-only preview shown when a card is expanded. Fetches its own node detail lazily.
-export function NodePreview({ nodeId }: { nodeId: string }) {
+// `onOpenNode` (optional) makes the edge chips navigable — Search/Chat pass it to jump into the Map,
+// the Map passes it to re-center (ADR-051 §8). Omitted ⇒ static edge labels (unchanged behaviour).
+export function NodePreview({
+  nodeId,
+  onOpenNode,
+}: {
+  nodeId: string;
+  onOpenNode?: (nodeId: string) => void;
+}) {
   const { data, isLoading, isError } = useNode(nodeId);
 
   if (isLoading) {
@@ -176,7 +210,7 @@ export function NodePreview({ nodeId }: { nodeId: string }) {
             <SectionLabel>Connections</SectionLabel>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {canonical.map((e) => (
-                <EdgeChip key={`${e.dir}:${e.rel}:${e.node_id}`} edge={e} />
+                <EdgeChip key={`${e.dir}:${e.rel}:${e.node_id}`} edge={e} onOpen={onOpenNode} />
               ))}
             </div>
           </div>
@@ -187,7 +221,7 @@ export function NodePreview({ nodeId }: { nodeId: string }) {
             <SectionLabel>Similar</SectionLabel>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {derived.map((e) => (
-                <EdgeChip key={`${e.dir}:sim:${e.node_id}`} edge={e} />
+                <EdgeChip key={`${e.dir}:sim:${e.node_id}`} edge={e} onOpen={onOpenNode} />
               ))}
             </div>
           </div>
