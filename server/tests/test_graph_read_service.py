@@ -189,7 +189,7 @@ async def test_neighbors_unknown_node_is_empty_page():
 # --- neighbor_zones (M7 map grouped mode, ADR-051 §2) ---------------------------------------
 
 
-async def test_neighbor_zones_groups_by_origin_rel_with_center():
+async def test_neighbor_zones_groups_by_rel_with_center():
     edges = {
         "c1": [
             _edge("p2", rel="at"),
@@ -201,15 +201,48 @@ async def test_neighbor_zones_groups_by_origin_rel_with_center():
     service, _, _ = _service(edges=edges, headers={"c1": _header("c1")})
     result = await service.neighbor_zones("c1")
     assert result.center is not None and result.center.node_id == "c1"
-    # Zones are one per (origin, rel), ordered by (origin, rel).
-    assert [(z.origin, z.rel) for z in result.zones] == [
-        ("canonical", "at"),
-        ("canonical", "involves"),
-        ("derived", "similar"),
-    ]
+    # Zones are one per rel, ordered by rel (ADR-052) — no zone-level origin.
+    assert [z.rel for z in result.zones] == ["at", "involves", "similar"]
     involves = result.zones[1]
-    assert [e.node_id for e in involves.neighbors] == ["m1", "m3"]  # (dir,id): in<out
+    assert [e.node_id for e in involves.neighbors] == ["m1", "m3"]  # (origin,dir,id): in<out
     assert involves.total == 2 and involves.next_cursor is None
+
+
+async def test_neighbor_zones_merges_dual_origin_similar_into_one_zone():
+    # ADR-052 / review Finding 1: canonical `similar` (a human link) + derived `similar` (recompute)
+    # collapse into ONE zone, canonical ordered first; each neighbor keeps its own origin.
+    edges = {
+        "c1": [
+            _edge("d1", origin="derived", rel="similar"),
+            _edge("k1", origin="canonical", rel="similar"),
+        ]
+    }
+    service, _, _ = _service(edges=edges, headers={"c1": _header("c1")})
+    result = await service.neighbor_zones("c1")
+    assert [z.rel for z in result.zones] == ["similar"]  # one zone, not two
+    zone = result.zones[0]
+    pairs = [(e.origin, e.node_id) for e in zone.neighbors]
+    assert pairs == [("canonical", "k1"), ("derived", "d1")]
+    assert zone.total == 2 and zone.next_cursor is None
+
+
+async def test_neighbor_zones_dual_origin_similar_cursor_resumes_across_origins():
+    # The Finding-1 fix in action: fanout caps the first page to canonical-similar; the rel-only
+    # "show more" resumes strictly into derived-similar with no bleed and no duplicate.
+    edges = {
+        "c1": [
+            _edge("k1", origin="canonical", rel="similar"),
+            _edge("k2", origin="canonical", rel="similar"),
+            _edge("d1", origin="derived", rel="similar"),
+        ]
+    }
+    service, _, _ = _service(edges=edges, headers={"c1": _header("c1")}, zone_fanout=2)
+    zone = (await service.neighbor_zones("c1")).zones[0]
+    assert [e.node_id for e in zone.neighbors] == ["k1", "k2"]  # canonical first, capped at 2
+    assert zone.total == 3 and zone.next_cursor is not None
+    page = await service.neighbors("c1", rel="similar", cursor=zone.next_cursor)
+    assert [e.node_id for e in page.neighbors] == ["d1"]  # resumes into derived, no dup/bleed
+    assert page.next_cursor is None
 
 
 async def test_neighbor_zones_caps_each_zone_with_total_and_cursor():

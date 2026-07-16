@@ -232,12 +232,11 @@ def test_neighbors_grouped_returns_center_and_zones():
     assert resp.status_code == 200
     body = resp.json()
     assert body["center"]["node_id"] == _C1 and body["center"]["plane"] == "Work"
-    assert [(z["origin"], z["rel"]) for z in body["zones"]] == [
-        ("canonical", "at"),
-        ("canonical", "involves"),
-    ]
+    assert [z["rel"] for z in body["zones"]] == ["at", "involves"]  # rel-keyed (ADR-052)
+    assert "origin" not in body["zones"][0]  # no zone-level origin
     n = body["zones"][0]["neighbors"][0]
     assert n["node_id"] == _N1 and n["plane"] == "Work" and n["dir"] == "out"
+    assert n["origin"] == "canonical"  # per-neighbor origin drives styling
 
 
 def test_neighbors_zone_overflow_carries_total_and_cursor():

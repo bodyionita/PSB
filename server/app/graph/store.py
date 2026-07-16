@@ -142,10 +142,11 @@ class NeighborHeader:
 
 @dataclass(frozen=True)
 class ZonedNeighbor:
-    """One neighbor of a center, tagged with its ``(origin, rel)`` zone's full size (M7 grouped).
+    """One neighbor of a center, tagged with its ``rel`` zone's full size (M7 grouped, ADR-052).
 
     ``edge`` is the neighbor itself (capped to the zone fanout by the query); ``zone_total`` is the
-    count of *all* neighbors in this ``(origin, rel)`` zone — feeds the per-zone "show N of M"."""
+    count of *all* neighbors in this ``rel`` zone (both origins for ``similar``) — feeds "show N of
+    M". Zones are keyed by ``rel`` alone; the neighbor's own ``origin`` carries the styling."""
 
     edge: NeighborEdge
     zone_total: int
@@ -186,12 +187,13 @@ class NeighborStore(Protocol):
         direction: str | None,
         fanout: int,
     ) -> list[ZonedNeighbor]:
-        """All of ``node_id``'s ``(origin, rel)`` zones, each capped to the first ``fanout`` rows.
+        """All of ``node_id``'s ``rel`` zones, each capped to the first ``fanout`` rows (ADR-052).
 
-        Rows are ordered by ``(origin, rel, dir, node_id)`` (so consecutive rows share a zone) and
-        each carries its zone's full ``zone_total`` (unaffected by the cap) for the "show more".
-        ``direction`` (``out``/``in``, ``None`` = both) scopes both the neighbors and the totals.
-        Tombstoned endpoints are excluded (both ends); ``until``-closed edges are returned."""
+        Rows are ordered by ``(rel, origin, dir, node_id)`` (so consecutive rows share a rel zone;
+        canonical before derived within a rel) and each carries its zone's full ``zone_total``
+        (unaffected by the cap) for the "show more". ``direction`` (``out``/``in``, ``None`` = both)
+        scopes both the neighbors and the totals. Tombstoned endpoints are excluded (both ends);
+        ``until``-closed edges are returned."""
         ...
 
 
@@ -274,13 +276,16 @@ class PgNeighborStore:
         direction: str | None,
         fanout: int,
     ) -> list[ZonedNeighbor]:
-        # The same both-directions union as `neighbors`, but window-ranked per `(origin, rel)` zone:
-        # ROW_NUMBER caps each zone to its first `fanout` neighbors (same `(dir, node_id)` order as
-        # the keyset); COUNT(*) OVER the same partition carries the zone's true size for the cursor.
-        # The direction filter sits in `ranked`'s WHERE, which SQL evaluates *before* the window
-        # functions, so both the ranking and the count are scoped to the requested direction. One
-        # round-trip returns every zone already capped — no per-zone query, bounded regardless of a
-        # hub's degree.
+        # The same both-directions union as `neighbors`, but window-ranked per `rel` zone (ADR-052:
+        # zones are keyed by rel, so the sole dual-origin rel `similar` — canonical link + derived
+        # recompute — is one zone). ROW_NUMBER caps each zone to its first `fanout` neighbors and
+        # COUNT(*) OVER carries its true size, both PARTITION BY rel. The rank order is
+        # `(origin, dir, node_id)` — the M5 keyset `(origin, rel, dir, node_id)` with rel fixed —
+        # so canonical surfaces before derived and the per-zone next_cursor resumes the rel-only
+        # keyset exactly. The direction filter sits in `ranked`'s WHERE, which SQL evaluates before
+        # the window functions, so both the ranking and the count are direction-scoped. The outer
+        # ORDER BY leads with `rel` so each zone's rows are contiguous (the service groups by rel).
+        # One round-trip returns every zone already capped — bounded regardless of a hub's degree.
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -288,8 +293,9 @@ class PgNeighborStore:
                        zone_total
                 FROM (
                     SELECT origin, rel, dir, node_id, type, title, plane, score, since, until,
-                           ROW_NUMBER() OVER (PARTITION BY origin, rel ORDER BY dir, node_id) AS rn,
-                           COUNT(*)    OVER (PARTITION BY origin, rel) AS zone_total
+                           ROW_NUMBER() OVER (
+                               PARTITION BY rel ORDER BY origin, dir, node_id) AS rn,
+                           COUNT(*) OVER (PARTITION BY rel) AS zone_total
                     FROM (
                         SELECT e.origin, e.rel, 'out' AS dir, e.dst_id AS node_id,
                                n.type, n.title, n.plane, e.score, e.since, e.until
@@ -304,7 +310,7 @@ class PgNeighborStore:
                     WHERE ($2::text IS NULL OR dir = $2)
                 ) ranked
                 WHERE rn <= $3
-                ORDER BY origin, rel, dir, node_id
+                ORDER BY rel, origin, dir, node_id
                 """,
                 node_id,
                 direction,

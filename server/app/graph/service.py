@@ -99,13 +99,14 @@ class NeighborPage:
 
 @dataclass(frozen=True)
 class NeighborZone:
-    """One ``(origin, rel)`` zone of a center's neighborhood (M7 grouped map, ADR-051 §2).
+    """One ``rel`` zone of a center's neighborhood (M7 grouped map, ADR-052; was ``(origin, rel)``).
 
     ``neighbors`` is the first ``map_zone_fanout`` of the zone; ``total`` is the zone's full size;
     ``next_cursor`` is an opaque token for the zone's "show more" (``None`` when the zone fit) — it
-    feeds the single-zone ``GET /nodes/{id}/neighbors?rel=…&cursor=…`` page (the M5 primitive)."""
+    feeds the single-zone ``GET /nodes/{id}/neighbors?rel=…&cursor=…`` page (the M5 primitive). No
+    zone-level origin — the sole dual-origin rel ``similar`` is one zone; each neighbor's own
+    ``origin`` carries the render styling (ADR-051 §6)."""
 
-    origin: str
     rel: str
     neighbors: list[NeighborEdge]
     total: int
@@ -215,14 +216,16 @@ class GraphService:
         )
 
     async def neighbor_zones(self, node_id: str, *, direction: str = "both") -> NeighborZones:
-        """The grouped first page of ``node_id``'s neighborhood — one zone per ``(origin, rel)``,
-        each capped at ``map_zone_fanout`` (03-api §Nodes neighbors, ADR-051 §2).
+        """The grouped first page of ``node_id``'s neighborhood — one zone per ``rel``, each capped
+        at ``map_zone_fanout`` (03-api §Nodes neighbors, ADR-052).
 
         Backs the no-``rel`` mode of ``GET /nodes/{id}/neighbors``. Each zone carries its full
         ``total`` and a ``next_cursor`` (the M5 keyset of its last returned neighbor, ``None`` when
         the zone fit) so "show more" pages the rel via :meth:`neighbors` with no second neighborhood
-        fetch. ``direction`` is ``out``/``in``/``both``; an unknown node yields ``center=None`` and
-        empty ``zones``. Raises :class:`InvalidDirection` on bad input."""
+        fetch. Zones are keyed by ``rel`` alone, so the sole dual-origin rel ``similar`` is one zone
+        (ADR-052) and the rel-only "show more" cursor resumes it exactly. ``direction`` is
+        ``out``/``in``/``both``; an unknown node yields ``center=None`` and empty ``zones``. Raises
+        :class:`InvalidDirection` on bad input."""
         if direction not in self._DIRECTIONS:
             raise InvalidDirection(direction)
         center = await self._store.center_header(node_id)
@@ -232,19 +235,18 @@ class GraphService:
             fanout=self._zone_fanout,
         )
         zones: list[NeighborZone] = []
-        # Rows arrive ordered by (origin, rel, dir, node_id), so a zone is a run of consecutive rows
-        # sharing (origin, rel). groupby preserves that order; each zone keeps at most
-        # map_zone_fanout rows (the store capped it), and next_cursor points past the last returned
-        # row when the zone has more than were returned.
-        for (origin, rel), group in groupby(rows, key=lambda z: (z.edge.origin, z.edge.rel)):
+        # Rows arrive ordered by (rel, origin, dir, node_id), so a zone is a run of consecutive rows
+        # sharing `rel`. groupby preserves that order; each zone keeps at most map_zone_fanout rows
+        # (the store capped it), and next_cursor points past the last returned row when the zone has
+        # more than were returned. The last returned row is the fanout-th in (origin, dir, node_id)
+        # order, whose (origin, rel, dir, node_id) keyset the rel-only "show more" resumes past.
+        for rel, group in groupby(rows, key=lambda z: z.edge.rel):
             items = list(group)
             edges = [z.edge for z in items]
             total = items[0].zone_total
             next_cursor = _encode_cursor(edges[-1]) if total > len(edges) else None
             zones.append(
-                NeighborZone(
-                    origin=origin, rel=rel, neighbors=edges, total=total, next_cursor=next_cursor
-                )
+                NeighborZone(rel=rel, neighbors=edges, total=total, next_cursor=next_cursor)
             )
         return NeighborZones(center=center, zones=zones)
 

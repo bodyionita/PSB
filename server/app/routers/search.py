@@ -183,7 +183,6 @@ async def node_neighbors(
         center=center,
         zones=[
             MapZone(
-                origin=z.origin,
                 rel=z.rel,
                 neighbors=[_map_neighbor(e) for e in z.neighbors],
                 total=z.total,

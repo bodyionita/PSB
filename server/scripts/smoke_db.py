@@ -1132,9 +1132,10 @@ async def check_neighbor_zones(db: Database) -> None:
     place = "ffffffff-0000-0000-0000-0000000000c1"  # place — out/at zone (current)
     sim = "ffffffff-0000-0000-0000-0000000000c2"  # derived-similar target
     past = "ffffffff-0000-0000-0000-0000000000c3"  # place — a superseded (until-closed) at edge
+    ksim = "ffffffff-0000-0000-0000-0000000000c4"  # canonical-similar target (a human ADR-049 link)
     tomb = "ffffffff-0000-0000-0000-0000000000cf"  # tombstoned — endpoint excluded both ends
     mems = [f"ffffffff-0000-0000-0000-0000000000d{i}" for i in range(5)]  # involves -> C (inbound)
-    ids = [c, place, sim, past, tomb, *mems]
+    ids = [c, place, sim, past, ksim, tomb, *mems]
     try:
         async with db.transaction() as conn:
             await conn.execute(
@@ -1151,7 +1152,9 @@ async def check_neighbor_zones(db: Database) -> None:
                  ($4,'ffffffff::person/tomb.md','person','Tomb','personal','{personal}','{}','{}',
                   $1,'h_tomb',$5,$5),
                  ($6,'ffffffff::place/past.md','place','Past','personal','{personal}','{}','{}',
-                  NULL,'h_past',$5,$5)
+                  NULL,'h_past',$5,$5),
+                 ($7,'ffffffff::memory/ksim.md','memory','KLink','personal','{personal}','{}','{}',
+                  NULL,'h_ksim',$5,$5)
                 """,
                 c,
                 place,
@@ -1159,6 +1162,7 @@ async def check_neighbor_zones(db: Database) -> None:
                 tomb,
                 now,
                 past,
+                ksim,
             )
             await conn.executemany(
                 """
@@ -1185,6 +1189,7 @@ async def check_neighbor_zones(db: Database) -> None:
                  ($1,$2,'at','canonical',NULL,NULL,NULL),
                  ($1,$5,'at','canonical',NULL,'2020-01-01','2023-01-01'),
                  ($1,$3,'similar','derived',0.9,NULL,NULL),
+                 ($1,$6,'similar','canonical',NULL,NULL,NULL),
                  ($1,$4,'knows','canonical',NULL,NULL,NULL)
                 """,
                 c,
@@ -1192,6 +1197,7 @@ async def check_neighbor_zones(db: Database) -> None:
                 sim,
                 tomb,
                 past,
+                ksim,
             )
 
         rows = await store.neighbor_zones(c, direction=None, fanout=3)
@@ -1199,10 +1205,9 @@ async def check_neighbor_zones(db: Database) -> None:
         at_zone = [z for z in rows if z.edge.rel == "at"]
         similar = [z for z in rows if z.edge.rel == "similar"]
         check(
-            "zones = involves(in) + at(out) + derived similar; tombstoned 'knows' dst excluded",
-            {(z.edge.origin, z.edge.rel) for z in rows}
-            == {("canonical", "involves"), ("canonical", "at"), ("derived", "similar")},
-            str([(z.edge.origin, z.edge.rel, z.edge.node_id) for z in rows]),
+            "rel zones = {involves, at, similar}; tombstoned 'knows' dst excluded (ADR-052)",
+            {z.edge.rel for z in rows} == {"involves", "at", "similar"},
+            str(sorted({(z.edge.origin, z.edge.rel, z.edge.node_id) for z in rows})),
         )
         check(
             "involves zone capped to fanout (3 of 5), inbound, node_id-ordered, zone_total=5",
@@ -1230,11 +1235,11 @@ async def check_neighbor_zones(db: Database) -> None:
             str(past_edge),
         )
         check(
-            "derived similar is its own zone (origin=derived), zone_total 1",
-            [z.edge.node_id for z in similar] == [sim]
-            and similar[0].edge.origin == "derived"
-            and similar[0].zone_total == 1,
-            str(similar),
+            "canonical + derived similar MERGE to one rel zone, canonical first, total 2 (ADR-052)",
+            [(z.edge.origin, z.edge.node_id) for z in similar]
+            == [("canonical", ksim), ("derived", sim)]
+            and all(z.zone_total == 2 for z in similar),
+            str([(z.edge.origin, z.edge.node_id, z.zone_total) for z in similar]),
         )
         # Direction scoping: 'in' keeps only the involves zone; its total stays 5 (the out edges are
         # filtered before the window, so they neither rank nor count).

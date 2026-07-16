@@ -167,12 +167,13 @@ class MapNeighborItem(BaseModel):
 
 
 class MapZone(BaseModel):
-    """One ``(origin, rel)`` zone of a center's neighborhood, capped at ``map_zone_fanout``.
+    """One ``rel`` zone of a center's neighborhood, capped at ``map_zone_fanout`` (ADR-052).
 
-    ``total`` is the zone's full size (drives "show N more of M"); ``next_cursor`` is the token for
-    the single-zone ``?rel=…&cursor=…`` "show more" page (``None`` when the zone fit)."""
+    Keyed by ``rel`` alone — the sole dual-origin rel ``similar`` is one zone; each neighbor's own
+    ``origin`` carries the solid/faint styling, so there is no zone-level ``origin``. ``total`` is
+    the zone's full size (drives "show N more of M"); ``next_cursor`` is the token for the
+    single-zone ``?rel=…&cursor=…`` "show more" page (``None`` when the zone fit)."""
 
-    origin: str
     rel: str
     neighbors: list[MapNeighborItem] = Field(default_factory=list)
     total: int

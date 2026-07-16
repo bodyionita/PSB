@@ -370,25 +370,26 @@ class FakeNeighborStore:
         direction: str | None,
         fanout: int,
     ) -> list[ZonedNeighbor]:
-        # Mirror the real window query: scope by direction, then per (origin, rel) zone cap to the
-        # first `fanout` rows while carrying the zone's full size — so the service's grouping,
-        # per-zone cursor, and total logic is exercised for real, not stubbed.
+        # Mirror the real window query (ADR-052): scope by direction, then per `rel` zone cap to the
+        # first `fanout` rows (ordered origin, dir, node_id — canonical before derived) while
+        # carrying the zone's full size, emitted ordered (rel, origin, dir, node_id). Exercises the
+        # service's rel-grouping, per-zone cursor, and dual-origin `similar` merge for real.
         self.calls.append({"node_id": node_id, "direction": direction, "fanout": fanout})
         rows = self._sorted(node_id)
         if direction is not None:
             rows = [e for e in rows if e.dir == direction]
-        totals: dict[tuple[str, str], int] = {}
+        rows = sorted(rows, key=lambda e: (e.rel, e.origin, e.dir, e.node_id))
+        totals: dict[str, int] = {}
         for e in rows:
-            totals[(e.origin, e.rel)] = totals.get((e.origin, e.rel), 0) + 1
+            totals[e.rel] = totals.get(e.rel, 0) + 1
         out: list[ZonedNeighbor] = []
-        seen: dict[tuple[str, str], int] = {}
+        seen: dict[str, int] = {}
         for e in rows:
-            key = (e.origin, e.rel)
-            taken = seen.get(key, 0)
+            taken = seen.get(e.rel, 0)
             if taken >= fanout:
                 continue
-            seen[key] = taken + 1
-            out.append(ZonedNeighbor(edge=e, zone_total=totals[key]))
+            seen[e.rel] = taken + 1
+            out.append(ZonedNeighbor(edge=e, zone_total=totals[e.rel]))
         return out
 
 
