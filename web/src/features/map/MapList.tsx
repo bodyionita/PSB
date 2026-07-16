@@ -11,8 +11,8 @@ import { PlaneBadge } from '../../ui/NodePreview';
 import { baseName } from '../../ui/nodeDetail';
 import { typeIcon, typeLabel } from '../../ui/nodeTypes';
 
-// A rel-zone heading: humanised rel + true zone size ("similar · 12"). `similar` already reads as a
-// word; other rels swap underscores for spaces.
+// A rel-zone heading: the humanised rel (the true zone size renders separately in the <h2>).
+// `similar` already reads as a word; other rels swap underscores for spaces.
 function zoneHeading(rel: string): string {
   return rel.replace(/_/g, ' ');
 }
@@ -156,7 +156,15 @@ function NeighborRow({
   const derived = neighbor.origin === 'derived';
   const superseded = neighbor.until != null;
   const faint = derived || superseded;
-  const arrow = neighbor.dir === 'in' ? '←' : '→';
+  // A single edge-meta line, mutually exclusive by origin/temporal state (mirrors the canvas's
+  // one-style-per-edge choice). Derived similarity has no direction (symmetric) → no arrow.
+  const metaLabel = derived
+    ? 'similar'
+    : superseded
+      ? `until ${neighbor.until}`
+      : neighbor.since
+        ? `since ${neighbor.since}`
+        : null;
 
   return (
     <button
@@ -190,18 +198,15 @@ function NeighborRow({
         >
           {neighbor.title ?? baseName(neighbor.node_id)}
         </span>
-        {(derived || superseded || neighbor.since) && (
-          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-            {derived && 'similar'}
-            {superseded && `until ${neighbor.until}`}
-            {!derived && !superseded && neighbor.since && `since ${neighbor.since}`}
-          </span>
-        )}
+        {metaLabel && <span style={{ fontSize: 11, color: 'var(--muted)' }}>{metaLabel}</span>}
       </span>
       <PlaneBadge plane={neighbor.plane} />
-      <span aria-hidden style={{ color: 'var(--muted)', fontSize: 14, flexShrink: 0 }}>
-        {arrow}
-      </span>
+      {/* Direction arrow on canonical edges only — derived similarity is symmetric (ADR-051 §6). */}
+      {!derived && (
+        <span aria-hidden style={{ color: 'var(--muted)', fontSize: 14, flexShrink: 0 }}>
+          {neighbor.dir === 'in' ? '←' : '→'}
+        </span>
+      )}
     </button>
   );
 }
