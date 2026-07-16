@@ -70,13 +70,20 @@ async def run_pipeline(name: str) -> int:
     try:
         store_backup = StoreBackupService(settings=settings, git=GitRepo(settings.graph_store_path))
         await store_backup.ensure_ready()
+        # Effective vocabulary (seeds ∪ approved additions) so profile-refresh/backfill scan the
+        # same entity set the in-app nightly does (ADR-027 forward-live) — otherwise run-now would
+        # be seeds-only and under-count when a governance type was approved. Built as a provider.
+        from .vocab.service import VocabularyService
+        from .vocab.store import PgVocabularyStore
+
+        vocab = VocabularyService(settings=settings, vocab_store=PgVocabularyStore(db))
         scheduler = PipelineScheduler(
             settings=settings,
             jobs=build_backup_jobs(settings, db, store_backup),
             run_store=PgAgentRunStore(db),
             reindex=build_reindex_service(settings, db, store_backup),
-            profile_refresh=build_profile_refresh_service(settings, db),
-            backfill=build_backfill_service(settings, db, store_backup),
+            profile_refresh=build_profile_refresh_service(settings, db, vocab),
+            backfill=build_backfill_service(settings, db, store_backup, vocab),
             identity_capsule=build_identity_capsule_service(settings, db),
         )
         runners = {defn.name: runner for defn, runner in scheduler.pipeline_runners()}
@@ -139,7 +146,11 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     args = argv if argv is not None else sys.argv[1:]
     # `pipeline <name>` runs a whole pipeline once (ADR-047 run-now); everything else is one job.
+    # Validate the name up front so a typo fails fast, before any DB connect / store git init.
     if len(args) == 2 and args[0] == "pipeline":
+        if args[1] not in PIPELINES:
+            sys.stderr.write(f"usage: python -m app.cli pipeline {{{'|'.join(PIPELINES)}}}\n")
+            return 2
         return asyncio.run(run_pipeline(args[1]))
     if len(args) != 1 or args[0] not in JOBS:
         sys.stderr.write(

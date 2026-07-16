@@ -190,9 +190,13 @@ class BackfillService:
             logger.exception("could not close entity-backfill agent_runs row %s", run_id)
 
 
-def build_backfill_service(settings: Settings, db, store_backup: StoreCommitter) -> BackfillService:
-    """Construct a standalone backfill service for the CLI (``python -m app.cli
-    entity-backfill``)."""
+def build_backfill_service(
+    settings: Settings, db, store_backup: StoreCommitter, vocab: VocabularyProvider | None = None
+) -> BackfillService:
+    """Construct a standalone backfill service for the CLI (``python -m app.cli entity-backfill``).
+    ``vocab`` is the effective-vocabulary provider (seeds ∪ approved additions); ``None`` ⇒
+    seeds-only. The pipeline run-now passes a real provider so it scans the same entity set as the
+    in-app nightly."""
     from ..graph.node_writer import NodeWriter
     from ..indexing.indexer import Indexer
     from ..indexing.store import PgIndexStore
@@ -208,6 +212,7 @@ def build_backfill_service(settings: Settings, db, store_backup: StoreCommitter)
         indexer=Indexer(settings=settings, store=PgIndexStore(db), registry=registry),
         store_backup=store_backup,
         run_store=PgAgentRunStore(db),
+        vocab=vocab,
     )
 
 

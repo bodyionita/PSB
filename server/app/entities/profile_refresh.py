@@ -228,9 +228,13 @@ class ProfileRefreshService:
             logger.exception("could not close profile-refresh agent_runs row %s", run_id)
 
 
-def build_profile_refresh_service(settings: Settings, db) -> ProfileRefreshService:
+def build_profile_refresh_service(
+    settings: Settings, db, vocab: VocabularyProvider | None = None
+) -> ProfileRefreshService:
     """Construct a standalone profile-refresh service for the CLI (``python -m app.cli
-    profile-refresh``). Touches only the DB (no store git), so it needs no store backup."""
+    profile-refresh``). Touches only the DB (no store git), so it needs no store backup. ``vocab``
+    is the effective-vocabulary provider (seeds ∪ approved additions); ``None`` ⇒ seeds-only. The
+    pipeline run-now passes a real provider so it scans the same entities as the in-app nightly."""
     from ..providers.registry import build_registry
     from ..services.agent_runs import PgAgentRunStore
     from ..services.model_routing import build_model_routing
@@ -245,4 +249,5 @@ def build_profile_refresh_service(settings: Settings, db) -> ProfileRefreshServi
         routing=build_model_routing(settings, db, registry),
         registry=registry,
         run_store=PgAgentRunStore(db),
+        vocab=vocab,
     )

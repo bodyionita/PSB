@@ -19,6 +19,7 @@ def test_main_rejects_bad_args():
     assert main(["store-backup", "extra"]) == 2  # 2 args but not the `pipeline` verb → usage
     assert main(["pipeline"]) == 2  # `pipeline` needs a name
     assert main(["pipeline", "a", "b"]) == 2  # too many args
+    assert main(["pipeline", "bogus"]) == 2  # unknown pipeline name → fast-fail (no DB setup)
 
 
 def test_pipeline_names_match_the_config():

@@ -110,9 +110,13 @@ class VocabularyService:
         *,
         settings: Settings,
         vocab_store: VocabularyStore,
-        review_store: ReviewReadStore,
-        consolidation: ConsolidationLauncher,
+        review_store: ReviewReadStore | None = None,
+        consolidation: ConsolidationLauncher | None = None,
     ) -> None:
+        # `review_store`/`consolidation` are only used by the approve/reject + list_types paths;
+        # `effective()` needs just settings + vocab_store. They default to None so a standalone
+        # caller (the CLI run-now) can build this purely as a VocabularyProvider (ADR-027
+        # forward-live vocab) without wiring the review queue.
         self._settings = settings
         self._store = vocab_store
         self._review = review_store
