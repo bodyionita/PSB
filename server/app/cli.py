@@ -104,14 +104,13 @@ async def run_pipeline(name: str) -> int:
         # store backup after the run so this short-lived process commits their background work (the
         # in-app nightly's long-lived debounce owns that itself — the reprocess-all/CLI pattern).
         from .chat.distiller import build_chat_distiller_service
+        from .dedup.sweep import build_dedup_sweep_service
         from .inbox.drain import InboxDrainService
         from .services.capture_pipeline import build_capture_pipeline
         from .services.capture_store import PgCaptureStore
         from .services.maybe_digest import build_maybe_digest_service
 
         pipeline = build_capture_pipeline(settings, db, store_backup)
-        from .dedup.sweep import build_dedup_sweep_service
-
         scheduler = PipelineScheduler(
             settings=settings,
             jobs=build_backup_jobs(settings, db, store_backup),
@@ -137,11 +136,15 @@ async def run_pipeline(name: str) -> int:
             )
             return 2
         outcome = await runners[name].run()
-        # Drain the shared capture pipeline (background organizes from chat-distill / inbox-drain)
-        # then flush the store backup so this one-shot process commits the resolved nodes before it
-        # exits — the in-app nightly relies on its long-lived debounce instead (rule 6, idempotent).
-        await pipeline.drain()
-        await store_backup.backup_now(f"pipeline-{name}")
+        # Only the distiller + inbox-drain organize through the shared capture pipeline; drain it +
+        # flush the store backup solely when this pipeline actually ran one of them, so a one-shot
+        # process commits their background work before it exits (the in-app nightly relies on its
+        # long-lived debounce instead; rule 6, idempotent). A pipeline without them (e.g. `weekly`)
+        # skips this — no empty drain, no spurious `pipeline-<name>` backup commit/log.
+        ran = {s.name for s in outcome.steps} if outcome is not None else set()
+        if ran & {"chat-distiller", "inbox-drain"}:
+            await pipeline.drain()
+            await store_backup.backup_now(f"pipeline-{name}")
         if outcome is None:
             logger.error("pipeline %s did not run (could not open its parent run)", name)
             return 1
