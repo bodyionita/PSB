@@ -1120,6 +1120,127 @@ async def check_inbox_drain(db: Database) -> None:
         await db.pool.execute("DELETE FROM captures WHERE id = ANY($1::uuid[])", ids)
 
 
+async def check_neighbor_zones(db: Database) -> None:
+    """M7 task 1 (ADR-051 §2): the real ``PgNeighborStore.neighbor_zones`` window SQL + the light
+    ``center_header`` read — the un-fakeable per-``(origin, rel)`` ROW_NUMBER cap, the ``COUNT(*)
+    OVER`` zone total, direction scoping (filtered *before* the window so the count follows), and
+    tombstone exclusion. Seeds its own ``ffffffff::`` nodes/edges, cleaned up in a finally."""
+    print("\n== PgNeighborStore.neighbor_zones + center_header (M7 task 1 — grouped map SQL) ==")
+    store = PgNeighborStore(db)
+    now = datetime.now(UTC)
+    c = "ffffffff-0000-0000-0000-0000000000c0"  # center hub (person)
+    place = "ffffffff-0000-0000-0000-0000000000c1"  # place — out/at zone
+    sim = "ffffffff-0000-0000-0000-0000000000c2"  # derived-similar target
+    tomb = "ffffffff-0000-0000-0000-0000000000cf"  # tombstoned — endpoint excluded both ends
+    mems = [f"ffffffff-0000-0000-0000-0000000000d{i}" for i in range(5)]  # involves -> C (inbound)
+    ids = [c, place, sim, tomb, *mems]
+    try:
+        async with db.transaction() as conn:
+            await conn.execute(
+                """
+                INSERT INTO nodes (id, store_path, type, title, plane, planes, tags, aliases,
+                    merged_into, content_hash, node_created_at, indexed_at)
+                VALUES
+                 ($1,'ffffffff::person/c.md','person','Hub','personal','{personal}','{}','{}',
+                  NULL,'h_c',$5,$5),
+                 ($2,'ffffffff::place/pl.md','place','Place','personal','{personal}','{}','{}',
+                  NULL,'h_pl',$5,$5),
+                 ($3,'ffffffff::memory/sim.md','memory','Similar','personal','{personal}','{}','{}',
+                  NULL,'h_sim',$5,$5),
+                 ($4,'ffffffff::person/tomb.md','person','Tomb','personal','{personal}','{}','{}',
+                  $1,'h_tomb',$5,$5)
+                """,
+                c,
+                place,
+                sim,
+                tomb,
+                now,
+            )
+            await conn.executemany(
+                """
+                INSERT INTO nodes (id, store_path, type, title, plane, planes, tags, aliases,
+                    merged_into, content_hash, node_created_at, indexed_at)
+                VALUES ($1,$2,'memory',$3,'personal','{personal}','{}','{}',NULL,$4,$5,$5)
+                """,
+                [
+                    (m, f"ffffffff::memory/m{i}.md", f"Mem{i}", f"h_m{i}", now)
+                    for i, m in enumerate(mems)
+                ],
+            )
+            # m_i -involves-> C (inbound zone), C -at-> place (out zone), C -similar-> sim (derived
+            # zone), C -knows-> tomb (canonical, dst tombstoned → excluded from the out-leg)
+            await conn.executemany(
+                "INSERT INTO edges (src_id, dst_id, rel, origin, score) "
+                "VALUES ($1,$2,'involves','canonical',NULL)",
+                [(m, c) for m in mems],
+            )
+            await conn.execute(
+                """
+                INSERT INTO edges (src_id, dst_id, rel, origin, score) VALUES
+                 ($1,$2,'at','canonical',NULL),
+                 ($1,$3,'similar','derived',0.9),
+                 ($1,$4,'knows','canonical',NULL)
+                """,
+                c,
+                place,
+                sim,
+                tomb,
+            )
+
+        rows = await store.neighbor_zones(c, direction=None, fanout=3)
+        involves = [z for z in rows if z.edge.rel == "involves"]
+        at_zone = [z for z in rows if z.edge.rel == "at"]
+        similar = [z for z in rows if z.edge.rel == "similar"]
+        check(
+            "zones = involves(in) + at(out) + derived similar; tombstoned 'knows' dst excluded",
+            {(z.edge.origin, z.edge.rel) for z in rows}
+            == {("canonical", "involves"), ("canonical", "at"), ("derived", "similar")},
+            str([(z.edge.origin, z.edge.rel, z.edge.node_id) for z in rows]),
+        )
+        check(
+            "involves zone capped to fanout (3 of 5), inbound, node_id-ordered, zone_total=5",
+            [z.edge.node_id for z in involves] == mems[:3]
+            and all(z.edge.dir == "in" for z in involves)
+            and all(z.zone_total == 5 for z in involves),
+            str([(z.edge.node_id, z.zone_total) for z in involves]),
+        )
+        check(
+            "at zone = [place] out, zone_total 1; carries endpoint type/plane (no 2nd fetch)",
+            [z.edge.node_id for z in at_zone] == [place]
+            and at_zone[0].zone_total == 1
+            and at_zone[0].edge.type == "place"
+            and at_zone[0].edge.plane == "personal",
+            str(at_zone),
+        )
+        check(
+            "derived similar is its own zone (origin=derived), zone_total 1",
+            [z.edge.node_id for z in similar] == [sim]
+            and similar[0].edge.origin == "derived"
+            and similar[0].zone_total == 1,
+            str(similar),
+        )
+        # Direction scoping: 'in' keeps only the involves zone; its total stays 5 (the out edges are
+        # filtered before the window, so they neither rank nor count).
+        inbound = await store.neighbor_zones(c, direction="in", fanout=3)
+        check(
+            "direction='in' -> involves zone only, zone_total still 5",
+            {(z.edge.origin, z.edge.rel) for z in inbound} == {("canonical", "involves")}
+            and all(z.zone_total == 5 for z in inbound),
+            str([(z.edge.rel, z.zone_total) for z in inbound]),
+        )
+        head = await store.center_header(c)
+        check(
+            "center_header(C) = person/Hub/personal",
+            head is not None and head.type == "person" and head.plane == "personal",
+            str(head),
+        )
+        missing = await store.center_header("ffffffff-0000-0000-0000-0000000000ee")
+        check("center_header(unknown) -> None", missing is None, str(missing))
+    finally:
+        await db.pool.execute("DELETE FROM edges WHERE src_id = ANY($1::uuid[])", ids)
+        await db.pool.execute("DELETE FROM nodes WHERE id = ANY($1::uuid[])", ids)
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -1519,6 +1640,7 @@ async def main() -> int:
         await check_auto_recorded(db)
         await check_dedup_sweep(db)
         await check_inbox_drain(db)
+        await check_neighbor_zones(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

@@ -126,6 +126,31 @@ class NeighborEdge:
     until: date | None
 
 
+@dataclass(frozen=True)
+class NeighborHeader:
+    """A center node's render header for the map — no body, no edges (M7, 03-api §Nodes neighbors).
+
+    Just the fields the grouped ``GET /nodes/{id}/neighbors`` echoes back as ``center`` so the
+    canvas can label/colour the focal node without the heavier ``get_node`` file read."""
+
+    node_id: str
+    type: str
+    title: str | None
+    plane: str | None
+    planes: list[str]
+
+
+@dataclass(frozen=True)
+class ZonedNeighbor:
+    """One neighbor of a center, tagged with its ``(origin, rel)`` zone's full size (M7 grouped).
+
+    ``edge`` is the neighbor itself (capped to the zone fanout by the query); ``zone_total`` is the
+    count of *all* neighbors in this ``(origin, rel)`` zone — feeds the per-zone "show N of M"."""
+
+    edge: NeighborEdge
+    zone_total: int
+
+
 class NeighborStore(Protocol):
     """The one-hop neighbor-read surface (MCP ``traverse`` + M7 map + ``build_context``)."""
 
@@ -144,6 +169,29 @@ class NeighborStore(Protocol):
         edge direction; ``after`` resumes strictly past a prior page's last key; at most ``limit``
         rows are returned. Tombstoned endpoints are excluded. The caller asks for one more than it
         needs to detect a further page (keyset pagination)."""
+        ...
+
+    async def center_header(self, node_id: str) -> NeighborHeader | None:
+        """The center node's render header (type/title/plane/planes), or ``None`` if unknown.
+
+        A live-resolving tombstone still returns its header (the map re-centers on live nodes; the
+        302 redirect is ``get_node``'s concern) — a lightweight read for the ``center`` echo, not a
+        detail view."""
+        ...
+
+    async def neighbor_zones(
+        self,
+        node_id: str,
+        *,
+        direction: str | None,
+        fanout: int,
+    ) -> list[ZonedNeighbor]:
+        """All of ``node_id``'s ``(origin, rel)`` zones, each capped to the first ``fanout`` rows.
+
+        Rows are ordered by ``(origin, rel, dir, node_id)`` (so consecutive rows share a zone) and
+        each carries its zone's full ``zone_total`` (unaffected by the cap) for the "show more".
+        ``direction`` (``out``/``in``, ``None`` = both) scopes both the neighbors and the totals.
+        Tombstoned endpoints are excluded (both ends); ``until``-closed edges are returned."""
         ...
 
 
@@ -201,18 +249,83 @@ class PgNeighborStore:
                 an,
                 limit,
             )
-        return [
-            NeighborEdge(
-                origin=r["origin"],
-                rel=r["rel"],
-                dir=r["dir"],
-                node_id=str(r["node_id"]),
-                type=r["type"],
-                title=r["title"],
-                plane=r["plane"],
-                score=float(r["score"]) if r["score"] is not None else None,
-                since=r["since"],
-                until=r["until"],
+        return [_neighbor_edge(r) for r in rows]
+
+    async def center_header(self, node_id: str) -> NeighborHeader | None:
+        async with self._db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, type, title, plane, planes FROM nodes WHERE id = $1",
+                node_id,
             )
-            for r in rows
+        if row is None:
+            return None
+        return NeighborHeader(
+            node_id=str(row["id"]),
+            type=row["type"],
+            title=row["title"],
+            plane=row["plane"],
+            planes=list(row["planes"] or []),
+        )
+
+    async def neighbor_zones(
+        self,
+        node_id: str,
+        *,
+        direction: str | None,
+        fanout: int,
+    ) -> list[ZonedNeighbor]:
+        # The same both-directions union as `neighbors`, but window-ranked per `(origin, rel)` zone:
+        # ROW_NUMBER caps each zone to its first `fanout` neighbors (same `(dir, node_id)` order as
+        # the keyset); COUNT(*) OVER the same partition carries the zone's true size for the cursor.
+        # The direction filter sits in `ranked`'s WHERE, which SQL evaluates *before* the window
+        # functions, so both the ranking and the count are scoped to the requested direction. One
+        # round-trip returns every zone already capped — no per-zone query, bounded regardless of a
+        # hub's degree.
+        async with self._db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT origin, rel, dir, node_id, type, title, plane, score, since, until,
+                       zone_total
+                FROM (
+                    SELECT origin, rel, dir, node_id, type, title, plane, score, since, until,
+                           ROW_NUMBER() OVER (PARTITION BY origin, rel ORDER BY dir, node_id) AS rn,
+                           COUNT(*)    OVER (PARTITION BY origin, rel) AS zone_total
+                    FROM (
+                        SELECT e.origin, e.rel, 'out' AS dir, e.dst_id AS node_id,
+                               n.type, n.title, n.plane, e.score, e.since, e.until
+                        FROM edges e JOIN nodes n ON n.id = e.dst_id
+                        WHERE e.src_id = $1 AND n.merged_into IS NULL
+                        UNION ALL
+                        SELECT e.origin, e.rel, 'in' AS dir, e.src_id AS node_id,
+                               n.type, n.title, n.plane, e.score, e.since, e.until
+                        FROM edges e JOIN nodes n ON n.id = e.src_id
+                        WHERE e.dst_id = $1 AND n.merged_into IS NULL
+                    ) nbr
+                    WHERE ($2::text IS NULL OR dir = $2)
+                ) ranked
+                WHERE rn <= $3
+                ORDER BY origin, rel, dir, node_id
+                """,
+                node_id,
+                direction,
+                fanout,
+            )
+        return [
+            ZonedNeighbor(edge=_neighbor_edge(r), zone_total=int(r["zone_total"])) for r in rows
         ]
+
+
+def _neighbor_edge(r) -> NeighborEdge:
+    """Build a :class:`NeighborEdge` from an asyncpg row carrying the ten neighbor columns."""
+    return NeighborEdge(
+        origin=r["origin"],
+        rel=r["rel"],
+        dir=r["dir"],
+        node_id=str(r["node_id"]),
+        type=r["type"],
+        title=r["title"],
+        plane=r["plane"],
+        score=float(r["score"]) if r["score"] is not None else None,
+        since=r["since"],
+        until=r["until"],
+    )

@@ -29,12 +29,13 @@ import binascii
 import json
 import logging
 from dataclasses import dataclass, field
+from itertools import groupby
 from typing import Protocol
 
 from ..config import Settings
 from ..identity.store import IdentityCapsuleReader
 from ..search.service import NodePreview
-from .store import GraphStore, NeighborCursor, NeighborEdge, NeighborStore
+from .store import GraphStore, NeighborCursor, NeighborEdge, NeighborHeader, NeighborStore
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,32 @@ class NeighborPage:
 
 
 @dataclass(frozen=True)
+class NeighborZone:
+    """One ``(origin, rel)`` zone of a center's neighborhood (M7 grouped map, ADR-051 §2).
+
+    ``neighbors`` is the first ``map_zone_fanout`` of the zone; ``total`` is the zone's full size;
+    ``next_cursor`` is an opaque token for the zone's "show more" (``None`` when the zone fit) — it
+    feeds the single-zone ``GET /nodes/{id}/neighbors?rel=…&cursor=…`` page (the M5 primitive)."""
+
+    origin: str
+    rel: str
+    neighbors: list[NeighborEdge]
+    total: int
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class NeighborZones:
+    """The grouped first page of a center's 1-hop neighborhood (M7 map, ADR-051 §2).
+
+    ``center`` is the focal node's render header, or ``None`` when the node is unknown (the map's
+    empty-neighborhood case — an empty ``zones`` with no center to echo)."""
+
+    center: NeighborHeader | None
+    zones: list[NeighborZone]
+
+
+@dataclass(frozen=True)
 class ContextNeighbor:
     """A neighbor inside a ``build_context`` bundle: the edge + endpoint, plus its own (capped)
     neighbors when the traversal goes deeper. ``truncated`` marks that this node has more 1-hop
@@ -147,6 +174,7 @@ class GraphService:
         self._depth_default = settings.build_context_default_depth
         self._depth_max = settings.build_context_max_depth
         self._fanout = settings.build_context_fanout
+        self._zone_fanout = settings.map_zone_fanout
 
     async def neighbors(
         self,
@@ -185,6 +213,40 @@ class GraphService:
             rel=rel or None,
             direction=direction,
         )
+
+    async def neighbor_zones(self, node_id: str, *, direction: str = "both") -> NeighborZones:
+        """The grouped first page of ``node_id``'s neighborhood — one zone per ``(origin, rel)``,
+        each capped at ``map_zone_fanout`` (03-api §Nodes neighbors, ADR-051 §2).
+
+        Backs the no-``rel`` mode of ``GET /nodes/{id}/neighbors``. Each zone carries its full
+        ``total`` and a ``next_cursor`` (the M5 keyset of its last returned neighbor, ``None`` when
+        the zone fit) so "show more" pages the rel via :meth:`neighbors` with no second neighborhood
+        fetch. ``direction`` is ``out``/``in``/``both``; an unknown node yields ``center=None`` and
+        empty ``zones``. Raises :class:`InvalidDirection` on bad input."""
+        if direction not in self._DIRECTIONS:
+            raise InvalidDirection(direction)
+        center = await self._store.center_header(node_id)
+        rows = await self._store.neighbor_zones(
+            node_id,
+            direction=None if direction == "both" else direction,
+            fanout=self._zone_fanout,
+        )
+        zones: list[NeighborZone] = []
+        # Rows arrive ordered by (origin, rel, dir, node_id), so a zone is a run of consecutive rows
+        # sharing (origin, rel). groupby preserves that order; each zone keeps at most
+        # map_zone_fanout rows (the store capped it), and next_cursor points past the last returned
+        # row when the zone has more than were returned.
+        for (origin, rel), group in groupby(rows, key=lambda z: (z.edge.origin, z.edge.rel)):
+            items = list(group)
+            edges = [z.edge for z in items]
+            total = items[0].zone_total
+            next_cursor = _encode_cursor(edges[-1]) if total > len(edges) else None
+            zones.append(
+                NeighborZone(
+                    origin=origin, rel=rel, neighbors=edges, total=total, next_cursor=next_cursor
+                )
+            )
+        return NeighborZones(center=center, zones=zones)
 
     async def build_context(self, node_id: str, *, depth: int | None = None) -> NodeContext | None:
         """``get_node`` + a bounded neighbor tree in one call (03-api §MCP ``build_context``).

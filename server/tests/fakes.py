@@ -10,7 +10,13 @@ from datetime import UTC, datetime
 
 from app.config import Settings
 from app.entities.store import EntityCandidate, normalize_alias
-from app.graph.store import NeighborCursor, NeighborEdge, SimilarEdge
+from app.graph.store import (
+    NeighborCursor,
+    NeighborEdge,
+    NeighborHeader,
+    SimilarEdge,
+    ZonedNeighbor,
+)
 from app.identity.store import CapsuleBlob, HubProfile, RecentNode
 from app.indexing.indexer import IndexOutcome
 from app.indexing.store import CanonicalEdge, IndexState, NodeUpsert
@@ -311,9 +317,21 @@ class FakeNeighborStore:
     service's pagination/fanout logic is exercised end-to-end; ``calls`` records each invocation's
     args for assertions."""
 
-    def __init__(self, *, edges: dict[str, list[NeighborEdge]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        edges: dict[str, list[NeighborEdge]] | None = None,
+        headers: dict[str, NeighborHeader] | None = None,
+    ) -> None:
         self._edges = edges or {}
+        self._headers = headers or {}
         self.calls: list[dict] = []
+
+    def _sorted(self, node_id: str) -> list[NeighborEdge]:
+        return sorted(
+            self._edges.get(node_id, []),
+            key=lambda e: (e.origin, e.rel, e.dir, e.node_id),
+        )
 
     async def neighbors(
         self,
@@ -333,10 +351,7 @@ class FakeNeighborStore:
                 "limit": limit,
             }
         )
-        rows = sorted(
-            self._edges.get(node_id, []),
-            key=lambda e: (e.origin, e.rel, e.dir, e.node_id),
-        )
+        rows = self._sorted(node_id)
         if rel is not None:
             rows = [e for e in rows if e.rel == rel]
         if direction is not None:
@@ -344,6 +359,37 @@ class FakeNeighborStore:
         if after is not None:
             rows = [e for e in rows if (e.origin, e.rel, e.dir, e.node_id) > after]
         return rows[:limit]
+
+    async def center_header(self, node_id: str) -> NeighborHeader | None:
+        return self._headers.get(node_id)
+
+    async def neighbor_zones(
+        self,
+        node_id: str,
+        *,
+        direction: str | None,
+        fanout: int,
+    ) -> list[ZonedNeighbor]:
+        # Mirror the real window query: scope by direction, then per (origin, rel) zone cap to the
+        # first `fanout` rows while carrying the zone's full size — so the service's grouping,
+        # per-zone cursor, and total logic is exercised for real, not stubbed.
+        self.calls.append({"node_id": node_id, "direction": direction, "fanout": fanout})
+        rows = self._sorted(node_id)
+        if direction is not None:
+            rows = [e for e in rows if e.dir == direction]
+        totals: dict[tuple[str, str], int] = {}
+        for e in rows:
+            totals[(e.origin, e.rel)] = totals.get((e.origin, e.rel), 0) + 1
+        out: list[ZonedNeighbor] = []
+        seen: dict[tuple[str, str], int] = {}
+        for e in rows:
+            key = (e.origin, e.rel)
+            taken = seen.get(key, 0)
+            if taken >= fanout:
+                continue
+            seen[key] = taken + 1
+            out.append(ZonedNeighbor(edge=e, zone_total=totals[key]))
+        return out
 
 
 class FakeNodeReader:

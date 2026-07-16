@@ -363,6 +363,11 @@ class Settings(BaseSettings):
     build_context_default_depth: int = 1
     build_context_max_depth: int = 2
     build_context_fanout: int = 10
+    # M7 map (`GET /nodes/{id}/neighbors` grouped mode, ADR-051 §2): each `(origin, rel)` zone of a
+    # center's neighborhood is independently capped at this many neighbors, with a per-zone `total`
+    # and `next_cursor` so a hub's zones aren't starved by a single global cap. Zone "show more"
+    # then pages the rel via the M5 `neighbors` primitive (`graph_neighbors_page_*`).
+    map_zone_fanout: int = 8
 
     # --- Identity capsule (M5 task 2, ADR-046 §5 / ADR-033 #1). The derived ~300-token "who the
     # user is / current state" preamble, distilled nightly on `conspect` from a blend of the graph's

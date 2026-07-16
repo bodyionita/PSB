@@ -146,6 +146,70 @@ class NodeDetailResponse(BaseModel):
     edges: list[NodeEdgeItem] = Field(default_factory=list)
 
 
+# --- Map / neighbors (03-api.md §Search & graph, M7 / ADR-051) ---
+class MapNeighborItem(BaseModel):
+    """One 1-hop neighbor in a map zone or "show more" page (03-api §Nodes neighbors, ADR-051).
+
+    Carries ``origin``/``dir``/``score``/``since``/``until`` + the endpoint's ``type``/``title``/
+    ``plane`` so the canvas renders arrowheads, faint-derived + dashed-superseded (``until``) edges,
+    and the node mark (emoji=type, colour=plane) without a second fetch."""
+
+    origin: str
+    rel: str
+    dir: str
+    node_id: str
+    type: str | None = None
+    title: str | None = None
+    plane: str | None = None
+    score: float | None = None
+    since: date | None = None
+    until: date | None = None
+
+
+class MapZone(BaseModel):
+    """One ``(origin, rel)`` zone of a center's neighborhood, capped at ``map_zone_fanout``.
+
+    ``total`` is the zone's full size (drives "show N more of M"); ``next_cursor`` is the token for
+    the single-zone ``?rel=…&cursor=…`` "show more" page (``None`` when the zone fit)."""
+
+    origin: str
+    rel: str
+    neighbors: list[MapNeighborItem] = Field(default_factory=list)
+    total: int
+    next_cursor: str | None = None
+
+
+class NeighborCenter(BaseModel):
+    """The focal node's render header echoed by the grouped neighbors response (03-api §Nodes)."""
+
+    node_id: str
+    type: str
+    title: str | None = None
+    plane: str | None = None
+    planes: list[str] = Field(default_factory=list)
+
+
+class NeighborZonesResponse(BaseModel):
+    """Grouped first page of ``GET /nodes/{id}/neighbors`` (no ``rel`` — ADR-051 §2).
+
+    ``center`` is ``None`` and ``zones`` empty when the node is unknown (empty neighborhood)."""
+
+    center: NeighborCenter | None = None
+    zones: list[MapZone] = Field(default_factory=list)
+
+
+class NeighborPageResponse(BaseModel):
+    """A single zone's flat "show more" page — ``GET /nodes/{id}/neighbors?rel=…`` (ADR-051 §2).
+
+    Thin over the M5 rel-filtered keyset; ``next_cursor`` is ``None`` at the zone's end."""
+
+    center_id: str
+    rel: str
+    direction: str
+    neighbors: list[MapNeighborItem] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
 # --- Chat (03-api.md §Chat, M4 / ADR-025) ---
 class ChatRequest(BaseModel):
     """One chat turn (POST /chat). ``session_id`` omitted ⇒ implicit session creation; ``model`` =

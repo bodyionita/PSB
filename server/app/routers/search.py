@@ -13,16 +13,44 @@ node) ``302``-redirects to its survivor (ADR-030 §5).
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
-from ..dependencies import get_search_service, require_session
-from ..models import NodeDetailResponse, NodeEdgeItem, SearchRequest, SearchResultItem
+from ..dependencies import get_graph_service, get_search_service, require_session
+from ..graph.service import GraphService, InvalidCursor
+from ..graph.store import NeighborEdge
+from ..models import (
+    MapNeighborItem,
+    MapZone,
+    NeighborCenter,
+    NeighborPageResponse,
+    NeighborZonesResponse,
+    NodeDetailResponse,
+    NodeEdgeItem,
+    SearchRequest,
+    SearchResultItem,
+)
 from ..providers.base import ProviderUnavailable
 from ..search.service import SearchService
 
 router = APIRouter(tags=["search"], dependencies=[Depends(require_session)])
+
+
+def _map_neighbor(edge: NeighborEdge) -> MapNeighborItem:
+    return MapNeighborItem(
+        origin=edge.origin,
+        rel=edge.rel,
+        dir=edge.dir,
+        node_id=edge.node_id,
+        type=edge.type,
+        title=edge.title,
+        plane=edge.plane,
+        score=edge.score,
+        since=edge.since,
+        until=edge.until,
+    )
 
 
 @router.post("/search", response_model=list[SearchResultItem])
@@ -104,5 +132,61 @@ async def get_node(
                 until=e.until,
             )
             for e in preview.edges
+        ],
+    )
+
+
+@router.get("/nodes/{node_id}/neighbors", response_model=None)
+async def node_neighbors(
+    node_id: uuid.UUID,
+    rel: str | None = Query(default=None),
+    direction: Literal["out", "in", "both"] = Query(default="both"),
+    cursor: str | None = Query(default=None),
+    service: GraphService = Depends(get_graph_service),
+) -> NeighborZonesResponse | NeighborPageResponse:
+    """One-hop neighbors for the M7 map (03-api §Nodes neighbors, ADR-051 §2). Two modes:
+
+    no ``rel`` → the grouped first page (one zone per ``(origin, rel)``, per-zone capped +
+    ``total``/``next_cursor``); with ``rel`` (+ optional ``cursor``) → that single zone's next flat
+    page over the M5 keyset primitive ("show more"). Unknown node → ``center=None`` + empty zones.
+    ``direction`` is validated to ``out``/``in``/``both`` by the type; a bad ``cursor`` → 422."""
+    center_id = str(node_id)
+    if rel:
+        try:
+            page = await service.neighbors(center_id, rel=rel, direction=direction, cursor=cursor)
+        except InvalidCursor:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid cursor"
+            ) from None
+        return NeighborPageResponse(
+            center_id=center_id,
+            rel=rel,
+            direction=direction,
+            neighbors=[_map_neighbor(e) for e in page.neighbors],
+            next_cursor=page.next_cursor,
+        )
+    grouped = await service.neighbor_zones(center_id, direction=direction)
+    center = (
+        NeighborCenter(
+            node_id=grouped.center.node_id,
+            type=grouped.center.type,
+            title=grouped.center.title,
+            plane=grouped.center.plane,
+            planes=grouped.center.planes,
+        )
+        if grouped.center is not None
+        else None
+    )
+    return NeighborZonesResponse(
+        center=center,
+        zones=[
+            MapZone(
+                origin=z.origin,
+                rel=z.rel,
+                neighbors=[_map_neighbor(e) for e in z.neighbors],
+                total=z.total,
+                next_cursor=z.next_cursor,
+            )
+            for z in grouped.zones
         ],
     )

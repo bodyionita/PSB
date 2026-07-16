@@ -18,7 +18,7 @@ from app.graph.service import (
     _decode_cursor,
     _encode_cursor,
 )
-from app.graph.store import NeighborEdge
+from app.graph.store import NeighborEdge, NeighborHeader
 from app.identity.store import CapsuleBlob
 from app.search.service import NodePreview
 
@@ -48,6 +48,12 @@ def _edge(
     )
 
 
+def _header(node_id: str = "c1", *, type: str = "person") -> NeighborHeader:
+    return NeighborHeader(
+        node_id=node_id, type=type, title=node_id.upper(), plane="Work", planes=["Work"]
+    )
+
+
 def _preview(node_id: str = "c1") -> NodePreview:
     return NodePreview(
         node_id=node_id,
@@ -72,14 +78,16 @@ def _service(
     *,
     edges: dict[str, list[NeighborEdge]] | None = None,
     nodes: dict[str, NodePreview] | None = None,
+    headers: dict[str, NeighborHeader] | None = None,
     page_default: int = 25,
     page_max: int = 100,
     depth_default: int = 1,
     depth_max: int = 2,
     fanout: int = 10,
+    zone_fanout: int = 8,
     capsule=None,
 ) -> tuple[GraphService, FakeNeighborStore, FakeNodeReader]:
-    store = FakeNeighborStore(edges=edges)
+    store = FakeNeighborStore(edges=edges, headers=headers)
     reader = FakeNodeReader(nodes=nodes)
     settings = Settings(
         graph_store_path="/tmp/store",
@@ -88,6 +96,7 @@ def _service(
         build_context_default_depth=depth_default,
         build_context_max_depth=depth_max,
         build_context_fanout=fanout,
+        map_zone_fanout=zone_fanout,
     )
     service = GraphService(settings=settings, store=store, nodes=reader, capsule=capsule)
     return service, store, reader
@@ -175,6 +184,86 @@ async def test_neighbors_unknown_node_is_empty_page():
     service, _, _ = _service(edges={})  # no edges for anyone
     page = await service.neighbors("ghost")
     assert page.neighbors == [] and page.next_cursor is None
+
+
+# --- neighbor_zones (M7 map grouped mode, ADR-051 §2) ---------------------------------------
+
+
+async def test_neighbor_zones_groups_by_origin_rel_with_center():
+    edges = {
+        "c1": [
+            _edge("p2", rel="at"),
+            _edge("m1", rel="involves", dir="in"),
+            _edge("m3", rel="involves", dir="out"),
+            _edge("x9", origin="derived", rel="similar"),
+        ]
+    }
+    service, _, _ = _service(edges=edges, headers={"c1": _header("c1")})
+    result = await service.neighbor_zones("c1")
+    assert result.center is not None and result.center.node_id == "c1"
+    # Zones are one per (origin, rel), ordered by (origin, rel).
+    assert [(z.origin, z.rel) for z in result.zones] == [
+        ("canonical", "at"),
+        ("canonical", "involves"),
+        ("derived", "similar"),
+    ]
+    involves = result.zones[1]
+    assert [e.node_id for e in involves.neighbors] == ["m1", "m3"]  # (dir,id): in<out
+    assert involves.total == 2 and involves.next_cursor is None
+
+
+async def test_neighbor_zones_caps_each_zone_with_total_and_cursor():
+    many = [_edge(f"n{i:02d}", rel="involves") for i in range(5)]
+    service, _, _ = _service(edges={"c1": many}, headers={"c1": _header("c1")}, zone_fanout=3)
+    result = await service.neighbor_zones("c1")
+    zone = result.zones[0]
+    assert len(zone.neighbors) == 3  # capped to zone_fanout
+    assert zone.total == 5  # full zone size for "show 2 more of 5"
+    assert zone.next_cursor is not None  # more remain → paging token
+
+
+async def test_neighbor_zones_cursor_resumes_the_zone_via_neighbors():
+    # The zone's next_cursor must feed the single-zone "show more" (service.neighbors rel-filtered).
+    many = [_edge(f"n{i:02d}", rel="involves") for i in range(5)]
+    service, _, _ = _service(edges={"c1": many}, headers={"c1": _header("c1")}, zone_fanout=3)
+    zone = (await service.neighbor_zones("c1")).zones[0]
+    page = await service.neighbors("c1", rel="involves", cursor=zone.next_cursor)
+    assert [e.node_id for e in page.neighbors] == ["n03", "n04"]  # strictly past the first 3
+    assert page.next_cursor is None
+
+
+async def test_neighbor_zones_direction_scopes_zones_and_totals():
+    edges = {
+        "c1": [
+            _edge("m1", rel="involves", dir="in"),
+            _edge("m2", rel="involves", dir="in"),
+            _edge("p3", rel="involves", dir="out"),
+        ]
+    }
+    service, store, _ = _service(edges=edges, headers={"c1": _header("c1")})
+    result = await service.neighbor_zones("c1", direction="in")
+    assert store.calls[-1]["direction"] == "in"  # "both"→None, else forwarded
+    zone = result.zones[0]
+    assert [e.node_id for e in zone.neighbors] == ["m1", "m2"]
+    assert zone.total == 2  # the out edge is not counted under direction=in
+
+
+async def test_neighbor_zones_both_direction_passes_none_to_store():
+    service, store, _ = _service(edges={"c1": []}, headers={"c1": _header("c1")})
+    await service.neighbor_zones("c1")
+    assert store.calls[-1]["direction"] is None
+
+
+async def test_neighbor_zones_unknown_node_center_none_empty_zones():
+    service, _, _ = _service(edges={}, headers={})
+    result = await service.neighbor_zones("ghost")
+    assert result.center is None and result.zones == []
+
+
+async def test_neighbor_zones_rejects_bad_direction():
+    service, _, _ = _service(edges={"c1": []})
+    with pytest.raises(InvalidDirection):
+        await service.neighbor_zones("c1", direction="sideways")
 
 
 # --- build_context --------------------------------------------------------------------------
