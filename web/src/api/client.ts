@@ -3,6 +3,7 @@
 import { API_BASE } from '../config';
 import type {
   AgentRunResponse,
+  AutoRecordedItem,
   BackupResponse,
   CaptureAcceptedResponse,
   CaptureView,
@@ -19,8 +20,10 @@ import type {
   NodeDetailResponse,
   PlanesResponse,
   ProvidersResponse,
-  ReviewChoice,
+  RememberResponse,
+  ReviewBatchResponse,
   ReviewItemResponse,
+  ReviewResolveBody,
   ReviewVerdict,
   RunAcceptedResponse,
   SearchResultItem,
@@ -122,16 +125,36 @@ export const api = {
   listChatSessions: () => request<ChatSessionItem[]>('/chat/sessions'),
   getChatSession: (id: string) =>
     request<ChatSessionDetail>(`/chat/sessions/${encodeURIComponent(id)}`),
+  // "Remember now" (M6, ADR-048 §6): distill this session on demand — same salience + stance gate,
+  // advancing the same watermark. Endorsed captures organize in the background.
+  rememberSession: (id: string) =>
+    request<RememberResponse>(`/chat/sessions/${encodeURIComponent(id)}/remember`, {
+      method: 'POST',
+    }),
+  // The chat-scoped "recently auto-recorded" audit list (M6, ADR-048 §12) + its one-tap remove
+  // (204 on success; git-rm + DB-delete + capture tombstone, soft-delete).
+  listAutoRecorded: (limit = 50) =>
+    request<AutoRecordedItem[]>(`/chat/auto-recorded?limit=${limit}`),
+  removeAutoRecorded: (captureId: string) =>
+    request<void>(`/chat/auto-recorded/${encodeURIComponent(captureId)}/remove`, {
+      method: 'POST',
+    }),
 
-  // --- Review queue (03-api.md §Review queue, M3) ---
+  // --- Review queue (03-api.md §Review queue, M3; M6 kinds ADR-048/049) ---
   listReview: (status = 'pending', kind?: string) =>
     request<ReviewItemResponse[]>(
       `/review?status=${encodeURIComponent(status)}${kind ? `&kind=${encodeURIComponent(kind)}` : ''}`,
     ),
-  resolveReview: (id: string, body: { choice?: ReviewChoice; verdict?: ReviewVerdict }) =>
+  resolveReview: (id: string, body: ReviewResolveBody) =>
     request<ReviewItemResponse>(`/review/${encodeURIComponent(id)}`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+  // Batch resolve (ADR-048 §8): one `action` string applied to many items, best-effort per item.
+  resolveReviewBatch: (ids: string[], action: string) =>
+    request<ReviewBatchResponse>('/review/batch', {
+      method: 'POST',
+      body: JSON.stringify({ ids, action }),
     }),
 
   // --- Settings → Models (03-api.md §Settings, M4 / ADR-025 / ADR-043) ---

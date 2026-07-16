@@ -4,6 +4,7 @@ import { CaptureScreen } from './features/capture/CaptureScreen';
 import { SearchScreen } from './features/search/SearchScreen';
 import { ChatScreen } from './features/chat/ChatScreen';
 import { ReviewScreen } from './features/review/ReviewScreen';
+import { useReview } from './features/review/useReview';
 import { ActivityScreen } from './features/activity/ActivityScreen';
 import { AdminScreen } from './features/admin/AdminScreen';
 import { SettingsScreen } from './features/settings/SettingsScreen';
@@ -24,6 +25,9 @@ export function AppShell() {
   const [tab, setTab] = useState<TabId>('capture');
   // `tab` is always a valid TabId, so find never misses; assert to satisfy strict indexing.
   const active = TABS.find((t) => t.id === tab) ?? TABS[0]!;
+  // Pending-review count → the nav badge (06 §3b "badge-counted queue"). Shares the ['review',
+  // 'pending'] cache with the Review screen, so opening the tab reuses it (no double fetch).
+  const reviewCount = useReview().data?.length ?? 0;
 
   return (
     <div
@@ -102,7 +106,31 @@ export function AppShell() {
                   }}
                 />
               )}
-              <span style={{ position: 'relative', fontSize: 18 }}>{t.icon}</span>
+              <span style={{ position: 'relative', fontSize: 18 }}>
+                {t.icon}
+                {t.id === 'review' && reviewCount > 0 && (
+                  <span
+                    aria-label={`${reviewCount} to review`}
+                    style={{
+                      position: 'absolute',
+                      top: -6,
+                      left: 'calc(50% + 6px)',
+                      minWidth: 16,
+                      height: 16,
+                      padding: '0 4px',
+                      borderRadius: 999,
+                      background: 'var(--accent)',
+                      color: 'var(--on-accent)',
+                      fontSize: 10,
+                      fontWeight: 700,
+                      lineHeight: '16px',
+                      textAlign: 'center',
+                    }}
+                  >
+                    {reviewCount > 99 ? '99+' : reviewCount}
+                  </span>
+                )}
+              </span>
               <span style={{ position: 'relative', fontSize: 11, fontWeight: 600 }}>
                 {t.label}
               </span>

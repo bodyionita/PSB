@@ -1,18 +1,31 @@
 import { AnimatePresence, motion } from 'framer-motion';
-import type { EntityCandidate, ReviewItemResponse } from '../../api/types';
+import { useMemo, useState } from 'react';
+import type {
+  EntityCandidate,
+  ReviewItemResponse,
+  Salience,
+  StanceVerdict,
+} from '../../api/types';
 import { Button } from '../../ui/Button';
 import { Surface } from '../../ui/Surface';
-import { typeIcon } from '../../ui/nodeTypes';
-import { useResolveReview, useReview } from './useReview';
+import { baseName, useNode } from '../../ui/nodeDetail';
+import { typeIcon, typeLabel } from '../../ui/nodeTypes';
+import { relativeTime } from '../../ui/relativeTime';
+import { useBatchResolve, useResolveReview, useReview, useReviewMaybe } from './useReview';
 
-// Review tab (06 §3b): the M3 minimal, kind-generic queue of items the pipeline couldn't decide on
-// its own — an `entity-ambiguity` (which existing entity did this mention refer to?) or a
-// `vocab-proposal` (should this new type join the vocabulary?). Each is decidable in place; the
-// polished, source-grouped UX lands at M6.
+// Review tab (06 §3b): the queue of decisions the pipeline couldn't make on its own — an
+// `entity-ambiguity` (M3), a `vocab-proposal` (M3), a chat-distilled `stance-candidate` (M6,
+// ADR-048), or a `dedup-proposal` (M6, ADR-049). Each is decidable in place. M6 adds salience
+// ordering, multi-select batch actions, and a parked-`maybe` section with an aging indicator.
 
 const FAIL_COLOR = '#ff6b6b';
 const KIND_ENTITY = 'entity-ambiguity';
 const KIND_VOCAB = 'vocab-proposal';
+const KIND_STANCE = 'stance-candidate';
+const KIND_DEDUP = 'dedup-proposal';
+
+// Only the M6 kinds (stance-candidate / dedup-proposal) show a batch select box; entity/vocab keep
+// their single-item flows (ADR-048 §8 frames batch around stance triage + dedup dismissal).
 
 // --- payload readers (payload is kind-specific JSON; read it defensively) -------------------
 
@@ -23,6 +36,14 @@ interface MentionInfo {
 
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+function str(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() ? v : null;
+}
+
+function strList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
 }
 
 function mentionOf(item: ReviewItemResponse): MentionInfo {
@@ -42,7 +63,7 @@ function candidatesOf(item: ReviewItemResponse): EntityCandidate[] {
       id: typeof r.id === 'string' ? r.id : '',
       name: typeof r.name === 'string' ? r.name : null,
       disambig: typeof r.disambig === 'string' ? r.disambig : null,
-      aliases: Array.isArray(r.aliases) ? r.aliases.filter((a): a is string => typeof a === 'string') : [],
+      aliases: strList(r.aliases),
     };
   });
 }
@@ -54,7 +75,56 @@ function vocabOf(item: ReviewItemResponse): { vocab: string; value: string } {
   };
 }
 
-// --- cards ----------------------------------------------------------------------------------
+interface StanceInfo {
+  text: string;
+  entities: string[];
+  salience: Salience | null;
+  whyUnclear: string | null;
+}
+
+function salienceOf(v: unknown): Salience | null {
+  return v === 'high' || v === 'med' || v === 'low' ? v : null;
+}
+
+function stanceOf(item: ReviewItemResponse): StanceInfo {
+  return {
+    text: str(item.payload.candidate_text) ?? '(unknown)',
+    entities: strList(item.payload.referenced_entity_names),
+    salience: salienceOf(item.payload.salience),
+    whyUnclear: str(item.payload.why_unclear),
+  };
+}
+
+interface DedupInfo {
+  nodeA: string;
+  nodeB: string;
+  defaultSurvivor: string;
+  cosine: number | null;
+  sharedEntities: string[];
+  occurredOverlap: boolean;
+}
+
+function dedupOf(item: ReviewItemResponse): DedupInfo {
+  const signals = asRecord(item.payload.signals);
+  return {
+    nodeA: str(item.payload.node_a) ?? '',
+    nodeB: str(item.payload.node_b) ?? '',
+    defaultSurvivor: str(item.payload.default_survivor) ?? '',
+    cosine: typeof signals.cosine === 'number' ? signals.cosine : null,
+    sharedEntities: strList(signals.shared_entity_titles),
+    occurredOverlap: signals.occurred_overlap === true,
+  };
+}
+
+// Salience → sort rank (high first). Items without a salience (dedup-proposal, entity/vocab) sort as
+// medium so they interleave sensibly rather than sinking below every low candidate.
+const SALIENCE_RANK: Record<Salience, number> = { high: 0, med: 1, low: 2 };
+function salienceRank(item: ReviewItemResponse): number {
+  const s = salienceOf(item.payload.salience);
+  return s ? SALIENCE_RANK[s] : 1;
+}
+
+// --- shared bits ----------------------------------------------------------------------------
 
 function KindBadge({ label }: { label: string }) {
   return (
@@ -77,6 +147,41 @@ function KindBadge({ label }: { label: string }) {
   );
 }
 
+// Coarse triage weight (ADR-048 §8) — high reads as accent-strong, low as faint.
+function SalienceBadge({ salience }: { salience: Salience }) {
+  const strong = salience === 'high';
+  return (
+    <span
+      title={`salience: ${salience}`}
+      style={{
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: 0.5,
+        textTransform: 'uppercase',
+        color: strong ? 'var(--on-accent)' : 'var(--muted)',
+        background: strong ? 'var(--accent)' : 'transparent',
+        border: strong ? '1px solid var(--accent)' : '1px solid var(--surface-border)',
+        borderRadius: 999,
+        padding: '2px 7px',
+        opacity: salience === 'low' ? 0.7 : 1,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {salience}
+    </span>
+  );
+}
+
+// "parked Nd ago" — the aging indicator on a re-openable maybe (ADR-048 §8), so a stale pile reads
+// as stale at a glance.
+function AgingTag({ item }: { item: ReviewItemResponse }) {
+  const ago = relativeTime(item.created_at);
+  if (!ago) return null;
+  return (
+    <span style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>parked {ago}</span>
+  );
+}
+
 function Excerpt({ text }: { text: string | null }) {
   if (!text) return null;
   return (
@@ -96,11 +201,43 @@ function Excerpt({ text }: { text: string | null }) {
   );
 }
 
+// The select checkbox shown on batch-eligible cards (stance-candidate / dedup-proposal).
+function SelectBox({ checked, onChange }: { checked: boolean; onChange: () => void }) {
+  return (
+    <input
+      type="checkbox"
+      checked={checked}
+      onChange={onChange}
+      aria-label="Select for batch action"
+      style={{ width: 18, height: 18, accentColor: 'var(--accent)', cursor: 'pointer', flexShrink: 0 }}
+    />
+  );
+}
+
+function ResolveError({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <p style={{ margin: '12px 0 0', fontSize: 13, color: FAIL_COLOR }}>
+      Couldn’t resolve that — try again.
+    </p>
+  );
+}
+
+// Props shared by every card so the list can wire selection uniformly.
+interface CardProps {
+  item: ReviewItemResponse;
+  selected: boolean;
+  onToggleSelect: () => void;
+}
+
+// --- entity-ambiguity -----------------------------------------------------------------------
+
 function EntityAmbiguityCard({ item }: { item: ReviewItemResponse }) {
   const resolve = useResolveReview();
   const mention = mentionOf(item);
   const candidates = candidatesOf(item);
   const busy = resolve.isPending;
+  const parked = item.status === 'maybe';
 
   const pick = (choice: string) => resolve.mutate({ id: item.id, body: { choice } });
 
@@ -113,7 +250,10 @@ function EntityAmbiguityCard({ item }: { item: ReviewItemResponse }) {
             {mention.name}
           </span>
         </span>
-        <KindBadge label="Which one?" />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          {parked && <AgingTag item={item} />}
+          <KindBadge label="Which one?" />
+        </div>
       </div>
       <p style={{ margin: '6px 0 0', fontSize: 13, color: 'var(--muted)' }}>
         A {mention.type ?? 'node'} mentioned here matches more than one existing entity — pick the
@@ -160,18 +300,18 @@ function EntityAmbiguityCard({ item }: { item: ReviewItemResponse }) {
         <Button onClick={() => pick('new')} disabled={busy}>
           New entity
         </Button>
-        <Button variant="ghost" onClick={() => pick('maybe')} disabled={busy}>
-          Not sure — later
-        </Button>
+        {!parked && (
+          <Button variant="ghost" onClick={() => pick('maybe')} disabled={busy}>
+            Not sure — later
+          </Button>
+        )}
       </div>
-      {resolve.isError && (
-        <p style={{ margin: '12px 0 0', fontSize: 13, color: FAIL_COLOR }}>
-          Couldn’t resolve that — try again.
-        </p>
-      )}
+      <ResolveError show={resolve.isError} />
     </Surface>
   );
 }
+
+// --- vocab-proposal -------------------------------------------------------------------------
 
 function VocabProposalCard({ item }: { item: ReviewItemResponse }) {
   const resolve = useResolveReview();
@@ -201,16 +341,217 @@ function VocabProposalCard({ item }: { item: ReviewItemResponse }) {
           Reject
         </Button>
       </div>
-      {resolve.isError && (
-        <p style={{ margin: '12px 0 0', fontSize: 13, color: FAIL_COLOR }}>
-          Couldn’t resolve that — try again.
-        </p>
-      )}
+      <ResolveError show={resolve.isError} />
     </Surface>
   );
 }
 
-function ReviewCard({ item }: { item: ReviewItemResponse }) {
+// --- stance-candidate (M6, ADR-048 §7) ------------------------------------------------------
+
+function StanceCandidateCard({ item, selected, onToggleSelect }: CardProps) {
+  const resolve = useResolveReview();
+  const { text, entities, salience, whyUnclear } = stanceOf(item);
+  const busy = resolve.isPending;
+  const parked = item.status === 'maybe';
+
+  const decide = (verdict: StanceVerdict) => resolve.mutate({ id: item.id, body: { verdict } });
+
+  return (
+    <Surface>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <SelectBox checked={selected} onChange={onToggleSelect} />
+          <span aria-hidden style={{ flexShrink: 0 }}>{typeIcon('insight')}</span>
+          <span style={{ fontSize: 13, color: 'var(--muted)' }}>Should I remember this?</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          {parked && <AgingTag item={item} />}
+          {salience && <SalienceBadge salience={salience} />}
+        </div>
+      </div>
+
+      <p style={{ margin: '12px 0 0', fontSize: 15.5, lineHeight: 1.5, color: 'var(--text)', fontWeight: 600 }}>
+        {text}
+      </p>
+
+      {entities.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+          {entities.map((e) => (
+            <span
+              key={e}
+              style={{
+                fontSize: 12,
+                color: 'var(--text)',
+                background: 'var(--surface)',
+                border: '1px solid var(--surface-border)',
+                borderRadius: 999,
+                padding: '3px 9px',
+              }}
+            >
+              {e}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {whyUnclear && (
+        <p style={{ margin: '10px 0 0', fontSize: 12.5, color: 'var(--muted)' }}>
+          Unclear because: {whyUnclear}
+        </p>
+      )}
+
+      <Excerpt text={item.excerpt} />
+
+      <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+        <Button onClick={() => decide('agree')} disabled={busy}>
+          Remember it
+        </Button>
+        <Button variant="ghost" onClick={() => decide('disagree')} disabled={busy}>
+          Discard
+        </Button>
+        {!parked && (
+          <Button variant="ghost" onClick={() => decide('maybe')} disabled={busy}>
+            Maybe later
+          </Button>
+        )}
+      </div>
+      <ResolveError show={resolve.isError} />
+    </Surface>
+  );
+}
+
+// --- dedup-proposal (M6, ADR-049 §6) --------------------------------------------------------
+
+// One side of a possible-duplicate pair, fetched lazily for its title/type/snippet, with a radio to
+// pick it as the merge survivor (the other is folded into it).
+function DedupNodeRow({
+  nodeId,
+  isSurvivor,
+  onPick,
+  busy,
+}: {
+  nodeId: string;
+  isSurvivor: boolean;
+  onPick: () => void;
+  busy: boolean;
+}) {
+  const { data, isLoading } = useNode(nodeId);
+  const title = data?.title ?? baseName(data?.store_path ?? nodeId);
+  const body = (data?.body ?? '').trim().replace(/\s+/g, ' ');
+  const snippet = body.length > 160 ? `${body.slice(0, 160)}…` : body;
+
+  return (
+    <label
+      style={{
+        display: 'flex',
+        gap: 10,
+        alignItems: 'flex-start',
+        padding: 12,
+        borderRadius: 'var(--radius)',
+        border: isSurvivor ? '1px solid var(--accent)' : '1px solid var(--surface-border)',
+        background: 'var(--surface)',
+        cursor: busy ? 'default' : 'pointer',
+        opacity: busy ? 0.6 : 1,
+      }}
+    >
+      <input
+        type="radio"
+        name={`survivor-${nodeId.slice(0, 8)}`}
+        checked={isSurvivor}
+        onChange={onPick}
+        disabled={busy}
+        aria-label={`Keep "${title}" as the surviving node`}
+        style={{ marginTop: 3, accentColor: 'var(--accent)', flexShrink: 0 }}
+      />
+      <span style={{ minWidth: 0 }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span aria-hidden title={typeLabel(data?.type)}>{typeIcon(data?.type)}</span>
+          <span style={{ fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {title}
+          </span>
+        </span>
+        {isLoading ? (
+          <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>Loading node…</span>
+        ) : (
+          snippet && (
+            <span style={{ display: 'block', marginTop: 4, fontSize: 12.5, lineHeight: 1.5, color: 'var(--muted)' }}>
+              {snippet}
+            </span>
+          )
+        )}
+      </span>
+    </label>
+  );
+}
+
+function DedupProposalCard({ item, selected, onToggleSelect }: CardProps) {
+  const resolve = useResolveReview();
+  const info = dedupOf(item);
+  const busy = resolve.isPending;
+  const parked = item.status === 'maybe';
+  const [survivor, setSurvivor] = useState(info.defaultSurvivor || info.nodeA);
+
+  const act = (action: 'merge' | 'keep' | 'link') =>
+    resolve.mutate({
+      id: item.id,
+      body: action === 'merge' ? { action, survivor } : { action },
+    });
+
+  return (
+    <Surface>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <SelectBox checked={selected} onChange={onToggleSelect} />
+          <span style={{ fontSize: 13, color: 'var(--muted)' }}>Possible duplicate</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          {parked && <AgingTag item={item} />}
+          <KindBadge label="Duplicate?" />
+        </div>
+      </div>
+
+      <p style={{ margin: '6px 0 12px', fontSize: 12.5, color: 'var(--muted)' }}>
+        These two look like the same thing
+        {info.cosine != null && <> · {(info.cosine * 100).toFixed(0)}% similar</>}
+        {info.sharedEntities.length > 0 && <> · shares {info.sharedEntities.join(', ')}</>}
+        {info.occurredOverlap && <> · overlapping dates</>}. Merge keeps the selected one and folds
+        the other into it; keep them separate, or link them as related.
+      </p>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <DedupNodeRow
+          nodeId={info.nodeA}
+          isSurvivor={survivor === info.nodeA}
+          onPick={() => setSurvivor(info.nodeA)}
+          busy={busy}
+        />
+        <DedupNodeRow
+          nodeId={info.nodeB}
+          isSurvivor={survivor === info.nodeB}
+          onPick={() => setSurvivor(info.nodeB)}
+          busy={busy}
+        />
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+        <Button onClick={() => act('merge')} disabled={busy}>
+          Merge
+        </Button>
+        <Button variant="ghost" onClick={() => act('keep')} disabled={busy}>
+          Keep both
+        </Button>
+        <Button variant="ghost" onClick={() => act('link')} disabled={busy}>
+          Link as related
+        </Button>
+      </div>
+      <ResolveError show={resolve.isError} />
+    </Surface>
+  );
+}
+
+// --- card dispatch --------------------------------------------------------------------------
+
+function ReviewCard({ item, selected, onToggleSelect }: CardProps) {
   return (
     <motion.div
       layout
@@ -223,8 +564,12 @@ function ReviewCard({ item }: { item: ReviewItemResponse }) {
         <EntityAmbiguityCard item={item} />
       ) : item.kind === KIND_VOCAB ? (
         <VocabProposalCard item={item} />
+      ) : item.kind === KIND_STANCE ? (
+        <StanceCandidateCard item={item} selected={selected} onToggleSelect={onToggleSelect} />
+      ) : item.kind === KIND_DEDUP ? (
+        <DedupProposalCard item={item} selected={selected} onToggleSelect={onToggleSelect} />
       ) : (
-        // Unknown/future kind (stance-candidate, dedup-proposal — M6): show it, don't hide it.
+        // Unknown/future kind: show it, don't hide it.
         <Surface>
           <KindBadge label={item.kind} />
           <Excerpt text={item.excerpt} />
@@ -234,36 +579,243 @@ function ReviewCard({ item }: { item: ReviewItemResponse }) {
   );
 }
 
+// --- batch action bar -----------------------------------------------------------------------
+
+// The actions offered depend on the selected kind: stance triage (agree/disagree/maybe) or a dedup
+// dismissal (keep). Selection is single-kind (the screen resets it when a different kind is picked),
+// so the bar is unambiguous. A batch merge is deliberately not offered — a survivor is per-item.
+const BATCH_ACTIONS: Record<string, { action: string; label: string; primary?: boolean }[]> = {
+  [KIND_STANCE]: [
+    { action: 'agree', label: 'Remember all', primary: true },
+    { action: 'disagree', label: 'Discard all' },
+    { action: 'maybe', label: 'Maybe later' },
+  ],
+  [KIND_DEDUP]: [{ action: 'keep', label: 'Keep both (dismiss)' }],
+};
+
+function BatchBar({
+  kind,
+  count,
+  onAction,
+  onClear,
+  busy,
+}: {
+  kind: string;
+  count: number;
+  onAction: (action: string) => void;
+  onClear: () => void;
+  busy: boolean;
+}) {
+  const actions = BATCH_ACTIONS[kind] ?? [];
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 12 }}
+      transition={{ type: 'spring', stiffness: 460, damping: 34 }}
+      style={{ position: 'sticky', bottom: 88, zIndex: 3 }}
+    >
+      <Surface padding={12} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>{count} selected</span>
+        <div style={{ flex: 1 }} />
+        {actions.map((a) => (
+          <Button
+            key={a.action}
+            variant={a.primary ? 'primary' : 'ghost'}
+            onClick={() => onAction(a.action)}
+            disabled={busy}
+            style={{ padding: '8px 14px', fontSize: 13 }}
+          >
+            {a.label}
+          </Button>
+        ))}
+        <Button variant="ghost" onClick={onClear} disabled={busy} style={{ padding: '8px 14px', fontSize: 13 }}>
+          Clear
+        </Button>
+      </Surface>
+    </motion.div>
+  );
+}
+
+// --- screen ---------------------------------------------------------------------------------
+
+function CountBadge({ n }: { n: number }) {
+  if (n <= 0) return null;
+  return (
+    <span
+      style={{
+        fontSize: 13,
+        fontWeight: 700,
+        color: 'var(--on-accent)',
+        background: 'var(--accent)',
+        borderRadius: 999,
+        padding: '2px 10px',
+        minWidth: 24,
+        textAlign: 'center',
+      }}
+    >
+      {n}
+    </span>
+  );
+}
+
 export function ReviewScreen() {
   const { data, isLoading, isError } = useReview();
+  const maybeQuery = useReviewMaybe();
+  const batch = useBatchResolve();
+
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [selectedKind, setSelectedKind] = useState<string | null>(null);
+  const [batchNote, setBatchNote] = useState<string | null>(null);
+  const [showParked, setShowParked] = useState(false);
+
+  // Salience-ordered active queue (high first), stable within a rank (server order = newest-first).
+  const items = useMemo(() => {
+    const list = data ?? [];
+    return [...list]
+      .map((item, i) => ({ item, i }))
+      .sort((a, b) => salienceRank(a.item) - salienceRank(b.item) || a.i - b.i)
+      .map(({ item }) => item);
+  }, [data]);
+
+  const parked = maybeQuery.data ?? [];
+
+  const toggleSelect = (item: ReviewItemResponse) => {
+    setBatchNote(null);
+    // Selection is single-kind: picking a different kind starts a fresh selection (the batch bar's
+    // actions are kind-specific, so a mixed selection would be ambiguous). Both setters run in the
+    // same event, so React batches them into one render.
+    if (item.kind !== selectedKind) {
+      setSelected(new Set([item.id]));
+      setSelectedKind(item.kind);
+      return;
+    }
+    const next = new Set(selected);
+    if (next.has(item.id)) next.delete(item.id);
+    else next.add(item.id);
+    setSelected(next);
+    setSelectedKind(next.size === 0 ? null : item.kind);
+  };
+
+  const clearSelection = () => {
+    setSelected(new Set());
+    setSelectedKind(null);
+  };
+
+  const runBatch = async (action: string) => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setBatchNote(null);
+    try {
+      const res = await batch.mutateAsync({ ids, action });
+      const ok = res.results.filter((r) => r.ok).length;
+      const failed = res.results.length - ok;
+      setBatchNote(failed === 0 ? `${ok} resolved.` : `${ok} resolved, ${failed} couldn’t be applied.`);
+    } catch {
+      setBatchNote('Batch action failed — try again.');
+    } finally {
+      clearSelection();
+    }
+  };
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, letterSpacing: -0.4 }}>Review</h1>
+      <header style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, letterSpacing: -0.4 }}>Review</h1>
+        <CountBadge n={items.length} />
+      </header>
       <p style={{ margin: '-6px 0 0', fontSize: 14, color: 'var(--muted)', lineHeight: 1.5 }}>
-        Decisions your brain couldn’t make on its own — ambiguous entities and proposed new types.
+        Decisions your brain couldn’t make on its own — ambiguous entities, proposed types, memories
+        it wasn’t sure to keep, and possible duplicates.
       </p>
+
+      {batchNote && (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)' }}>{batchNote}</p>
+      )}
 
       {isLoading ? (
         <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>Loading…</p>
       ) : isError ? (
         <p style={{ margin: 0, fontSize: 14, color: FAIL_COLOR }}>Couldn’t load the review queue.</p>
-      ) : !data || data.length === 0 ? (
+      ) : items.length === 0 ? (
         <Surface>
           <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)', lineHeight: 1.6 }}>
-            Nothing to review. When the organizer isn’t sure which entity a mention refers to, or
-            proposes a new type, it’ll wait for you here.
+            Nothing to review. When the organizer isn’t sure about a mention, a new type, a memory
+            from a conversation, or a possible duplicate, it’ll wait for you here.
           </p>
         </Surface>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <AnimatePresence initial={false}>
-            {data.map((item) => (
-              <ReviewCard key={item.id} item={item} />
+            {items.map((item) => (
+              <ReviewCard
+                key={item.id}
+                item={item}
+                selected={selected.has(item.id)}
+                onToggleSelect={() => toggleSelect(item)}
+              />
             ))}
           </AnimatePresence>
         </div>
       )}
+
+      {/* Parked (maybe) section — re-openable items with an aging indicator (ADR-048 §8). */}
+      {parked.length > 0 && (
+        <div style={{ display: 'grid', gap: 12 }}>
+          <button
+            onClick={() => setShowParked((v) => !v)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '4px 2px',
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--muted)',
+              cursor: 'pointer',
+              fontSize: 14,
+              fontWeight: 600,
+            }}
+          >
+            <span aria-hidden>{showParked ? '▾' : '▸'}</span>
+            Parked · {parked.length}
+          </button>
+          <AnimatePresence initial={false}>
+            {showParked && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.2, ease: 'easeOut' }}
+                style={{ overflow: 'hidden' }}
+              >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {parked.map((item) => (
+                    <ReviewCard
+                      key={item.id}
+                      item={item}
+                      selected={selected.has(item.id)}
+                      onToggleSelect={() => toggleSelect(item)}
+                    />
+                  ))}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
+
+      <AnimatePresence>
+        {selected.size > 0 && selectedKind && (
+          <BatchBar
+            kind={selectedKind}
+            count={selected.size}
+            onAction={(a) => void runBatch(a)}
+            onClear={clearSelection}
+            busy={batch.isPending}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

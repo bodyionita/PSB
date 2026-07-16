@@ -194,6 +194,29 @@ export interface ChatSessionDetail {
   messages: ChatMessageItem[];
 }
 
+// POST /chat/sessions/{id}/remember (M6, ADR-048 §6) — the on-demand distill result. Either the pass
+// ran (`endorsed`/`to_review` counts, `skipped` null) or it was a no-op (`skipped` = the reason, e.g.
+// "nothing new past the watermark", counts null). Endorsed captures organize in the background.
+export interface RememberResponse {
+  endorsed: number | null;
+  to_review: number | null;
+  skipped: string | null;
+}
+
+// One auto-endorsed chat memory in the chat-scoped "recently auto-recorded" audit list
+// (GET /chat/auto-recorded, ADR-048 §12). `node_paths` is empty + `title` null until the background
+// organize lands; `snippet` previews the endorsed statement; `source_ref` is the originating
+// chat-session id; `salience` is the distiller's coarse triage tag. Feeds the one-tap-remove surface.
+export interface AutoRecordedItem {
+  capture_id: string;
+  node_paths: string[];
+  title: string | null;
+  snippet: string;
+  salience: Salience | null;
+  source_ref: string | null;
+  created_at: string | null;
+}
+
 // --- Settings → Models (03-api.md §Settings, M4 / ADR-025 / ADR-043 / ADR-045) ---
 // One pickable chat model for a routing group's dropdowns. `id` is the MODEL id (the raw vendor
 // string, e.g. `claude-opus-4-8`) and `provider` is the id of the provider that serves it (derived
@@ -253,10 +276,17 @@ export interface TypesResponse {
   proposals: VocabProposalItem[];
 }
 
-// --- Review queue (03-api.md §Review queue, M3 / ADR-030 §3) ---
+// --- Review queue (03-api.md §Review queue, M3 / ADR-030 §3; M6 kinds ADR-048/049) ---
 export type ReviewVerdict = 'approve' | 'reject';
 // entity-ambiguity: a candidate node id | "new" | "maybe". vocab-proposal: approve | reject.
 export type ReviewChoice = string;
+// stance-candidate (ADR-048 §7): agree ingests through the organizer, disagree discards, maybe parks.
+export type StanceVerdict = 'agree' | 'disagree' | 'maybe';
+// dedup-proposal (ADR-049 §6): merge folds the loser into the survivor, keep dismisses, link writes
+// a canonical `similar` edge. A batch merge uses the payload's default survivor.
+export type DedupAction = 'merge' | 'keep' | 'link';
+// The distiller's coarse LLM triage tag (ADR-048 §8) — orders the Review list + ranks feed items.
+export type Salience = 'high' | 'med' | 'low';
 
 // One review_queue row. `payload` carries kind-specific data decidable in place —
 // entity-ambiguity candidates (`{id,name,disambig,aliases}`) or a proposal's `{vocab,value}`.
@@ -278,6 +308,29 @@ export interface EntityCandidate {
   name: string | null;
   disambig: string | null;
   aliases: string[];
+}
+
+// POST /review/{id} resolution body (ADR-048/049) — the meaningful field is per-kind:
+// entity-ambiguity `choice`, stance-candidate/vocab `verdict`, dedup-proposal `action`(+`survivor`).
+// The server reads only the field that fits the item's kind (400 otherwise).
+export interface ReviewResolveBody {
+  choice?: ReviewChoice;
+  verdict?: ReviewVerdict | StanceVerdict;
+  action?: DedupAction;
+  survivor?: string;
+}
+
+// One item's outcome in a batch resolve (POST /review/batch, ADR-048 §8): best-effort per item — an
+// action that doesn't fit an item's kind fails just that item (`ok=false` + reason), never the batch.
+export interface ReviewBatchResultItem {
+  id: string;
+  ok: boolean;
+  error: string | null;
+}
+
+// POST /review/batch response — one result per requested id, in request order.
+export interface ReviewBatchResponse {
+  results: ReviewBatchResultItem[];
 }
 
 // --- Activity (03-api.md §Activity feed, M2 pull-forward) ---

@@ -8,7 +8,14 @@ import { typeIcon, typeLabel } from '../../ui/nodeTypes';
 // usePlanes is the canonical meta read (shared cache key ['planes']); reused here for the composer's
 // retrieval-scoping chips rather than re-declared.
 import { usePlanes } from '../search/useSearch';
-import { useChatModels, useChatSession, useChatSessions, useSendChat } from './useChat';
+import { AutoRecordedList } from './AutoRecordedList';
+import {
+  useChatModels,
+  useChatSession,
+  useChatSessions,
+  useRememberSession,
+  useSendChat,
+} from './useChat';
 
 // Chat tab (06 §2, ADR-025): ask across your memories, answers with cited [n] source cards. Client-
 // side reveal over the non-streaming response, a per-conversation model picker + plane chips in the
@@ -521,6 +528,8 @@ export function ChatScreen() {
   const [model, setModel] = useState<string | undefined>(undefined);
   const [planes, setPlanes] = useState<ReadonlySet<string>>(new Set());
   const [showList, setShowList] = useState(false);
+  const [showRecorded, setShowRecorded] = useState(false);
+  const [rememberNote, setRememberNote] = useState<string | null>(null);
 
   const keySeq = useRef(0);
   const seededFor = useRef<string | null>(null);
@@ -532,6 +541,7 @@ export function ChatScreen() {
   const planesQuery = usePlanes();
   const detailQuery = useChatSession(activeId);
   const send = useSendChat();
+  const remember = useRememberSession();
 
   const models = modelsQuery.data;
   const selectedModel = model ?? models?.default ?? '';
@@ -582,12 +592,35 @@ export function ChatScreen() {
     setThread([]);
     setModel(undefined);
     setShowList(false);
+    setRememberNote(null);
   };
 
   const openSession = (id: string) => {
     if (id !== activeId) setActiveId(id);
     setModel(undefined);
     setShowList(false);
+    setRememberNote(null);
+  };
+
+  // "Remember now" (06 §2, ADR-048 §6): distill this session on demand. Surface the returned
+  // {endorsed, to_review} summary (or the skip reason) inline; endorsed memories organize in the
+  // background and surface in the "recently auto-recorded" list.
+  const handleRemember = async () => {
+    if (!activeId || remember.isPending) return;
+    setRememberNote(null);
+    try {
+      const res = await remember.mutateAsync(activeId);
+      if (res.skipped) {
+        setRememberNote('Nothing new to record.');
+      } else {
+        const parts: string[] = [];
+        if (res.endorsed) parts.push(`${res.endorsed} remembered`);
+        if (res.to_review) parts.push(`${res.to_review} sent to review`);
+        setRememberNote(parts.length ? `${parts.join(' · ')}.` : 'Nothing new to record.');
+      }
+    } catch {
+      setRememberNote('Couldn’t distill this conversation right now — try again.');
+    }
   };
 
   const togglePlane = (p: string) =>
@@ -666,10 +699,22 @@ export function ChatScreen() {
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      <header style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <header style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, letterSpacing: -0.4, flex: 1 }}>
           Chat
         </h1>
+        {activeId && (
+          <ChipButton
+            on={false}
+            label={remember.isPending ? 'Remembering…' : '✎ Remember now'}
+            onClick={() => void handleRemember()}
+          />
+        )}
+        <ChipButton
+          on={showRecorded}
+          label="Recorded"
+          onClick={() => setShowRecorded((v) => !v)}
+        />
         <ChipButton
           on={showList}
           label={`History${sessions.length ? ` · ${sessions.length}` : ''}`}
@@ -677,6 +722,35 @@ export function ChatScreen() {
         />
         <ChipButton on={false} label="＋ New" onClick={newChat} />
       </header>
+
+      {rememberNote && (
+        <motion.p
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          style={{ margin: 0, fontSize: 13, color: 'var(--muted)' }}
+        >
+          {rememberNote}
+        </motion.p>
+      )}
+
+      <AnimatePresence initial={false}>
+        {showRecorded && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+            style={{ overflow: 'hidden' }}
+          >
+            <Surface padding={12}>
+              <p style={{ margin: '0 0 10px', fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}>
+                Memories your brain recorded on its own. Remove anything it got wrong.
+              </p>
+              <AutoRecordedList />
+            </Surface>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence initial={false}>
         {showList && (

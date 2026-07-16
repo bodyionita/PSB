@@ -4,9 +4,16 @@
 // (ADR-043) — mirroring the capture strip's settle window.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import type { ChatRequest, ChatResponse, ChatSessionItem } from '../../api/types';
+import type {
+  AutoRecordedItem,
+  ChatRequest,
+  ChatResponse,
+  ChatSessionItem,
+  RememberResponse,
+} from '../../api/types';
 
 export const CHAT_SESSIONS_KEY = ['chat', 'sessions'] as const;
+export const AUTO_RECORDED_KEY = ['chat', 'auto-recorded'] as const;
 
 // Poll cadence + window for a freshly-created thread whose title hasn't landed yet. Titling runs
 // after the first exchange and is quick; bound the poll so an untitled-forever session (titling
@@ -56,5 +63,49 @@ export function useSendChat() {
     // A new session may have been created, and after the first exchange a title starts generating —
     // refresh the list so a new thread appears and its title lands (the poll above catches the flip).
     onSuccess: () => qc.invalidateQueries({ queryKey: CHAT_SESSIONS_KEY }),
+  });
+}
+
+// "Remember now" (M6, ADR-048 §6): distill the active session on demand. The endorse path organizes
+// in the background, so its resulting nodes only surface in the auto-recorded list a moment later —
+// refresh it on success so a just-endorsed memory shows up (and stays removable).
+export function useRememberSession() {
+  const qc = useQueryClient();
+  return useMutation<RememberResponse, Error, string>({
+    mutationFn: (sessionId: string) => api.rememberSession(sessionId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: AUTO_RECORDED_KEY }),
+  });
+}
+
+// The chat-scoped "recently auto-recorded" audit list (ADR-048 §12) — nightly-endorsed memories,
+// newest-first, each removable in one tap.
+export function useAutoRecorded() {
+  return useQuery<AutoRecordedItem[]>({
+    queryKey: AUTO_RECORDED_KEY,
+    queryFn: () => api.listAutoRecorded(),
+  });
+}
+
+// One-tap remove (ADR-048 §11) — git-rm + DB-delete + capture tombstone (soft-delete, replay-
+// excluded). Optimistically drop the row so the removal feels instant, then reconcile with the server.
+export function useRemoveAutoRecorded() {
+  const qc = useQueryClient();
+  return useMutation<void, Error, string, { previous: AutoRecordedItem[] | undefined }>({
+    mutationFn: (captureId: string) => api.removeAutoRecorded(captureId),
+    onMutate: async (captureId) => {
+      await qc.cancelQueries({ queryKey: AUTO_RECORDED_KEY });
+      const previous = qc.getQueryData<AutoRecordedItem[]>(AUTO_RECORDED_KEY);
+      qc.setQueryData<AutoRecordedItem[]>(AUTO_RECORDED_KEY, (old) =>
+        (old ?? []).filter((i) => i.capture_id !== captureId),
+      );
+      return { previous };
+    },
+    onError: (_err, _id, ctx) => {
+      if (ctx?.previous) qc.setQueryData(AUTO_RECORDED_KEY, ctx.previous);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: AUTO_RECORDED_KEY });
+      qc.invalidateQueries({ queryKey: ['node'] });
+    },
   });
 }
