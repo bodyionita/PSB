@@ -149,7 +149,9 @@ async def node_neighbors(
     no ``rel`` → the grouped first page (one zone per ``(origin, rel)``, per-zone capped +
     ``total``/``next_cursor``); with ``rel`` (+ optional ``cursor``) → that single zone's next flat
     page over the M5 keyset primitive ("show more"). Unknown node → ``center=None`` + empty zones.
-    ``direction`` is validated to ``out``/``in``/``both`` by the type; a bad ``cursor`` → 422."""
+    ``direction`` is validated to ``out``/``in``/``both`` by the type; a bad ``cursor`` → 422.
+    A ``cursor`` without ``rel`` is ignored (grouped mode is always the first page — pagination is
+    per-zone via the ``rel`` mode)."""
     center_id = str(node_id)
     if rel:
         try:

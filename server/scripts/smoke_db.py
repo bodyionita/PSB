@@ -1129,11 +1129,12 @@ async def check_neighbor_zones(db: Database) -> None:
     store = PgNeighborStore(db)
     now = datetime.now(UTC)
     c = "ffffffff-0000-0000-0000-0000000000c0"  # center hub (person)
-    place = "ffffffff-0000-0000-0000-0000000000c1"  # place — out/at zone
+    place = "ffffffff-0000-0000-0000-0000000000c1"  # place — out/at zone (current)
     sim = "ffffffff-0000-0000-0000-0000000000c2"  # derived-similar target
+    past = "ffffffff-0000-0000-0000-0000000000c3"  # place — a superseded (until-closed) at edge
     tomb = "ffffffff-0000-0000-0000-0000000000cf"  # tombstoned — endpoint excluded both ends
     mems = [f"ffffffff-0000-0000-0000-0000000000d{i}" for i in range(5)]  # involves -> C (inbound)
-    ids = [c, place, sim, tomb, *mems]
+    ids = [c, place, sim, past, tomb, *mems]
     try:
         async with db.transaction() as conn:
             await conn.execute(
@@ -1148,13 +1149,16 @@ async def check_neighbor_zones(db: Database) -> None:
                  ($3,'ffffffff::memory/sim.md','memory','Similar','personal','{personal}','{}','{}',
                   NULL,'h_sim',$5,$5),
                  ($4,'ffffffff::person/tomb.md','person','Tomb','personal','{personal}','{}','{}',
-                  $1,'h_tomb',$5,$5)
+                  $1,'h_tomb',$5,$5),
+                 ($6,'ffffffff::place/past.md','place','Past','personal','{personal}','{}','{}',
+                  NULL,'h_past',$5,$5)
                 """,
                 c,
                 place,
                 sim,
                 tomb,
                 now,
+                past,
             )
             await conn.executemany(
                 """
@@ -1167,8 +1171,9 @@ async def check_neighbor_zones(db: Database) -> None:
                     for i, m in enumerate(mems)
                 ],
             )
-            # m_i -involves-> C (inbound zone), C -at-> place (out zone), C -similar-> sim (derived
-            # zone), C -knows-> tomb (canonical, dst tombstoned → excluded from the out-leg)
+            # m_i -involves-> C (inbound zone), C -at-> place (out zone, current), C -at-> past (a
+            # superseded/until-closed edge — must still be RETURNED, ADR-051 §6), C -similar-> sim
+            # (derived zone), C -knows-> tomb (canonical, dst tombstoned → excluded from out-leg)
             await conn.executemany(
                 "INSERT INTO edges (src_id, dst_id, rel, origin, score) "
                 "VALUES ($1,$2,'involves','canonical',NULL)",
@@ -1176,15 +1181,17 @@ async def check_neighbor_zones(db: Database) -> None:
             )
             await conn.execute(
                 """
-                INSERT INTO edges (src_id, dst_id, rel, origin, score) VALUES
-                 ($1,$2,'at','canonical',NULL),
-                 ($1,$3,'similar','derived',0.9),
-                 ($1,$4,'knows','canonical',NULL)
+                INSERT INTO edges (src_id, dst_id, rel, origin, score, since, until) VALUES
+                 ($1,$2,'at','canonical',NULL,NULL,NULL),
+                 ($1,$5,'at','canonical',NULL,'2020-01-01','2023-01-01'),
+                 ($1,$3,'similar','derived',0.9,NULL,NULL),
+                 ($1,$4,'knows','canonical',NULL,NULL,NULL)
                 """,
                 c,
                 place,
                 sim,
                 tomb,
+                past,
             )
 
         rows = await store.neighbor_zones(c, direction=None, fanout=3)
@@ -1205,12 +1212,22 @@ async def check_neighbor_zones(db: Database) -> None:
             str([(z.edge.node_id, z.zone_total) for z in involves]),
         )
         check(
-            "at zone = [place] out, zone_total 1; carries endpoint type/plane (no 2nd fetch)",
-            [z.edge.node_id for z in at_zone] == [place]
-            and at_zone[0].zone_total == 1
+            "at zone = [place, past] out, zone_total 2; carries endpoint type/plane (no 2nd fetch)",
+            [z.edge.node_id for z in at_zone] == [place, past]
+            and all(z.zone_total == 2 for z in at_zone)
             and at_zone[0].edge.type == "place"
             and at_zone[0].edge.plane == "personal",
             str(at_zone),
+        )
+        # Superseded (until-closed) edges are RETURNED, dashed+dimmed on the map (ADR-051 §6) — the
+        # SQL applies no until filter; the past edge carries its since/until through for the render.
+        past_edge = next((z for z in at_zone if z.edge.node_id == past), None)
+        check(
+            "superseded (until-closed) at edge present, carries since/until (belief timeline)",
+            past_edge is not None
+            and str(past_edge.edge.until) == "2023-01-01"
+            and str(past_edge.edge.since) == "2020-01-01",
+            str(past_edge),
         )
         check(
             "derived similar is its own zone (origin=derived), zone_total 1",
