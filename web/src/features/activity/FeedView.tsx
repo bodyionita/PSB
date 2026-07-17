@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { ActivityCategory, ActivityFeedItem, RunChildItem } from '../../api/types';
 import { NodeRefChips } from '../capture/NodeRefChips';
 import { useCapture } from '../capture/useCaptures';
@@ -8,7 +8,13 @@ import { Surface } from '../../ui/Surface';
 import { TimeAgo } from '../../ui/TimeAgo';
 import { StatusBadge } from './runStatus';
 import { FAIL_COLOR } from './statusColors';
-import { useActivityFeed, useRemoveCapture, useRun } from './useActivity';
+import {
+  useActivityFeed,
+  usePipelines,
+  useRemoveCapture,
+  useReviewItem,
+  useRun,
+} from './useActivity';
 
 // The Feed — "what did my brain do" (06 §3, ADR-053 §4; M8.1 ADR-054 §2/§4): the merged GET
 // /activity as three categorized tabs (agents & jobs · captures · manual actions), newest-first
@@ -234,14 +240,89 @@ function CaptureDetail({ captureId }: { captureId: string }) {
   );
 }
 
+// --- Expanded review-verdict detail: what was decided (M8.1 follow-up) ---------------------------
+
+const REVIEW_KIND_LABEL: Record<string, string> = {
+  'entity-ambiguity': 'Entity match',
+  'vocab-proposal': 'New vocabulary',
+  'stance-candidate': 'Remember this?',
+  'dedup-proposal': 'Possible duplicate',
+};
+
+function humanValue(v: unknown): string {
+  if (v == null) return '—';
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return JSON.stringify(v);
+}
+
+// A resolved review, fetched on expand (GET /review/{id}): its kind, final status, the excerpt it was
+// filed from, and the recorded resolution (what was decided) rendered generically.
+function ReviewVerdictDetail({ reviewId }: { reviewId: string }) {
+  const q = useReviewItem(reviewId);
+  if (q.isLoading) return <span style={{ fontSize: 12, color: 'var(--muted)' }}>Loading…</span>;
+  if (q.isError || !q.data)
+    return <span style={{ fontSize: 12, color: FAIL_COLOR }}>Couldn’t load this review.</span>;
+  const r = q.data;
+  const decided = Object.entries(r.resolution ?? {}).filter(([, v]) => v != null && v !== '');
+  return (
+    <div style={{ display: 'grid', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <SourceBadge source={REVIEW_KIND_LABEL[r.kind] ?? r.kind} />
+        <span style={{ fontSize: 11, color: 'var(--muted)' }}>{r.status}</span>
+      </div>
+      {r.excerpt && (
+        <p
+          style={{
+            margin: 0,
+            minWidth: 0,
+            fontSize: 13,
+            color: 'var(--text)',
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
+          }}
+        >
+          {r.excerpt}
+        </p>
+      )}
+      {decided.length > 0 ? (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {decided.map(([k, v]) => (
+            <span
+              key={k}
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: 'var(--muted)',
+                border: '1px solid var(--surface-border)',
+                borderRadius: 999,
+                padding: '3px 9px',
+                maxWidth: '100%',
+                overflowWrap: 'anywhere',
+              }}
+            >
+              {k}: {humanValue(v)}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>No recorded decision detail.</span>
+      )}
+    </div>
+  );
+}
+
 // --- One feed row -------------------------------------------------------------------------------
 
-function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
+function FeedRow({ item, index, isPipeline }: { item: ActivityFeedItem; index: number; isPipeline: boolean }) {
   const [open, setOpen] = useState(false);
   const remove = useRemoveCapture();
   const isCapture = item.kind === KIND_CAPTURE;
   const isChatCapture = isCapture && item.source === 'chat';
-  const expandable = (item.kind === KIND_AGENT_RUN && item.ref != null) || isCapture;
+  const isReviewVerdict = item.kind === KIND_REVIEW_VERDICT;
+  const expandable =
+    (item.kind === KIND_AGENT_RUN && item.ref != null) || isCapture || (isReviewVerdict && item.ref != null);
 
   return (
     <motion.div
@@ -252,18 +333,37 @@ function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
         padding: 14,
         borderRadius: 'var(--radius)',
         border: '1px solid var(--surface-border)',
+        // Pipeline runs (nightly/weekly) get an accent rail + tag so the scheduled aggregates stand
+        // out from the individual agent/job runs at a glance.
+        ...(isPipeline ? { borderLeft: '3px solid var(--accent)', paddingLeft: 12 } : {}),
         display: 'grid',
         gap: 8,
       }}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 14, fontWeight: 700 }}>
-          {item.kind === KIND_REVIEW_VERDICT
+        <span style={{ fontSize: 14, fontWeight: 700, minWidth: 0, overflowWrap: 'anywhere' }}>
+          {isReviewVerdict
             ? `Reviewed: ${item.title ?? 'item'}`
             : isCapture
               ? captureHeadline(item.source)
               : (item.title ?? 'Run')}
         </span>
+        {isPipeline && (
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: 0.4,
+              textTransform: 'uppercase',
+              color: 'var(--on-accent)',
+              background: 'var(--accent)',
+              borderRadius: 999,
+              padding: '2px 8px',
+            }}
+          >
+            pipeline
+          </span>
+        )}
         {isCapture && item.source && <SourceBadge source={item.source} />}
         <TimeAgo
           iso={item.ts}
@@ -275,6 +375,7 @@ function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
         <p
           style={{
             margin: 0,
+            minWidth: 0,
             fontSize: 13,
             color: 'var(--muted)',
             lineHeight: 1.5,
@@ -282,6 +383,10 @@ function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
             WebkitLineClamp: 3,
             WebkitBoxOrient: 'vertical',
             overflow: 'hidden',
+            // A long unbroken token (a url, an mcp payload) would push the line-clamp box past the
+            // card edge on a phone; break it so the row can't overflow horizontally.
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
           }}
         >
           {item.snippet}
@@ -333,7 +438,13 @@ function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
             exit={{ opacity: 0, height: 0 }}
             style={{ overflow: 'hidden', paddingTop: 4 }}
           >
-            {isCapture ? <CaptureDetail captureId={item.id} /> : item.ref && <RunDetail runId={item.ref} />}
+            {isCapture ? (
+              <CaptureDetail captureId={item.id} />
+            ) : isReviewVerdict && item.ref ? (
+              <ReviewVerdictDetail reviewId={item.ref} />
+            ) : item.ref ? (
+              <RunDetail runId={item.ref} />
+            ) : null}
           </motion.div>
         )}
       </AnimatePresence>
@@ -345,6 +456,14 @@ function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
 
 function FeedList({ category }: { category: ActivityCategory }) {
   const feed = useActivityFeed(category);
+  // Pipeline runs (nightly/weekly) are agent-run rows whose title is a registered pipeline name —
+  // matched against the live pipeline list (no hardcode). A 503 (no scheduler) → empty set → the
+  // coloring simply doesn't apply, never an error.
+  const pipelines = usePipelines();
+  const pipelineNames = useMemo(
+    () => new Set((pipelines.data ?? []).map((p) => p.name)),
+    [pipelines.data],
+  );
   const items = feed.data?.pages.flatMap((p) => p.items) ?? [];
 
   if (feed.isLoading)
@@ -357,7 +476,12 @@ function FeedList({ category }: { category: ActivityCategory }) {
   return (
     <div style={{ display: 'grid', gap: 10 }}>
       {items.map((item, i) => (
-        <FeedRow key={`${item.kind}:${item.id}`} item={item} index={i} />
+        <FeedRow
+          key={`${item.kind}:${item.id}`}
+          item={item}
+          index={i}
+          isPipeline={item.kind === KIND_AGENT_RUN && item.title != null && pipelineNames.has(item.title)}
+        />
       ))}
       {feed.hasNextPage && (
         <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 4 }}>

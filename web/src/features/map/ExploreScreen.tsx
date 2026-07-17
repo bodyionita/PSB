@@ -531,25 +531,34 @@ export function ExploreScreen({
   // map position worth returning to.
   const showModeToggle = focalId != null;
 
+  // Full-bleed page (M8.1 follow-up): the screen fills its flex parent (AppShell wide tab) — no
+  // fixed-height magic number and no bottom gap — with only the header inset; the map goes
+  // edge-to-edge. `paddingBottom` clears the fixed bottom nav so the caption/list never slide under it.
+  const NAV_CLEARANCE = 'calc(90px + env(safe-area-inset-bottom))';
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100dvh - 150px)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, paddingBottom: NAV_CLEARANCE }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '16px 16px 10px', flexWrap: 'wrap' }}>
         <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, letterSpacing: -0.4 }}>Explore</h1>
         {mode === 'map' && focalId && (
           <Breadcrumbs crumbs={crumbs} onGo={goCrumb} onHome={startOver} />
         )}
-        {mode === 'map' && center && <ViewToggle view={view} onChange={setViewOverride} />}
-        {showModeToggle && <ExploreModeToggle mode={mode} onChange={setMode} />}
+        {/* In map mode the Canvas/List + Search/Map toggles overlay the map itself (below); the
+            header only carries the Search→Map return toggle when you've stepped back to search. */}
+        {mode === 'search' && showModeToggle && (
+          <ExploreModeToggle mode={mode} onChange={setMode} />
+        )}
       </div>
 
       {mode === 'search' || !focalId ? (
-        <SearchPanel onCenter={centerOn} last={lastCenter} />
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 16px' }}>
+          <SearchPanel onCenter={centerOn} last={lastCenter} />
+        </div>
       ) : neighbors.isLoading ? (
-        <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>Loading neighborhood…</p>
+        <p style={{ margin: 0, padding: '0 16px', fontSize: 14, color: 'var(--muted)' }}>Loading neighborhood…</p>
       ) : neighbors.isError ? (
-        <p style={{ margin: 0, fontSize: 14, color: FAIL_COLOR }}>Couldn’t load this node.</p>
+        <p style={{ margin: 0, padding: '0 16px', fontSize: 14, color: FAIL_COLOR }}>Couldn’t load this node.</p>
       ) : !center ? (
-        <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>
+        <p style={{ margin: 0, padding: '0 16px', fontSize: 14, color: 'var(--muted)' }}>
           This node has no neighborhood.{' '}
           <button
             onClick={startOver}
@@ -565,11 +574,16 @@ export function ExploreScreen({
             position: 'relative',
             flex: 1,
             minHeight: 0,
-            borderRadius: 'var(--radius-lg)',
-            border: '1px solid var(--surface-border)',
+            borderTop: '1px solid var(--surface-border)',
             overflow: 'hidden',
           }}
         >
+          {/* Toggles overlaid on the map (M8.1 follow-up) — the map is the whole page now, so its
+              controls live on it, top-right, clear of the caption. */}
+          <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 4, display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <ExploreModeToggle mode={mode} onChange={setMode} />
+            {center && <ViewToggle view={view} onChange={setViewOverride} />}
+          </div>
           {view === 'canvas' ? (
             <>
               <MapCanvas
@@ -829,7 +843,7 @@ function MapDrawer({
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         onClick={onClose}
-        style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.32)' }}
+        style={{ position: 'absolute', inset: 0, zIndex: 20, background: 'rgba(0,0,0,0.32)' }}
       />
       <motion.div
         initial={{ x: '100%' }}
@@ -841,7 +855,9 @@ function MapDrawer({
           top: 0,
           right: 0,
           bottom: 0,
-          width: 'min(440px, 92%)',
+          zIndex: 21,
+          // Full-bleed on a phone (no sliver of map peeking behind); a side panel on wider screens.
+          width: 'min(440px, 100%)',
           overflowY: 'auto',
           padding: 20,
           background: 'var(--surface)',

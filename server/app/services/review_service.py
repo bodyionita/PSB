@@ -167,6 +167,12 @@ class ReviewService:
             limit=self._settings.review_list_max,
         )
 
+    async def get_item(self, review_id: str) -> ReviewRecord | None:
+        """One review item by id, **any status** (GET /review/{id}) — the read the Activity
+        "Reviewed" feed row expands to show what was decided (kind, payload, resolution). ``None``
+        ⇒ unknown id (router → 404). Read-only; never mutates."""
+        return await self._store.get(review_id)
+
     async def resolve(
         self,
         review_id: str,

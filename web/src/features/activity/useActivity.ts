@@ -111,6 +111,15 @@ export function useRunLogs(runId: string | null): { lines: RunLogLine[]; running
   return { lines, running };
 }
 
+// One resolved review item's detail (GET /review/{id}) — the Activity "Reviewed" row's expand.
+export function useReviewItem(reviewId: string | null) {
+  return useQuery({
+    queryKey: ['review', 'item', reviewId],
+    queryFn: () => api.getReview(reviewId!),
+    enabled: reviewId != null,
+  });
+}
+
 // --- Ops roster + pipelines (live scheduler) ----------------------------------------------------
 
 export const ROSTER_KEY = ['activity', 'agents'] as const;

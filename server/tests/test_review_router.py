@@ -47,11 +47,17 @@ class FakeReviewService:
         self.list_args: dict | None = None
         self.resolve_args: dict | None = None
         self.batch_args: dict | None = None
+        self.get_args: dict | None = None
+        self.get_result: ReviewRecord | None = _record(REVIEW_ID, status="resolved")
         self.raises: Exception | None = None
 
     async def list_items(self, *, status=None, kind=None):
         self.list_args = {"status": status, "kind": kind}
         return [_record()]
+
+    async def get_item(self, review_id):
+        self.get_args = {"review_id": review_id}
+        return self.get_result
 
     async def resolve(self, review_id, *, choice=None, verdict=None, action=None, survivor=None):
         self.resolve_args = {
@@ -98,6 +104,29 @@ def test_list_passes_filters(client_and_service):
     client, fake = client_and_service
     client.get(f"{PREFIX}/review", params={"status": "all", "kind": "vocab-proposal"})
     assert fake.list_args == {"status": "all", "kind": "vocab-proposal"}
+
+
+def test_get_review_returns_item_any_status(client_and_service):
+    # GET /review/{id} serialises the record (a resolved one here — the Activity "Reviewed" expand).
+    client, fake = client_and_service
+    resp = client.get(f"{PREFIX}/review/{REVIEW_ID}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == REVIEW_ID and body["status"] == "resolved"
+    assert fake.get_args == {"review_id": REVIEW_ID}
+
+
+def test_get_review_unknown_is_404(client_and_service):
+    client, fake = client_and_service
+    fake.get_result = None
+    resp = client.get(f"{PREFIX}/review/{REVIEW_ID}")
+    assert resp.status_code == 404
+
+
+def test_get_review_malformed_id_is_422(client_and_service):
+    client, _ = client_and_service
+    resp = client.get(f"{PREFIX}/review/not-a-uuid")
+    assert resp.status_code == 422
 
 
 def test_resolve_delegates_and_serialises(client_and_service):

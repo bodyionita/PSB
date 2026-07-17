@@ -170,6 +170,8 @@ export const api = {
     request<ReviewItemResponse[]>(
       `/review?status=${encodeURIComponent(status)}${kind ? `&kind=${encodeURIComponent(kind)}` : ''}`,
     ),
+  // One review item by id, any status (M8.1 follow-up) — the Activity "Reviewed" row's expand detail.
+  getReview: (id: string) => request<ReviewItemResponse>(`/review/${encodeURIComponent(id)}`),
   resolveReview: (id: string, body: ReviewResolveBody) =>
     request<ReviewItemResponse>(`/review/${encodeURIComponent(id)}`, {
       method: 'POST',

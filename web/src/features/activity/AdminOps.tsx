@@ -47,6 +47,11 @@ const pillStyle: CSSProperties = {
 
 const inputStyle: CSSProperties = {
   width: '100%',
+  // Inputs carry an intrinsic min-width from their default size; without these they can push a grid
+  // track (and the whole page) wider than a phone viewport.
+  minWidth: 0,
+  maxWidth: '100%',
+  boxSizing: 'border-box',
   padding: '10px 12px',
   fontSize: 13,
   color: 'var(--text)',
@@ -329,8 +334,8 @@ function MergeSideBox({ label, side }: { label: string; side: { title: string | 
       <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--muted)' }}>
         {label}
       </span>
-      <span style={{ fontSize: 14, fontWeight: 600 }}>{side.title ?? side.id}</span>
-      <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+      <span style={{ fontSize: 14, fontWeight: 600, overflowWrap: 'anywhere' }}>{side.title ?? side.id}</span>
+      <span style={{ fontSize: 12, color: 'var(--muted)', overflowWrap: 'anywhere' }}>
         {side.type}
         {side.aliases.length > 0 ? ` · aliases: ${side.aliases.join(', ')}` : ''}
       </span>
@@ -479,7 +484,7 @@ function VocabConsolidateCard() {
               </span>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
                 {plan.retypings.slice(0, 8).map((r, i) => (
-                  <span key={`${r.src_id}:${r.to}:${i}`} style={{ fontSize: 12, color: 'var(--muted)' }}>
+                  <span key={`${r.src_id}:${r.to}:${i}`} style={{ fontSize: 12, color: 'var(--muted)', overflowWrap: 'anywhere' }}>
                     {r.from_rel} → <b style={{ color: 'var(--text)' }}>{r.to_rel}</b> (on {r.src_id})
                   </span>
                 ))}

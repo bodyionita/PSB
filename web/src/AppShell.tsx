@@ -126,17 +126,38 @@ export function AppShell() {
         maxWidth: active.wide ? 'none' : 640,
         margin: '0 auto',
         width: '100%',
+        // Backstop: no screen should ever scroll sideways on a phone. `clip` (not `hidden`) adds no
+        // scroll container and doesn't trap the fixed nav / body-portaled tooltip / fixed drawers,
+        // which all live outside this box or escape it. Individual long-content fixes still wrap;
+        // this only catches anything that slips through.
+        overflowX: 'clip',
       }}
     >
-      <main style={{ flex: 1, padding: active.wide ? '20px 16px 84px' : '28px 20px 96px' }}>
+      {/* A `wide` tab (Explore) owns its whole layout edge-to-edge — no reading-column padding, a
+          flex column so its map can fill the page (nav clearance handled inside the screen). Normal
+          tabs keep the padded reading column. */}
+      <main
+        style={
+          active.wide
+            ? { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }
+            : { flex: 1, padding: '28px 20px 96px' }
+        }
+      >
         {/* Enter-only, keyed by tab: changing tab remounts and plays the entrance. We avoid
             AnimatePresence exit here on purpose — screens contain infinite (repeat) animations,
             and an exit animation would wait forever on them, hanging the transition. */}
         <motion.div
           key={active.id}
-          initial={{ opacity: 0, y: 12 }}
+          // A `y` entrance leaves a transform on the wrapper; on the full-height wide (Explore) tab
+          // that residual offset pushes content down into the fixed nav, so wide tabs fade in only.
+          initial={{ opacity: 0, y: active.wide ? 0 : 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.22, ease: 'easeOut' }}
+          style={
+            active.wide
+              ? { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }
+              : undefined
+          }
         >
           {active.render({
             seed: mapSeed,

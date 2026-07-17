@@ -83,6 +83,20 @@ async def resolve_batch(
     )
 
 
+@router.get("/{review_id}", response_model=ReviewItemResponse)
+async def get_review(
+    review_id: uuid.UUID,
+    service: ReviewService = Depends(get_review_service),
+) -> ReviewItemResponse:
+    """One review item by id, **any status** — the detail the Activity "Reviewed" feed row expands
+    to (its kind, payload, and resolution). ``422`` malformed id; ``404`` unknown. Read-only.
+    Declared before the ``POST /{review_id}`` resolve so both share the uuid-validated path."""
+    record = await service.get_item(str(review_id))
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="review item not found")
+    return _to_response(record)
+
+
 @router.post("/{review_id}", response_model=ReviewItemResponse)
 async def resolve_review(
     review_id: uuid.UUID,
