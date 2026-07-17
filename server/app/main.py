@@ -43,7 +43,20 @@ from .migration_check import warn_if_behind_head
 from .oauth.service import OAuthService
 from .oauth.store import PgOAuthStore
 from .providers.registry import build_registry
-from .routers import activity, admin, auth, capture, chat, health, meta, oauth, review, search
+from .routers import (
+    activity,
+    admin,
+    agents,
+    auth,
+    capture,
+    chat,
+    health,
+    meta,
+    oauth,
+    pipelines,
+    review,
+    search,
+)
 from .routers import settings as settings_router
 from .search.service import SearchService
 from .search.store import PgSearchStore
@@ -53,6 +66,7 @@ from .services.backup_jobs import build_backup_jobs
 from .services.capture_pipeline import CapturePipeline
 from .services.capture_store import PgCaptureStore
 from .services.git_repo import GitRepo
+from .services.graph_health import build_graph_health_service
 from .services.job_runner import JobRunner
 from .services.maybe_digest import MaybeDigestService
 from .services.model_routing import build_model_routing
@@ -430,6 +444,11 @@ async def lifespan(app: FastAPI):
     # so the coroutine steps fire on it.
     scheduler: PipelineScheduler | None = None
     if settings.enable_scheduler:
+        # graph-health (M8 task 4, ADR-053 §9): the read-only nightly-tail reporter. Constructed
+        # here and handed to the scheduler so it registers as the last nightly step and becomes
+        # manually runnable via `POST /agents/graph-health/run` (T3 reads it off the scheduler's
+        # live step map). No DB writes beyond its own agent_runs row.
+        graph_health_service = build_graph_health_service(settings, db)
         scheduler = PipelineScheduler(
             settings=settings,
             jobs=build_backup_jobs(settings, db, store_backup),
@@ -442,6 +461,7 @@ async def lifespan(app: FastAPI):
             inbox_drain=app.state.inbox_drain_service,
             dedup_sweep=app.state.dedup_sweep_service,
             maybe_digest=app.state.maybe_digest_service,
+            graph_health=graph_health_service,
             job_runner=app.state.job_runner,
         )
         scheduler.start()
@@ -512,6 +532,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(settings_router.router, prefix=settings.api_prefix)
     app.include_router(activity.router, prefix=settings.api_prefix)
     app.include_router(admin.router, prefix=settings.api_prefix)
+    app.include_router(agents.router, prefix=settings.api_prefix)
+    app.include_router(pipelines.router, prefix=settings.api_prefix)
 
     # OAuth 2.1 authorization-server + discovery routes live at the ROOT, not under /api/v1 — a
     # connector expects `/.well-known/oauth-*`, `/authorize`, `/token`, `/register` at the origin
