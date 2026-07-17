@@ -6,8 +6,9 @@ user to tag the event time in natural language. The answer is resolved and appli
 surface (:class:`~app.services.review_service.ReviewService`), not here — this job only *surfaces*
 the gap (like graph-health counts it; ADR-056 §7 strengthens the ADR-049 dedup occurred-signal).
 
-Idempotent (rule 6): a node that already has a decidable (``pending``/``maybe``)
-``occurred-enrichment`` item is skipped, so re-running never piles duplicates. Bounded per run
+Idempotent (rule 6): a node that already has an ``occurred-enrichment`` item — pending, parked
+(``maybe``), **or dismissed** (``discarded`` — the user said it is untimed) — is skipped, so
+re-running never piles duplicates and a dismiss sticks. Bounded per run
 (rule 9: ``occurred_enrichment_max_per_run``) so the review queue never floods on the first night of
 a large graph. DB-only (candidate reads + review-queue writes + its own ``agent_runs`` row) — like
 the maybe-digest / dedup-sweep / graph-health reporters — so it unit-tests against fakes and is a
@@ -30,8 +31,10 @@ from ..config import Settings
 from ..db import Database
 from .agent_runs import FAILED, SUCCEEDED, AgentRunStore
 from .review_queue import (
-    DECIDABLE_STATUSES,
     KIND_OCCURRED_ENRICHMENT,
+    STATUS_DISCARDED,
+    STATUS_MAYBE,
+    STATUS_PENDING,
     ReviewItem,
     ReviewQueue,
 )
@@ -40,6 +43,13 @@ logger = logging.getLogger(__name__)
 
 # agent_runs.agent name — the visible activity-feed row + the ops-console roster/console key.
 AGENT = "occurred-enrichment"
+
+# A node is "already handled" — never re-flagged — if it has an occurred-enrichment item in any of
+# these states: awaiting a decision (`pending`), parked (`maybe`), or **dismissed** (`discarded` —
+# the user said the event is untimed). `resolved` isn't listed: dating a node sets `occurred_start`,
+# so the `occurred_start IS NULL` filter already excludes it. Including `discarded` makes a dismiss
+# stick (rule 6 — a rerun must not re-ask; else the queue floods every night).
+_ALREADY_FLAGGED = (STATUS_PENDING, STATUS_MAYBE, STATUS_DISCARDED)
 
 
 @dataclass(frozen=True)
@@ -55,7 +65,7 @@ class OccurredEnrichmentStore(Protocol):
     """The narrow read surface the flagger runs over (read-only)."""
 
     async def undated_content_nodes(
-        self, *, entity_types: list[str], inbox_prefix: str, decidable: list[str], limit: int
+        self, *, entity_types: list[str], inbox_prefix: str, exclude_statuses: list[str], limit: int
     ) -> list[UndatedNode]: ...
 
 
@@ -118,7 +128,7 @@ class OccurredEnrichmentService:
         candidates = await self._store.undated_content_nodes(
             entity_types=list(settings.entity_like_types),
             inbox_prefix=f"{settings.inbox_folder}/%",
-            decidable=list(DECIDABLE_STATUSES),
+            exclude_statuses=list(_ALREADY_FLAGGED),
             limit=settings.occurred_enrichment_max_per_run,
         )
         logger.info("occurred-enrichment: %d undated node(s) to flag", len(candidates))
@@ -158,11 +168,12 @@ class PgOccurredEnrichmentStore:
         self._db = db
 
     async def undated_content_nodes(
-        self, *, entity_types: list[str], inbox_prefix: str, decidable: list[str], limit: int
+        self, *, entity_types: list[str], inbox_prefix: str, exclude_statuses: list[str], limit: int
     ) -> list[UndatedNode]:
         # Live, non-`inbox/` CONTENT nodes (type not an entity hub) with no occurred, that do NOT
-        # already have a decidable occurred-enrichment review item (idempotent — rule 6). Recent
-        # first, bounded (rule 9). `payload->>'node_id'` matches the id the flagger files below.
+        # already have an occurred-enrichment review item in an already-handled status (pending /
+        # maybe / discarded — a dismiss sticks; idempotent, rule 6). Recent first, bounded (rule 9).
+        # `payload->>'node_id'` matches the id the flagger files below.
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -184,7 +195,7 @@ class PgOccurredEnrichmentStore:
                 entity_types,
                 inbox_prefix,
                 KIND_OCCURRED_ENRICHMENT,
-                decidable,
+                exclude_statuses,
                 limit,
             )
         return [

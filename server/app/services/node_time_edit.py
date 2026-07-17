@@ -87,11 +87,16 @@ class NodeTimeEditService:
             raise NodeNotFound(node_id)
 
         # Is this token the node's event date? Compare the day-granular occurred span (dates) — the
-        # only mechanically-knowable link between a body token and `occurred` (ADR-056 §5).
+        # only mechanically-knowable link between a body token and `occurred` (ADR-056 §5). The DB
+        # `occurred_end` is NEVER null for a dated node: the indexer collapses a day-precise
+        # `occurred` to `occurred_end == occurred_start` (frontmatter `_expand_occurred`), whereas
+        # `ResolvedTime.occurred_end()` returns None for a precise point — so fall back to the start
+        # to compare like-for-like (else a day-precise event date never matches, the common case).
+        old_end = old_rt.occurred_end() or old_rt.occurred_start()
         is_event = (
             preview.occurred is not None
             and preview.occurred == old_rt.occurred_start()
-            and preview.occurred_end == old_rt.occurred_end()
+            and preview.occurred_end == old_end
         )
         new_occurred = new_rt.start_date_iso()
         new_occurred_end = new_rt.end_date_iso()

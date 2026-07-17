@@ -21,6 +21,7 @@ from .fakes import FakeIndexer, FakeStoreBackup
 
 CREATED = datetime(2026, 7, 17, 9, 0, 0)
 NODE_ID = "99999999-9999-4999-8999-999999999999"
+_UNSET = object()
 
 
 class FakeSearch:
@@ -33,7 +34,12 @@ class FakeSearch:
         return self._preview
 
 
-def _preview(store_path, *, occurred, occurred_end=None, merged_into=None):
+def _preview(store_path, *, occurred, occurred_end=_UNSET, merged_into=None):
+    # Mirror SearchService.get_node: the DB `occurred_end` is never null for a dated node — the
+    # indexer collapses a day-precise `occurred` to `occurred_end == occurred_start`. So default
+    # occurred_end to the (day-precise) occurred unless a range is passed explicitly.
+    if occurred_end is _UNSET:
+        occurred_end = occurred
     return SimpleNamespace(
         store_path=store_path,
         occurred=occurred,

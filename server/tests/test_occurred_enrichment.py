@@ -27,11 +27,11 @@ class FakeEnrichmentStore:
         self._candidates = candidates
         self.args: dict | None = None
 
-    async def undated_content_nodes(self, *, entity_types, inbox_prefix, decidable, limit):
+    async def undated_content_nodes(self, *, entity_types, inbox_prefix, exclude_statuses, limit):
         self.args = {
             "entity_types": entity_types,
             "inbox_prefix": inbox_prefix,
-            "decidable": decidable,
+            "exclude_statuses": exclude_statuses,
             "limit": limit,
         }
         return self._candidates[:limit]
@@ -99,3 +99,18 @@ async def test_passes_entity_types_and_inbox_prefix_to_store():
     await service.run_scheduled()
     assert store.args["inbox_prefix"].endswith("/%")
     assert isinstance(store.args["entity_types"], list)
+
+
+@pytest.mark.asyncio
+async def test_excludes_dismissed_so_a_dismiss_sticks():
+    # A dismissed (discarded) occurred-enrichment item must keep the node out of the flag set — else
+    # a nightly rerun re-asks forever (rule 6). The store filters on pending/maybe/discarded.
+    from app.services.review_queue import STATUS_DISCARDED, STATUS_MAYBE, STATUS_PENDING
+
+    service, store = _service([])
+    await service.run_scheduled()
+    assert set(store.args["exclude_statuses"]) == {
+        STATUS_PENDING,
+        STATUS_MAYBE,
+        STATUS_DISCARDED,
+    }
