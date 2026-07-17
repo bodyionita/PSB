@@ -33,8 +33,10 @@ from app.search.store import NodeRow, RetrievalParams, SearchHit
 from app.services.agent_runs import (
     RUNNING,
     AgentRun,
+    begin_run_scope,
     current_parent_run_id,
-    record_child_run,
+    current_trigger,
+    end_run_scope,
 )
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
@@ -897,14 +899,19 @@ class FakeAgentRunStore:
         self._seq = 0
 
     async def start(self, agent: str) -> str:
-        # Mirror PgAgentRunStore: link to the ambient pipeline parent (ADR-047 §5) and register the
-        # child so a PipelineRunner captures it — so the linkage is exercised identically in tests.
+        # Mirror PgAgentRunStore: link to the ambient pipeline parent (ADR-047 §5), stamp the
+        # trigger origin (M8, ADR-053 §5), and open the run scope (child registration + log-capture
+        # run id, ADR-053 §1) — so linkage + trigger + log scope are exercised identically in tests.
         self._seq += 1
         run_id = f"run-{self._seq}"
         self.runs[run_id] = AgentRun(
-            id=run_id, agent=agent, status=RUNNING, parent_run_id=current_parent_run_id()
+            id=run_id,
+            agent=agent,
+            status=RUNNING,
+            parent_run_id=current_parent_run_id(),
+            trigger=current_trigger(),
         )
-        record_child_run(run_id)
+        begin_run_scope(run_id)
         return run_id
 
     async def finish(
@@ -925,6 +932,7 @@ class FakeAgentRunStore:
         run.error = error
         run.model_used = model_used
         run.fallback_used = fallback_used
+        end_run_scope(run_id)  # close the log-capture scope, like PgAgentRunStore.finish
 
     async def latest(self, agent: str, *, status: str | None = None) -> AgentRun | None:
         if agent in self.preloaded:
@@ -939,6 +947,32 @@ class FakeAgentRunStore:
 
     async def get(self, run_id: str) -> AgentRun | None:
         return self.runs.get(run_id)
+
+
+class FakeRunLogStore:
+    """In-memory RunLogStore (M8 task 1): accumulates flushed lines per run, serves the after_seq
+    read. Records ``inserts`` (one list per ``insert_lines`` call) so a test can assert the flush
+    cadence + idempotency (ON CONFLICT is mimicked by de-duping on ``(run_id, seq)``)."""
+
+    def __init__(self) -> None:
+        from app.services.run_logs import RunLogLine
+
+        self._RunLogLine = RunLogLine
+        self.lines: dict[str, dict[int, object]] = {}  # run_id -> {seq: RunLogLine}
+        self.inserts: list[list[object]] = []
+
+    async def insert_lines(self, run_id: str, lines: list) -> None:
+        if not lines:
+            return
+        self.inserts.append(list(lines))
+        bucket = self.lines.setdefault(run_id, {})
+        for line in lines:
+            bucket.setdefault(line.seq, line)  # ON CONFLICT (run_id, seq) DO NOTHING
+
+    async def read_after(self, run_id: str, *, after_seq: int, limit: int) -> list:
+        bucket = self.lines.get(run_id, {})
+        ordered = [line for seq, line in sorted(bucket.items()) if seq > after_seq]
+        return ordered[:limit]
 
 
 class FakeCaptureStore:

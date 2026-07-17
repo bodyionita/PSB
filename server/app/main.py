@@ -47,12 +47,13 @@ from .routers import activity, admin, auth, capture, chat, health, meta, oauth, 
 from .routers import settings as settings_router
 from .search.service import SearchService
 from .search.store import PgSearchStore
-from .services.agent_runs import PgAgentRunStore
+from .services.agent_runs import PgAgentRunStore, set_run_finish_hook
 from .services.auth_service import AuthService
 from .services.backup_jobs import build_backup_jobs
 from .services.capture_pipeline import CapturePipeline
 from .services.capture_store import PgCaptureStore
 from .services.git_repo import GitRepo
+from .services.job_runner import JobRunner
 from .services.maybe_digest import MaybeDigestService
 from .services.model_routing import build_model_routing
 from .services.rate_limit import RateLimiter
@@ -60,6 +61,7 @@ from .services.reindex import ReindexService
 from .services.reprocess import PgReprocessStore, ReprocessService
 from .services.review_queue import PgReviewQueue
 from .services.review_service import ReviewService
+from .services.run_logs import PgRunLogStore, RunLogBuffers, RunLogFlusher, RunLogHandler
 from .services.scheduler import PipelineScheduler
 from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
@@ -90,6 +92,32 @@ async def lifespan(app: FastAPI):
     # GET /activity/runs/{id} (the Admin tab's run-status poll). Stateless over the pool.
     run_store = PgAgentRunStore(db)
     app.state.agent_run_store = run_store
+
+    # Live per-run log capture (M8 task 1, ADR-053 §1/§2): a process-wide `app.*`/`INFO`+ handler
+    # tags records by the active run → a bounded per-run in-memory buffer → an async flusher
+    # persists to `agent_run_logs` (~1s + on finish). Backs GET /activity/runs/{id}/logs. The
+    # handler is attached to the ROOT logger (always on; a no-op outside a run scope). `finish`
+    # calls the flusher's `request_flush` via the run-finish hook so a completed run's logs are
+    # durable promptly and its buffer is reaped.
+    run_log_buffers = RunLogBuffers(max_lines=settings.run_log_buffer_max_lines)
+    run_log_handler = RunLogHandler(run_log_buffers)
+    run_log_store = PgRunLogStore(db)
+    app.state.run_log_store = run_log_store
+    run_log_flusher = RunLogFlusher(
+        buffers=run_log_buffers,
+        store=run_log_store,
+        interval_seconds=settings.run_log_flush_interval_seconds,
+    )
+    logging.getLogger().addHandler(run_log_handler)
+    set_run_finish_hook(run_log_flusher.request_flush)
+    run_log_flusher.start()
+
+    # The in-process single-flight guard (M8 task 1, ADR-053 §7): one JobRunner the scheduler
+    # (below) and the manual `POST /agents|pipelines/{name}/run` endpoints (T3) both route through,
+    # so a nightly step and a hand-triggered run of the same agent can't both fire. Authoritative —
+    # the scheduler runs single-process.
+    app.state.job_runner = JobRunner()
+
     app.state.auth_service = AuthService(db, settings)
     app.state.login_rate_limiter = RateLimiter(
         max_events=settings.login_rate_limit_per_min, window_seconds=60.0
@@ -414,6 +442,7 @@ async def lifespan(app: FastAPI):
             inbox_drain=app.state.inbox_drain_service,
             dedup_sweep=app.state.dedup_sweep_service,
             maybe_digest=app.state.maybe_digest_service,
+            job_runner=app.state.job_runner,
         )
         scheduler.start()
     app.state.scheduler = scheduler
@@ -442,6 +471,12 @@ async def lifespan(app: FastAPI):
             await app.state.identity_capsule_service.drain()
             await pipeline.drain()
             await store_backup.flush()
+            # Stop capturing new lines, then flush anything still buffered before the pool closes
+            # (the flusher's persistence needs the DB). Order: detach the handler + clear the hook
+            # first so nothing new is buffered mid-stop, then a final flush.
+            set_run_finish_hook(None)
+            logging.getLogger().removeHandler(run_log_handler)
+            await run_log_flusher.stop()
             await db.disconnect()
 
 

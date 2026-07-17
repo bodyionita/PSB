@@ -39,9 +39,12 @@ from app.oauth.store import PgOAuthStore
 from app.search.store import PgSearchStore, RetrievalParams
 from app.services.agent_runs import (
     FAILED,
+    MANUAL,
+    SCHEDULED,
     SUCCEEDED,
     PgAgentRunStore,
     child_run_scope,
+    trigger_scope,
 )
 from app.services.capture_store import INDEXED, KIND_TEXT, PgCaptureStore
 from app.services.reprocess import PgReprocessStore
@@ -51,6 +54,7 @@ from app.services.review_queue import (
     PgReviewQueue,
     ReviewItem,
 )
+from app.services.run_logs import PgRunLogStore, RunLogLine
 from app.vocab.edge_store import PgEdgeConsolidationStore
 from app.vocab.store import PgVocabularyStore
 
@@ -589,6 +593,86 @@ async def check_agent_runs_linkage(db: Database) -> None:
             after_row is not None and after_row.parent_run_id is None,
             str(after_row),
         )
+    finally:
+        if opened:
+            await db.pool.execute("DELETE FROM agent_runs WHERE id = ANY($1::uuid[])", opened)
+
+
+async def check_run_logs_and_trigger(db: Database) -> None:
+    """M8 task 1 (ADR-053 §1/§2/§5): the real ``agent_runs.trigger`` column + the ``agent_run_logs``
+    store (migration 015), driven through :class:`PgAgentRunStore` + :class:`PgRunLogStore` — the
+    un-fakeable SQL (default-scheduled, manual stamp via the contextvar, seq-cursor read, conflict
+    idempotency, FK cascade on run delete)."""
+    from datetime import UTC, datetime
+
+    print("\n== agent_runs.trigger + agent_run_logs (M8 task 1 — migration 015) ==")
+    runs = PgAgentRunStore(db)
+    logs = PgRunLogStore(db)
+    opened: list[str] = []
+    try:
+        # trigger defaults to `scheduled` (no scope); a manual run is stamped via trigger_scope.
+        sched = await runs.start("smoke-sched")
+        await runs.finish(sched, status=SUCCEEDED)
+        opened.append(sched)
+        with trigger_scope(MANUAL):
+            manual = await runs.start("smoke-manual")
+        await runs.finish(manual, status=SUCCEEDED)
+        opened.append(manual)
+        sched_row = await runs.get(sched)
+        manual_row = await runs.get(manual)
+        check(
+            "scheduled run defaults trigger=scheduled",
+            sched_row is not None and sched_row.trigger == SCHEDULED,
+            str(sched_row),
+        )
+        check(
+            "manual run stamped trigger=manual",
+            manual_row is not None and manual_row.trigger == MANUAL,
+            str(manual_row),
+        )
+        # After the scope, trigger resets (a later run is scheduled again).
+        after = await runs.start("smoke-after-trigger")
+        await runs.finish(after, status=SUCCEEDED)
+        opened.append(after)
+        after_row = await runs.get(after)
+        check(
+            "trigger contextvar resets after the scope",
+            after_row is not None and after_row.trigger == SCHEDULED,
+            str(after_row),
+        )
+
+        # agent_run_logs: insert a batch, read after a cursor, and confirm ON CONFLICT idempotency.
+        ts = datetime.now(UTC)
+        batch = [
+            RunLogLine(seq=0, ts=ts, level="INFO", message="starting"),
+            RunLogLine(seq=1, ts=ts, level="INFO", message="working"),
+            RunLogLine(seq=2, ts=ts, level="WARNING", message="a hiccup"),
+        ]
+        await logs.insert_lines(sched, batch)
+        await logs.insert_lines(sched, batch)  # re-flush of the same (run, seq) → ON CONFLICT no-op
+        tail = await logs.read_after(sched, after_seq=-1, limit=100)
+        check(
+            "log lines round-trip in seq order, no duplicates",
+            [line.seq for line in tail] == [0, 1, 2]
+            and [line.message for line in tail] == ["starting", "working", "a hiccup"],
+            str([(line.seq, line.message) for line in tail]),
+        )
+        paged = await logs.read_after(sched, after_seq=1, limit=100)
+        check(
+            "read_after cursor returns only later lines",
+            [line.seq for line in paged] == [2],
+            str([line.seq for line in paged]),
+        )
+        limited = await logs.read_after(sched, after_seq=-1, limit=2)
+        check("read_after honours the limit", len(limited) == 2, str(len(limited)))
+
+        # FK cascade: deleting the run drops its logs (rebuildable op-state, rule 1).
+        await db.pool.execute("DELETE FROM agent_runs WHERE id = $1", sched)
+        opened.remove(sched)
+        remaining = await db.pool.fetchval(
+            "SELECT count(*) FROM agent_run_logs WHERE run_id = $1", sched
+        )
+        check("deleting a run cascades its logs", remaining == 0, str(remaining))
     finally:
         if opened:
             await db.pool.execute("DELETE FROM agent_runs WHERE id = ANY($1::uuid[])", opened)
@@ -1656,6 +1740,7 @@ async def main() -> int:
         await check_model_routing_migration(db)
         await check_oauth(db)
         await check_agent_runs_linkage(db)
+        await check_run_logs_and_trigger(db)
         await check_chat_distill(db)
         await check_review_queue_reopen(db)
         await check_maybe_digest_stats(db)

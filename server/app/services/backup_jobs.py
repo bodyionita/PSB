@@ -37,6 +37,7 @@ STORE_BACKUP = "store-backup"
 INTEGRITY_DRILL = "integrity-drill"
 DB_BACKUP = "db-backup"
 DATA_SYNC = "data-sync"
+STORE_SWEEP = "store-sweep"
 
 
 class DurabilityError(RuntimeError):
@@ -89,9 +90,32 @@ class BackupJobs:
         await self._record_r2_job(DATA_SYNC, self._data_sync)
 
     async def run_store_sweep(self) -> None:
-        """04:55 sweep: force a store commit + push so nothing sits uncommitted overnight."""
-        result = await self._store_backup.backup_now("nightly sweep")
-        logger.info("nightly store sweep: committed=%s pushed=%s", result.committed, result.pushed)
+        """04:55 sweep: force a store commit + push so nothing sits uncommitted overnight.
+
+        M8 (ADR-053 §10) gives the sweep its **own** ``agent_runs`` row — it previously opened none,
+        so the pipeline reported it as a phantom ``skipped`` step every night. Now the observability
+        milestone renders it honestly like every other step. Rule-7 wrapped: a git hiccup ends the
+        run ``failed`` with context, never crashes the pipeline. No ``object_store`` needed (unlike
+        the R2 jobs) — the sweep is a git commit+push, so it runs in dev too."""
+        try:
+            run_id = await self._store.start(STORE_SWEEP)
+        except Exception:  # noqa: BLE001 — DB down at row-open: log + bail, never crash the caller
+            logger.exception("could not open agent_run for %s; sweep skipped", STORE_SWEEP)
+            return
+        try:
+            result = await self._store_backup.backup_now("nightly sweep")
+            logger.info(
+                "nightly store sweep: committed=%s pushed=%s", result.committed, result.pushed
+            )
+            await self._store.finish(
+                run_id,
+                status=SUCCEEDED,
+                summary=f"store sweep: committed={result.committed} pushed={result.pushed}",
+                details={"committed": result.committed, "pushed": result.pushed},
+            )
+        except Exception as exc:  # noqa: BLE001 — a job ends as failed with context, never crashes
+            logger.exception("store sweep failed")
+            await self._store.finish(run_id, status=FAILED, error=f"{type(exc).__name__}: {exc}")
 
     # --- job bodies (return summary + details; raise to fail the run) -------------------------
 

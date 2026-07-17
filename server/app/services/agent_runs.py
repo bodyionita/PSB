@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import contextvars
 import json
-from collections.abc import Iterator
+import logging
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,11 +22,18 @@ from typing import Any, Protocol
 
 from ..db import Database
 
+logger = logging.getLogger(__name__)
+
 # Run statuses.
 RUNNING = "running"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
 SKIPPED = "skipped"
+
+# Run trigger origin (M8, ADR-053 §5). A row is `scheduled` unless a manual endpoint opened it
+# inside :func:`trigger_scope`, letting the merged Activity feed categorize by *origin* not table.
+SCHEDULED = "scheduled"
+MANUAL = "manual"
 
 
 # --- Pipeline parent/child linkage (ADR-047 §5) -------------------------------------------------
@@ -77,6 +85,101 @@ def child_run_scope(parent_run_id: str) -> Iterator[list[str]]:
         _parent_run_id.reset(parent_token)
 
 
+# --- Live-log run scope (M8, ADR-053 §1) --------------------------------------------------------
+# The `app.*`/`INFO` log-capture handler (:mod:`app.services.run_logs`) tags every record with the
+# **currently-executing run** — the innermost job whose row is open. We track that as an immutable
+# run-id STACK held in a contextvar: ``start`` pushes the freshly-minted id, ``finish`` pops it, so
+# a pipeline parent's own log lines tag the parent while a step's lines tag the step's child run
+# (proper nesting, same ADR-047 §5 ambient pattern as `parent_run_id`). Immutable-tuple replacement
+# keeps it **task-safe** — a concurrent manual run in a different task carries its own stack, and
+# `asyncio.to_thread` copies the context so blocking work still logs under the right run. No job
+# body changes: the store's ``start``/``finish`` own the push/pop, like ``record_child_run``.
+_run_id_stack: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "agent_run_id_stack", default=()
+)
+
+
+def current_run_id() -> str | None:
+    """The innermost open run in this task, or ``None`` outside any run — the id the log-capture
+    handler tags emitted records with."""
+    stack = _run_id_stack.get()
+    return stack[-1] if stack else None
+
+
+def _push_run_id(run_id: str) -> None:
+    _run_id_stack.set((*_run_id_stack.get(), run_id))
+
+
+def _pop_run_id(run_id: str) -> None:
+    # Remove this run wherever it sits (top under LIFO nesting; defensive filter otherwise) and
+    # never mutate the shared tuple in place — replace it, so other tasks' stacks are untouched.
+    _run_id_stack.set(tuple(r for r in _run_id_stack.get() if r != run_id))
+
+
+def begin_run_scope(run_id: str) -> None:
+    """Called by a store's ``start`` right after a run row is opened: register the run with the
+    active :func:`child_run_scope` collector (ADR-047 §5) and make it the innermost log-capture
+    scope (ADR-053 §1). One call so the real + fake stores behave identically."""
+    record_child_run(run_id)
+    _push_run_id(run_id)
+
+
+def end_run_scope(run_id: str) -> None:
+    """Called by a store's ``finish``: close the run's log-capture scope and flush/reap its buffer
+    (ADR-053 §2). Safe to call even if the DB update raised — the run is over regardless."""
+    _pop_run_id(run_id)
+    _notify_run_finished(run_id)
+
+
+# --- Run trigger origin (M8, ADR-053 §5) --------------------------------------------------------
+# A run is `scheduled` by default; the manual-trigger endpoint runs the job inside `trigger_scope()`
+# so the row this task opens is stamped `manual`. Ambient contextvar (not a passed arg) → no job
+# body change, mirroring `parent_run_id`.
+_trigger: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "agent_run_trigger", default=SCHEDULED
+)
+
+
+def current_trigger() -> str:
+    """The trigger origin (`scheduled`/`manual`) a run opened right now should be stamped with."""
+    return _trigger.get()
+
+
+@contextmanager
+def trigger_scope(trigger: str) -> Iterator[None]:
+    """Within this scope, every ``agent_runs`` row opened via ``start`` is stamped ``trigger``
+    (the manual endpoint wraps its job call in ``trigger_scope(MANUAL)``)."""
+    token = _trigger.set(trigger)
+    try:
+        yield
+    finally:
+        _trigger.reset(token)
+
+
+# --- Run-finish observer (M8, ADR-053 §2) -------------------------------------------------------
+# The log flusher needs to know when a run finishes so it can flush that run's remaining buffered
+# lines immediately and reap the in-memory buffer (a long-lived process opens thousands of runs).
+# `finish` calls this optional hook — decoupled: the store knows nothing about the flusher, and with
+# no hook registered (unit tests, CLI) it is a no-op. Set once at app startup, cleared on shutdown.
+_run_finish_hook: Callable[[str], None] | None = None
+
+
+def set_run_finish_hook(hook: Callable[[str], None] | None) -> None:
+    """Register (or clear, with ``None``) the callback invoked with a run id when a run finishes."""
+    global _run_finish_hook
+    _run_finish_hook = hook
+
+
+def _notify_run_finished(run_id: str) -> None:
+    hook = _run_finish_hook
+    if hook is None:
+        return
+    try:
+        hook(run_id)
+    except Exception:  # noqa: BLE001 — a flusher hiccup must never break closing a run (rule 7)
+        logger.exception("run-finish hook failed for run %s", run_id)
+
+
 @dataclass
 class AgentRun:
     id: str
@@ -90,6 +193,7 @@ class AgentRun:
     details: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     parent_run_id: str | None = None
+    trigger: str = SCHEDULED
 
 
 class AgentRunStore(Protocol):
@@ -137,6 +241,7 @@ def _row_to_run(row: Any) -> AgentRun | None:
         details=_details(row["details"]),
         error=row["error"],
         parent_run_id=str(parent) if parent is not None else None,
+        trigger=row["trigger"],
     )
 
 
@@ -148,18 +253,21 @@ class PgAgentRunStore:
 
     async def start(self, agent: str) -> str:
         # Under a pipeline step the ambient parent links this child row (ADR-047 §5); a bare job run
-        # picks up ``None`` and stays parentless, exactly as before.
+        # picks up ``None`` and stays parentless, exactly as before. The trigger origin (M8, §5) is
+        # `manual` only inside `trigger_scope`, else `scheduled` — no job body sets it.
         parent = current_parent_run_id()
+        trigger = current_trigger()
         async with self._db.acquire() as conn:
             row = await conn.fetchrow(
-                "INSERT INTO agent_runs (agent, status, parent_run_id) VALUES ($1, $2, $3)"
-                " RETURNING id",
+                "INSERT INTO agent_runs (agent, status, parent_run_id, trigger)"
+                " VALUES ($1, $2, $3, $4) RETURNING id",
                 agent,
                 RUNNING,
                 parent,
+                trigger,
             )
         run_id = str(row["id"])
-        record_child_run(run_id)
+        begin_run_scope(run_id)  # link to the pipeline parent + open the log-capture scope
         return run_id
 
     async def finish(
@@ -173,29 +281,34 @@ class PgAgentRunStore:
         model_used: str | None = None,
         fallback_used: bool = False,
     ) -> None:
-        async with self._db.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE agent_runs
-                   SET status = $2, summary = $3, details = $4::jsonb,
-                       error = $5, model_used = $6, fallback_used = $7, finished_at = now()
-                 WHERE id = $1
-                """,
-                run_id,
-                status,
-                summary,
-                json.dumps(details or {}),
-                error,
-                model_used,
-                fallback_used,
-            )
+        try:
+            async with self._db.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE agent_runs
+                       SET status = $2, summary = $3, details = $4::jsonb,
+                           error = $5, model_used = $6, fallback_used = $7, finished_at = now()
+                     WHERE id = $1
+                    """,
+                    run_id,
+                    status,
+                    summary,
+                    json.dumps(details or {}),
+                    error,
+                    model_used,
+                    fallback_used,
+                )
+        finally:
+            # Close the log-capture scope + flush/reap the run's buffer even if the UPDATE raised
+            # (rule 7: the run is over regardless of a DB hiccup on the close).
+            end_run_scope(run_id)
 
     async def latest(self, agent: str, *, status: str | None = None) -> AgentRun | None:
         async with self._db.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT id, agent, status, started_at, finished_at, model_used,
-                       fallback_used, summary, details, error, parent_run_id
+                       fallback_used, summary, details, error, parent_run_id, trigger
                   FROM agent_runs
                  WHERE agent = $1 AND ($2::text IS NULL OR status = $2)
                  ORDER BY started_at DESC
@@ -214,7 +327,7 @@ class PgAgentRunStore:
             row = await conn.fetchrow(
                 """
                 SELECT id, agent, status, started_at, finished_at, model_used,
-                       fallback_used, summary, details, error, parent_run_id
+                       fallback_used, summary, details, error, parent_run_id, trigger
                   FROM agent_runs
                  WHERE id = $1
                 """,

@@ -445,7 +445,8 @@ class ReviewBatchResponse(BaseModel):
 # --- Activity (03-api.md §Activity feed) ---
 class AgentRunResponse(BaseModel):
     """One ``agent_runs`` row (GET /activity/runs/{id}). M2 pull-forward of the M4 feed so the
-    Admin tab can poll a reindex / tags-apply run's live status + ``details`` counts."""
+    Admin tab can poll a reindex / tags-apply run's live status + ``details`` counts. ``trigger``
+    (M8, ADR-053 §5) is the run's origin (``scheduled``/``manual``)."""
 
     id: str
     agent: str
@@ -457,6 +458,28 @@ class AgentRunResponse(BaseModel):
     summary: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    trigger: str = "scheduled"
+
+
+class RunLogLineModel(BaseModel):
+    """One captured live-log line (M8, ADR-053 §1/§2). ``seq`` is the per-run cursor key."""
+
+    seq: int
+    ts: datetime | None = None
+    level: str
+    message: str
+
+
+class RunLogsResponse(BaseModel):
+    """GET /activity/runs/{id}/logs — the live log tail (poll, not stream). Lines with
+    ``seq > after_seq`` in order + a ``running`` flag (poll while true, stop when false).
+    ``next_after_seq`` is the max ``seq`` returned — pass it back as ``after_seq`` next poll
+    (unchanged from the request when there are no new lines)."""
+
+    run_id: str
+    running: bool
+    logs: list[RunLogLineModel] = Field(default_factory=list)
+    next_after_seq: int
 
 
 # --- Admin (03-api.md §Agents & admin) ---

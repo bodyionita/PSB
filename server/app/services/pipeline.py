@@ -39,6 +39,7 @@ from .agent_runs import (
     AgentRunStore,
     child_run_scope,
 )
+from .job_runner import JobRunner
 
 logger = logging.getLogger(__name__)
 
@@ -160,10 +161,15 @@ class PipelineRunner:
         definition: PipelineDef,
         step_funcs: Mapping[str, StepFunc],
         run_store: AgentRunStore,
+        job_runner: JobRunner | None = None,
     ) -> None:
         self._def = definition
         self._funcs = step_funcs
         self._runs = run_store
+        # The shared single-flight guard (M8, ADR-053 §7). When present, each step marks itself
+        # running so a concurrent manual trigger of the same agent 409s, and a step whose agent a
+        # manual run already holds is skipped. Absent (CLI run-now, single-process) → no marking.
+        self._job_runner = job_runner
 
     async def run(self) -> PipelineOutcome | None:
         """The scheduler/CLI entry point. Opens the parent run, executes the steps, closes it; never
@@ -208,6 +214,24 @@ class PipelineRunner:
             # so ``on_fail`` still governs whether the pipeline proceeds.
             logger.error("pipeline %s: no runnable for step %s", self._def.name, step.name)
             return _StepResult(name=step.name, on_fail=step.on_fail, status=MISSING)
+        if self._job_runner is None:
+            return await self._execute_step(parent_id, step, func)
+        # Single-flight (ADR-053 §7): mark this step running so a manual trigger of the same agent
+        # 409s; if a manual run already holds it, skip — it is doing the work, and jobs are
+        # idempotent (rule 6). A skipped step never fails/halts the pipeline.
+        async with self._job_runner.scheduled_step(step.name) as acquired:
+            if not acquired:
+                logger.warning(
+                    "pipeline %s: step %s already running (manual) — skipped",
+                    self._def.name,
+                    step.name,
+                )
+                return _StepResult(name=step.name, on_fail=step.on_fail, status=SKIPPED)
+            return await self._execute_step(parent_id, step, func)
+
+    async def _execute_step(
+        self, parent_id: str, step: PipelineStepDef, func: StepFunc
+    ) -> _StepResult:
         # Every row the step opens links to the parent and is captured here (ADR-047 §5).
         with child_run_scope(parent_id) as child_ids:
             try:
@@ -237,8 +261,9 @@ class PipelineRunner:
         enclosing step. FAILED if it raised or the own run is not *cleanly done*
         (``failed``/orphaned ``running``/unknown — a ``halt`` step must abort on it); otherwise the
         own run's terminal status (``succeeded``/``skipped``). A step that opened no own run (e.g.
-        ``store-sweep``) but didn't raise is ``skipped``. Returns ``(own_run_id, status)`` so the
-        step reports its **own** run, not a nested spawned one."""
+        a job that couldn't open its row because the DB was down) but didn't raise is ``skipped``
+        — as of M8 every roster step opens a run, ``store-sweep`` included (ADR-053 §10). Returns
+        ``(own_run_id, status)`` so the step reports its **own** run, not a nested spawned one."""
         own_run_id: str | None = None
         own_status: str | None = None
         failed = raised

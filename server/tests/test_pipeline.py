@@ -39,8 +39,8 @@ def _step(order: list[str], store: FakeAgentRunStore, agent: str, *, fail: bool 
     return run
 
 
-def _runner(defn: PipelineDef, funcs, store: FakeAgentRunStore) -> PipelineRunner:
-    return PipelineRunner(definition=defn, step_funcs=funcs, run_store=store)
+def _runner(defn: PipelineDef, funcs, store: FakeAgentRunStore, *, job_runner=None):
+    return PipelineRunner(definition=defn, step_funcs=funcs, run_store=store, job_runner=job_runner)
 
 
 # --- ordering ----------------------------------------------------------------------------------
@@ -377,6 +377,67 @@ def test_bad_on_fail_is_rejected_at_definition_time():
 def test_empty_pipeline_is_rejected():
     with pytest.raises(ValueError, match="at least one step"):
         PipelineDef(name="nightly", cron="0 3 * * *", steps=())
+
+
+# --- single-flight guard integration (M8, ADR-053 §7) -----------------------------------------
+
+
+async def test_step_marks_itself_running_in_the_job_runner():
+    from app.services.job_runner import JobRunner
+
+    store = FakeAgentRunStore()
+    order: list[str] = []
+    runner_guard = JobRunner()
+    seen_running: list[bool] = []
+
+    async def watched() -> None:
+        order.append("w")
+        seen_running.append(runner_guard.is_running("w"))  # marked running during execution
+        run_id = await store.start("w")
+        await store.finish(run_id, status=SUCCEEDED)
+
+    defn = PipelineDef(name="nightly", cron="0 3 * * *", steps=(PipelineStepDef("w"),))
+    outcome = await _runner(defn, {"w": watched}, store, job_runner=runner_guard).run()
+
+    assert seen_running == [True]
+    assert outcome.steps[0].status == SUCCEEDED
+    assert not runner_guard.is_running("w")  # released after the step
+
+
+async def test_step_skipped_when_a_manual_run_holds_the_slot():
+    import asyncio
+
+    from app.services.job_runner import JobRunner
+
+    store = FakeAgentRunStore()
+    guard = JobRunner()
+    ran: list[str] = []
+
+    async def job() -> None:
+        ran.append("reindex")
+        run_id = await store.start("reindex")
+        await store.finish(run_id, status=SUCCEEDED)
+
+    # A manual run holds "reindex" for the duration of the pipeline step.
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def manual() -> None:
+        started.set()
+        await release.wait()
+
+    manual_task = asyncio.create_task(guard.run_manual("reindex", manual))
+    await started.wait()
+
+    defn = PipelineDef(name="nightly", cron="0 3 * * *", steps=(PipelineStepDef("reindex"),))
+    outcome = await _runner(defn, {"reindex": job}, store, job_runner=guard).run()
+
+    assert ran == []  # the scheduled step was skipped, not run concurrently
+    assert outcome.steps[0].status == "skipped"
+    assert outcome.halted_at is None  # a skip never halts
+
+    release.set()
+    await manual_task
 
 
 # --- config model: the migrated roster (ADR-047 §3) --------------------------------------------

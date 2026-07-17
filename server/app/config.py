@@ -480,6 +480,19 @@ class Settings(BaseSettings):
     # (weekly cadence + one night of grace) or the latest drill failed (ADR-014 §6).
     integrity_drill_max_age_days: int = 8
 
+    # --- Ops console: live run-log capture (M8 task 1, ADR-053 §1/§2) ---
+    # The `app.*`/`INFO`+ logging handler tags records by the active run into a bounded per-run
+    # in-memory buffer, which an async flusher persists to `agent_run_logs` on this cadence + on
+    # finish; `GET /activity/runs/{id}/logs` polls the table. Rule 9: no hardcoded sizes/cadences.
+    # Per-run buffer bound: beyond this many un-flushed lines the oldest are dropped with a recorded
+    # elision marker (rule 7 — no silent cap). Generous — a normal job logs a handful of lines.
+    run_log_buffer_max_lines: int = 2000
+    # Flusher cadence: new buffered lines reach the durable table within ~this long (the liveness
+    # bound of the poll; a run also flushes immediately on finish, ADR-053 §2).
+    run_log_flush_interval_seconds: float = 1.0
+    # Upper bound on one `GET /activity/runs/{id}/logs` page (the client pages with `after_seq`).
+    run_log_tail_max_lines: int = 1000
+
     # --- Web / CORS (dev only; in prod Caddy same-origins the app) ---
     cors_origins: CsvList = Field(default=["http://localhost:5173"])
 

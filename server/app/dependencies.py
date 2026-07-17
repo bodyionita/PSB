@@ -26,6 +26,7 @@ from .services.model_routing import ModelRoutingService
 from .services.reindex import ReindexService
 from .services.reprocess import ReprocessService
 from .services.review_service import ReviewService
+from .services.run_logs import RunLogStore
 from .services.store_backup import StoreBackupService
 from .tags.service import TagConsolidationService
 from .vocab.edge_consolidation import EdgeConsolidationService
@@ -121,6 +122,10 @@ def get_tag_consolidation_service(request: Request) -> TagConsolidationService:
 
 def get_agent_run_store(request: Request) -> AgentRunStore:
     return request.app.state.agent_run_store
+
+
+def get_run_log_store(request: Request) -> RunLogStore:
+    return request.app.state.run_log_store
 
 
 def get_review_service(request: Request) -> ReviewService:

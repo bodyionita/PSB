@@ -95,6 +95,17 @@ def test_pipeline_runners_cover_nightly_and_weekly_in_order(tmp_path: Path):
         assert CronTrigger.from_crontab(defn.cron)
 
 
+def test_job_runner_is_threaded_into_every_runner(tmp_path: Path):
+    # M8 (ADR-053 §7): the shared single-flight guard reaches each PipelineRunner so a nightly step
+    # and a manual run of the same agent can't overlap.
+    from app.services.job_runner import JobRunner
+
+    guard = JobRunner()
+    runners = _full_scheduler(tmp_path, job_runner=guard).pipeline_runners()
+    assert runners  # sanity
+    assert all(runner._job_runner is guard for _, runner in runners)
+
+
 def test_step_funcs_map_to_the_intended_job_coroutines(tmp_path: Path):
     settings, jobs = _jobs(tmp_path)
     reindex, profile, backfill, capsule = _FakeJob(), _FakeJob(), _FakeJob(), _FakeJob()

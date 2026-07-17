@@ -31,6 +31,7 @@ from apscheduler.triggers.cron import CronTrigger
 from ..config import Settings
 from .agent_runs import AgentRunStore
 from .backup_jobs import BackupJobs
+from .job_runner import JobRunner
 from .pipeline import PipelineDef, PipelineRunner, StepFunc
 from .reindex import ReindexService
 
@@ -62,10 +63,14 @@ class PipelineScheduler:
         dedup_sweep: EntityJob | None = None,
         maybe_digest: EntityJob | None = None,
         scheduler: AsyncIOScheduler | None = None,
+        job_runner: JobRunner | None = None,
     ) -> None:
         self._settings = settings
         self._jobs = jobs
         self._runs = run_store
+        # The shared single-flight guard (M8, ADR-053 §7) threaded into every PipelineRunner so a
+        # nightly step and a manual `POST /agents/{name}/run` of the same agent can't both run.
+        self._job_runner = job_runner
         self._reindex = reindex
         self._profile_refresh = profile_refresh
         self._backfill = backfill
@@ -131,7 +136,12 @@ class PipelineScheduler:
                 logger.warning("pipeline %s: no wired steps, not scheduled", defn.name)
                 continue
             effective = replace(defn, steps=present)
-            runner = PipelineRunner(definition=effective, step_funcs=funcs, run_store=self._runs)
+            runner = PipelineRunner(
+                definition=effective,
+                step_funcs=funcs,
+                run_store=self._runs,
+                job_runner=self._job_runner,
+            )
             runners.append((effective, runner))
         return runners
 

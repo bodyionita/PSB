@@ -240,9 +240,15 @@ async def test_integrity_drill_fails_without_a_bundle(tmp_path: Path):
     assert run.status == "failed" and "store bundle" in (run.error or "")
 
 
-async def test_store_sweep_commits_and_records_no_agent_run(tmp_path: Path):
+async def test_store_sweep_commits_and_records_its_own_run(tmp_path: Path):
+    # M8 (ADR-053 §10): the sweep now opens its own agent_runs row instead of being a phantom
+    # `skipped` pipeline step. The commit still happens; the run records committed/pushed.
     git = FakeGitRepo()
     jobs, store, git = _jobs(tmp_path, object_store=None, git=git)
     await jobs.run_store_sweep()
     assert git.commits  # backup_now committed
-    assert store.runs == {}  # the sweep is the git commit, not one of the four named jobs
+    assert len(store.runs) == 1
+    run = next(iter(store.runs.values()))
+    assert run.agent == "store-sweep"
+    assert run.status == "succeeded"
+    assert run.details == {"committed": True, "pushed": True}
