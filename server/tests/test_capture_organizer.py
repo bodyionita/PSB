@@ -222,6 +222,31 @@ def test_no_time_refs_leaves_occurred_none():
     assert nodes[0].occurred_end is None
 
 
+def test_sub_day_event_keeps_occurred_date_granular_token_owns_time():
+    # ADR-056 §6: occurred_* stay DATE-granular even for a minute-precise event — the time-of-day
+    # lives only in the body token, never in occurred.
+    nodes, _, _ = _validate(
+        _node(
+            body="Call at 10pm.",
+            time_refs=[
+                {
+                    "phrase": "at 10pm",
+                    "kind": "explicit",
+                    "year": 2025,
+                    "month": 7,
+                    "day": 7,
+                    "hour": 22,
+                    "minute": 0,
+                    "event": True,
+                }
+            ],
+        )
+    )
+    assert nodes[0].occurred == "2025-07-07"  # no T..:.. — date-granular
+    assert "T" not in nodes[0].occurred
+    assert "[[t:2025-07-07T22:00]]" in nodes[0].body  # the token owns the sub-day precision
+
+
 def test_anchor_determinism_two_anchors_resolve_differently():
     # The SAME symbolic "10 days ago" resolves against whatever anchor is passed — reprocess
     # determinism (ADR-056 §1): the stored anchor, never wall-clock.

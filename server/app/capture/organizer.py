@@ -447,6 +447,10 @@ def _resolve_time_refs(
             event_rt = resolved
         phrase = symbolic.get("phrase")
         if isinstance(phrase, str) and phrase:
+            # Tokenize the FIRST occurrence of the phrase (each ref carries its own phrase; a body
+            # that repeats the exact phrase keeps the later ones as prose — occurred is unaffected,
+            # and a distinct second date carries its own phrase). Phrase absent ⇒ no token (occurred
+            # still resolves from the event ref below).
             idx = body.find(phrase)
             if idx != -1:
                 placements.append((idx, idx + len(phrase), resolved.token()))
