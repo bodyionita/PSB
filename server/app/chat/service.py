@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Protocol
 
 from ..config import Settings
@@ -57,6 +58,7 @@ class Retriever(Protocol):
         top_k: int | None = None,
         planes: list[str] | None = None,
         min_score: float | None = None,
+        interiority_boost: float | None = None,
     ) -> list[SearchHit]: ...
 
 
@@ -230,6 +232,7 @@ class ChatService:
                 top_k=top_k,
                 planes=planes,
                 min_score=self._settings.chat_retrieval_min_score,
+                interiority_boost=self._settings.chat_interiority_boost,
             )
         except ProviderUnavailable as exc:
             logger.warning("chat retrieval unavailable (answering without context): %s", exc)
@@ -244,7 +247,9 @@ class ChatService:
         capsule = await self._identity_capsule()
         if capsule:
             parts.append(render_identity(capsule))
-        parts.append(render_context(hits))
+        # `now` is a live render (not a replayable pipeline), so wall-clock is correct here (rule 12
+        # bars wall-clock only in replayable paths) — the temporal header/hints must be current.
+        parts.append(render_context(hits, date.today()))
         messages = [ChatMessage(role="system", content="\n\n".join(parts))]
         messages.extend(ChatMessage(role=m.role, content=m.content) for m in history)
         messages.append(ChatMessage(role="user", content=message))

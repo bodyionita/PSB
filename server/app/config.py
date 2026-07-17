@@ -378,6 +378,10 @@ class Settings(BaseSettings):
     identity_capsule_max_hubs: int = 8
     identity_capsule_max_memories: int = 12
     identity_capsule_max_insights: int = 8
+    # Recent `internal` nodes (the user's inner voice — ADR-055 §3b) blended as their own labeled
+    # slice so the distiller sees feelings/reflections as a distinct section, not diluted among
+    # event records. Newest-first by event time. 0 disables the slice.
+    identity_capsule_max_internal: int = 10
     # The soft token budget handed to the distiller prompt (~300 tokens, ADR-046 §5) + a hard char
     # cap the stored text is truncated to (a runaway-length backstop; ~300 tokens ≈ 1200 chars).
     identity_capsule_budget_tokens: int = 300
@@ -394,6 +398,11 @@ class Settings(BaseSettings):
     # grounding prompt is the primary "not in your memories" judge (prompt-driven + floor, no
     # classifier). A per-cosine value like 0.5 here would silently drop every hit — do not use one.
     chat_retrieval_min_score: float = 0.01
+    # Interiority boost (ADR-055 §3a): a bounded MULTIPLICATIVE nudge on the fused RRF×recency score
+    # for `internal` nodes, applied ONLY in chat grounding (the chat service passes it; `/search`
+    # stays neutral at 1.0) so answers about the user's state lean toward what they felt/thought.
+    # Same shape as the recency prior. 1.0 disables it; the default is a modest thumb on the scale.
+    chat_interiority_boost: float = Field(default=1.2, ge=1.0)
     # A generated session title is trimmed to this many chars (best-effort `quick`-tier titling).
     chat_title_max_chars: int = 80
     # Upper bound on the unpaginated `GET /chat/sessions` thread list, newest-first (03-api §Chat).

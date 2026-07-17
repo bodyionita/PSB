@@ -24,7 +24,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from ..config import Settings
 from ..providers.base import ChatMessage, ProviderUnavailable
@@ -54,12 +54,16 @@ class CapsuleOutcome:
     hubs: int = 0
     memories: int = 0
     insights: int = 0
+    internal: int = 0
     generated: bool = False
     chars: int = 0
     skipped_reason: str | None = None
 
     def summary(self) -> str:
-        srcs = f"{self.hubs} hub(s), {self.memories} memory(ies), {self.insights} insight(s)"
+        srcs = (
+            f"{self.hubs} hub(s), {self.memories} memory(ies), {self.insights} insight(s), "
+            f"{self.internal} internal"
+        )
         if self.generated:
             return f"identity capsule refreshed from {srcs} ({self.chars} chars)"
         return f"identity capsule kept ({self.skipped_reason}); source was {srcs}"
@@ -69,6 +73,7 @@ class CapsuleOutcome:
             "hubs": self.hubs,
             "memories": self.memories,
             "insights": self.insights,
+            "internal": self.internal,
             "generated": self.generated,
             "chars": self.chars,
             "skipped_reason": self.skipped_reason,
@@ -99,6 +104,7 @@ class IdentityCapsuleService:
         self._max_hubs = settings.identity_capsule_max_hubs
         self._max_memories = settings.identity_capsule_max_memories
         self._max_insights = settings.identity_capsule_max_insights
+        self._max_internal = settings.identity_capsule_max_internal
         self._budget_tokens = settings.identity_capsule_budget_tokens
         self._max_chars = settings.identity_capsule_max_chars
         # Single-flight flag (the event loop is single-threaded, so check-and-set is atomic) +
@@ -179,14 +185,20 @@ class IdentityCapsuleService:
         hubs = await self._sources.top_profile_hubs(self._max_hubs)
         memories = await self._sources.recent_memories(self._max_memories)
         insights = await self._sources.recent_insights(self._max_insights)
-        counts = dict(hubs=len(hubs), memories=len(memories), insights=len(insights))
-        if not hubs and not memories and not insights:
+        internal = await self._sources.recent_internal(self._max_internal)
+        counts = dict(
+            hubs=len(hubs), memories=len(memories), insights=len(insights), internal=len(internal)
+        )
+        if not hubs and not memories and not insights and not internal:
             # An empty graph: nothing to distill. Keep whatever capsule exists (likely none).
             return CapsuleOutcome(**counts, skipped_reason="no source material")
 
         messages = [
             ChatMessage(role="system", content=build_capsule_system_prompt(self._budget_tokens)),
-            ChatMessage(role="user", content=render_capsule_sources(hubs, memories, insights)),
+            ChatMessage(
+                role="user",
+                content=render_capsule_sources(hubs, memories, insights, internal, date.today()),
+            ),
         ]
         try:
             reply = await self._routing.complete("conspect", messages)
@@ -201,7 +213,7 @@ class IdentityCapsuleService:
         blob = CapsuleBlob(
             text=text,
             generated_at=self._now(),
-            source_refs=_source_refs(hubs, memories, insights),
+            source_refs=_source_refs(hubs, memories, insights, internal),
         )
         await self._capsule.save(blob)
         return CapsuleOutcome(**counts, generated=True, chars=len(text))
@@ -224,7 +236,10 @@ class IdentityCapsuleService:
 
 
 def _source_refs(
-    hubs: list[HubProfile], memories: list[RecentNode], insights: list[RecentNode]
+    hubs: list[HubProfile],
+    memories: list[RecentNode],
+    insights: list[RecentNode],
+    internal: list[RecentNode],
 ) -> list[dict[str, str]]:
     """The provenance refs stored on the blob (``{node_id, title, kind}`` per contributing node)."""
     refs: list[dict[str, str]] = []
@@ -234,6 +249,8 @@ def _source_refs(
         refs.append({"node_id": mem.node_id, "title": mem.title or "", "kind": "memory"})
     for ins in insights:
         refs.append({"node_id": ins.node_id, "title": ins.title or "", "kind": "insight"})
+    for node in internal:
+        refs.append({"node_id": node.node_id, "title": node.title or "", "kind": "internal"})
     return refs
 
 

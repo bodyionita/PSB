@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
 from ..db import Database
@@ -52,13 +52,17 @@ class HubProfile:
 
 @dataclass(frozen=True)
 class RecentNode:
-    """A recent memory or insight node fed to the distiller (title + short first-chunk excerpt)."""
+    """A recent memory / insight / internal node fed to the distiller (title + short first-chunk
+    excerpt + its temporal stamp for the LLM-bound rendering contract, ADR-056 §4)."""
 
     node_id: str
     title: str | None
     type: str
     plane: str | None
     excerpt: str | None
+    occurred_start: date | None = None
+    occurred_end: date | None = None
+    created_at: datetime | None = None
 
 
 class IdentityCapsuleReader(Protocol):
@@ -82,6 +86,8 @@ class CapsuleSourceStore(Protocol):
     async def recent_memories(self, limit: int) -> list[RecentNode]: ...
 
     async def recent_insights(self, limit: int) -> list[RecentNode]: ...
+
+    async def recent_internal(self, limit: int) -> list[RecentNode]: ...
 
 
 class PgIdentityCapsuleStore:
@@ -149,31 +155,44 @@ class PgCapsuleSourceStore:
         ]
 
     async def recent_memories(self, limit: int) -> list[RecentNode]:
-        return await self._recent_of_type("memory", limit)
+        return await self._recent(limit, type_filter="memory")
 
     async def recent_insights(self, limit: int) -> list[RecentNode]:
-        return await self._recent_of_type("insight", limit)
+        return await self._recent(limit, type_filter="insight")
 
-    async def _recent_of_type(self, node_type: str, limit: int) -> list[RecentNode]:
-        # The most recent live nodes of one kind, newest-first by event time (``occurred_start``),
-        # falling back to ingest time when undated. The first chunk supplies a short excerpt so the
-        # distiller sees more than a bare title without a second fetch.
+    async def recent_internal(self, limit: int) -> list[RecentNode]:
+        # The user's inner voice as its own slice (ADR-055 §3b): recent live nodes stamped
+        # ``interiority = 'internal'`` regardless of type (feelings/reflections may be `memory` or
+        # `insight`), so the distiller sees them labeled, not diluted among event records.
+        return await self._recent(limit, interiority="internal")
+
+    async def _recent(
+        self, limit: int, *, type_filter: str | None = None, interiority: str | None = None
+    ) -> list[RecentNode]:
+        # The most recent live nodes matching one filter (a type OR an interiority value),
+        # newest-first by event time (``occurred_start``), falling back to ingest time when undated.
+        # The first chunk supplies a short excerpt so the distiller sees more than a bare title
+        # without a second fetch. Exactly one of ``type_filter`` / ``interiority`` is set.
         if limit <= 0:
             return []
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT n.id, n.title, n.type, n.plane,
+                SELECT n.id, n.title, n.type, n.plane, n.occurred_start, n.occurred_end,
+                       n.node_created_at,
                        (SELECT c.content FROM chunks c
                           WHERE c.node_id = n.id ORDER BY c.chunk_index LIMIT 1) AS excerpt
                 FROM nodes n
-                WHERE n.type = $1 AND n.merged_into IS NULL
+                WHERE n.merged_into IS NULL
+                  AND ($1::text IS NULL OR n.type = $1)
+                  AND ($2::text IS NULL OR n.interiority = $2)
                 ORDER BY COALESCE(n.occurred_start, n.node_created_at::date, n.indexed_at::date)
                              DESC,
                          n.indexed_at DESC
-                LIMIT $2
+                LIMIT $3
                 """,
-                node_type,
+                type_filter,
+                interiority,
                 limit,
             )
         return [
@@ -183,6 +202,9 @@ class PgCapsuleSourceStore:
                 type=r["type"],
                 plane=r["plane"],
                 excerpt=r["excerpt"],
+                occurred_start=r["occurred_start"],
+                occurred_end=r["occurred_end"],
+                created_at=r["node_created_at"],
             )
             for r in rows
         ]

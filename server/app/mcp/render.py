@@ -10,11 +10,13 @@ are capped inline with a `traverse` overflow pointer so one node never dumps hun
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import date
 
 from ..graph.service import ContextNeighbor, NeighborPage, NodeContext
 from ..graph.store import NeighborEdge
 from ..search.service import NodePreview
 from ..search.store import NodeEdgeView, SearchHit
+from ..temporal.render import expand_body_for_llm, temporal_header
 
 _ARROWS = {"out": "→", "in": "←"}
 
@@ -31,7 +33,7 @@ def _meta(type_: str, plane: str | None) -> str:
     return f"{type_}, {plane}" if plane else type_
 
 
-def render_search_results(query: str, hits: list[SearchHit]) -> str:
+def render_search_results(query: str, hits: list[SearchHit], now: date) -> str:
     if not hits:
         return f'No nodes found for "{query}". This may not be in your memories yet.'
     lines = [f'# Search results for "{query}" ({len(hits)})', ""]
@@ -39,10 +41,21 @@ def render_search_results(query: str, hits: list[SearchHit]) -> str:
         score = f"{hit.score:.3f}"
         lines.append(f"- **{_title(hit.title)}** ({_meta(hit.type, hit.plane)}) · score {score}")
         lines.append(f"  - id: `{hit.node_id}`")
+        # Per-item temporal metadata header (recorded-at · occurred) — the LLM-bound rendering
+        # contract (ADR-056 §4), so a snippet's dates are interpretable against stated context.
+        lines.append(
+            "  - "
+            + temporal_header(
+                recorded_at=hit.created_at,
+                occurred_start=hit.occurred_start,
+                occurred_end=hit.occurred_end,
+                now=now,
+            )
+        )
         if hit.tags:
             lines.append(f"  - tags: {', '.join(hit.tags)}")
         if hit.snippet:
-            lines.append(f"  - {hit.snippet.strip()}")
+            lines.append(f"  - {expand_body_for_llm(hit.snippet, now).strip()}")
     lines.append("")
     lines.append("Use `get_node(id)` or `build_context(id)` to go deeper.")
     return "\n".join(lines)
@@ -66,7 +79,7 @@ def _render_edges(edges: list[NodeEdgeView], node_id: str, cap: int, indent: str
     return lines
 
 
-def render_node(node: NodePreview, *, edge_cap: int) -> str:
+def render_node(node: NodePreview, *, edge_cap: int, now: date) -> str:
     if node.merged_into is not None:
         return (
             f"Node `{node.node_id}` was merged into `{node.merged_into}` — "
@@ -83,13 +96,24 @@ def render_node(node: NodePreview, *, edge_cap: int) -> str:
         lines.append(f"- aliases: {', '.join(node.aliases)}")
     if node.tags:
         lines.append(f"- tags: {', '.join(node.tags)}")
-    if node.occurred:
-        span = str(node.occurred) + (f" – {node.occurred_end}" if node.occurred_end else "")
-        lines.append(f"- occurred: {span}")
+    if node.interiority:
+        lines.append(f"- interiority: {node.interiority}")
+    # Temporal metadata header (recorded-at · occurred) — LLM-bound rendering contract (ADR-056 §4),
+    # replacing the bare `occurred` line (which the header subsumes).
+    lines.append(
+        "- "
+        + temporal_header(
+            recorded_at=node.created_at,
+            occurred_start=node.occurred,
+            occurred_end=node.occurred_end,
+            now=now,
+        )
+    )
     if node.profile:
-        lines += ["", "## Profile", node.profile.strip()]
+        lines += ["", "## Profile", expand_body_for_llm(node.profile, now).strip()]
     if node.body and node.body.strip():
-        lines += ["", "## Content", node.body.strip()]
+        # Expand date tokens to absolute + a fresh relative hint before the LLM sees the body.
+        lines += ["", "## Content", expand_body_for_llm(node.body, now).strip()]
     if node.edges:
         lines += ["", f"## Edges ({len(node.edges)})"]
         lines += _render_edges(node.edges, node.node_id, edge_cap)
@@ -125,11 +149,11 @@ def _render_context_tree(
     return lines
 
 
-def render_build_context(ctx: NodeContext, *, edge_cap: int) -> str:
+def render_build_context(ctx: NodeContext, *, edge_cap: int, now: date) -> str:
     parts: list[str] = []
     if ctx.identity_capsule and ctx.identity_capsule.strip():
         parts += ["## About the user (identity capsule)", ctx.identity_capsule.strip(), ""]
-    parts.append(render_node(ctx.node, edge_cap=edge_cap))
+    parts.append(render_node(ctx.node, edge_cap=edge_cap, now=now))
     if ctx.neighbors:
         parts += ["", f"## Context (depth {ctx.depth})"]
         parts += _render_context_tree(ctx.neighbors, 0, edge_cap)

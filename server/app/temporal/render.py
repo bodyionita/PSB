@@ -29,7 +29,7 @@ phrases at the ``.5`` boundaries (e.g. 75 days → "3 months", 30 months → "3 
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, datetime
 
 from .tokens import TOKEN_RE, PartialDate, ResolvedTime, parse_inner
 
@@ -192,3 +192,37 @@ def expand_body_for_index(body: str) -> str:
 def expand_body_for_llm(body: str, now: date) -> str:
     """LLM-bound rendering of a whole body: every token → absolute + relative hint (ADR-056 §4)."""
     return _replace_tokens(body, lambda rt, _inner: expand_for_llm(rt, now))
+
+
+def _fmt_date(d: date) -> str:
+    return f"{d.day} {_MONTH_NAMES[d.month - 1]} {d.year}"
+
+
+def format_occurred(start: date | None, end: date | None) -> str:
+    """The occurred span as absolute language for the LLM temporal header ("27 June 2025 –
+    31 August 2025" / "7 July 2026" / "unknown"). Day-granular (``occurred_*`` are dates)."""
+    if start is None:
+        return "unknown"
+    if end is not None and end != start:
+        return f"{_fmt_date(start)} – {_fmt_date(end)}"
+    return _fmt_date(start)
+
+
+def temporal_header(
+    *,
+    recorded_at: datetime | date | None,
+    occurred_start: date | None,
+    occurred_end: date | None,
+    now: date,
+) -> str:
+    """The per-item temporal metadata header the LLM-bound rendering contract requires (ADR-056 §4):
+    ``recorded 7 July 2026 (10 days ago) · occurred 27 June 2025``. Makes even unmarked prose
+    ("last Tuesday" in a pre-reprocess node) interpretable against stated context. ``recorded_at``
+    is the capture/node recorded-at (a datetime is reduced to its date); a missing recorded-at is
+    omitted, a missing occurred renders "unknown"."""
+    parts: list[str] = []
+    if recorded_at is not None:
+        rd = recorded_at.date() if isinstance(recorded_at, datetime) else recorded_at
+        parts.append(f"recorded {_fmt_date(rd)} ({_humanize_day(rd, now)})")
+    parts.append(f"occurred {format_occurred(occurred_start, occurred_end)}")
+    return " · ".join(parts)

@@ -34,6 +34,7 @@ from typing import Protocol
 from ..config import Settings
 from ..providers.base import ProviderUnavailable
 from ..providers.registry import ProviderRegistry
+from ..temporal.render import expand_body_for_index
 from .chunking import chunk_node
 from .frontmatter import NodeMetadata, parse_node_metadata
 from .store import CanonicalEdge, IndexStore, NodeChunk, NodeUpsert
@@ -172,8 +173,13 @@ class Indexer:
                 await self._store.update_node_path(meta.id, store_path)
             return _Result.SKIPPED, meta
 
+        # Expand any inline date tokens to stable ABSOLUTE text before chunking/embedding, so the
+        # vectors (and the FTS tsvector generated off `chunks.content`) see natural language, not
+        # `[[t:…]]` noise (ADR-056 §4). Frontmatter carries no tokens, so running the whole file
+        # through the (token-only) expander is a no-op there; `content_hash` above stays keyed on
+        # the untouched file so hash-skip still tracks the store, not the expansion.
         chunks = chunk_node(
-            raw_text,
+            expand_body_for_index(raw_text),
             chunk_size=self._settings.chunk_size,
             chunk_overlap=self._settings.chunk_overlap,
         )

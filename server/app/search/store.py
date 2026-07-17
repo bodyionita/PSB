@@ -20,7 +20,7 @@ language-detect dependency). Temporal filters (``since``/``until``/``as_of``) na
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 
 from ..db import Database
@@ -28,7 +28,11 @@ from ..db import Database
 
 @dataclass(frozen=True)
 class SearchHit:
-    """One node in a search result — its best-scoring chunk supplies the snippet + score."""
+    """One node in a search result — its best-scoring chunk supplies the snippet + score.
+
+    The temporal fields (``occurred_*`` + ``created_at``) and ``interiority`` feed the LLM-bound
+    rendering contract's per-item header (ADR-056 §4) and the map/preview marker; they never change
+    the API ``/search`` shape (the router omits them)."""
 
     node_id: str
     store_path: str
@@ -39,6 +43,10 @@ class SearchHit:
     tags: list[str]
     snippet: str
     score: float
+    occurred_start: date | None = None
+    occurred_end: date | None = None
+    created_at: datetime | None = None
+    interiority: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,8 @@ class RetrievalParams:
     Grouped into a value object so the store signature stays legible as the retriever gains knobs.
     ``candidates`` is the per-leg pool taken before RRF; ``rrf_k`` is the fusion constant; the two
     ``recency_*`` fields shape the multiplicative prior; ``min_score`` floors the final fused score.
+    ``interiority_boost`` is the bounded multiplicative nudge on ``internal`` nodes (ADR-055 §3a) —
+    ``1.0`` (the default) is neutral, so ``/search`` is unaffected and only chat passes a boost.
     ``planes``/``types``/``since``/``until``/``as_of`` = ``None`` skips that filter."""
 
     top_k: int
@@ -56,6 +66,7 @@ class RetrievalParams:
     recency_half_life_days: float
     recency_floor: float
     min_score: float
+    interiority_boost: float = 1.0
     planes: list[str] | None = None
     types: list[str] | None = None
     since: date | None = None
@@ -100,6 +111,8 @@ class NodeRow:
     occurred_start: date | None
     occurred_end: date | None
     merged_into: str | None
+    created_at: datetime | None = None
+    interiority: str | None = None
     profile: str | None = None
     edges: list[NodeEdgeView] = field(default_factory=list)
 
@@ -149,20 +162,25 @@ class PgSearchStore:
         # (planes/types + temporal) apply to every sub-leg; a `$…::T IS NULL` skips that filter.
         # Temporal: `since`/`until` = occurred-range overlap on occurred_start/occurred_end; `as_of`
         # = node-date `occurred_start <= as_of` (ADR-032; undated nodes fall outside any window).
+        # Column set carried per node through both legs. `occurred_end` + `node_created_at` +
+        # `interiority` are new (ADR-055/056): the first two feed the LLM temporal header, the last
+        # both the interiority boost below and the map/preview marker.
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """
                 WITH vec AS (
                     SELECT node_id, store_path, type, title, plane, planes, tags,
-                           occurred_start, node_created_at, snippet,
+                           occurred_start, occurred_end, node_created_at, interiority, snippet,
                            row_number() OVER (ORDER BY dist ASC, node_id) AS rank
                     FROM (
                         SELECT DISTINCT ON (node_id)
                             node_id, store_path, type, title, plane, planes, tags,
-                            occurred_start, node_created_at, snippet, dist
+                            occurred_start, occurred_end, node_created_at, interiority,
+                            snippet, dist
                         FROM (
                             SELECT n.id AS node_id, n.store_path, n.type, n.title, n.plane,
-                                   n.planes, n.tags, n.occurred_start, n.node_created_at,
+                                   n.planes, n.tags, n.occurred_start, n.occurred_end,
+                                   n.node_created_at, n.interiority,
                                    c.content AS snippet, c.embedding <=> $1 AS dist
                             FROM chunks c JOIN nodes n ON n.id = c.node_id
                             WHERE c.embedding IS NOT NULL AND n.merged_into IS NULL
@@ -174,8 +192,8 @@ class PgSearchStore:
                               AND ($7::date IS NULL OR n.occurred_start <= $7)
                             UNION ALL
                             SELECT n.id, n.store_path, n.type, n.title, n.plane, n.planes, n.tags,
-                                   n.occurred_start, n.node_created_at,
-                                   np.profile AS snippet, np.embedding <=> $1 AS dist
+                                   n.occurred_start, n.occurred_end, n.node_created_at,
+                                   n.interiority, np.profile AS snippet, np.embedding <=> $1 AS dist
                             FROM node_profiles np JOIN nodes n ON n.id = np.node_id
                             WHERE np.embedding IS NOT NULL AND n.merged_into IS NULL
                               AND ($2::text[] IS NULL OR n.planes && $2::text[])
@@ -192,16 +210,17 @@ class PgSearchStore:
                 ),
                 fts AS (
                     SELECT node_id, store_path, type, title, plane, planes, tags,
-                           occurred_start, node_created_at, snippet,
+                           occurred_start, occurred_end, node_created_at, interiority, snippet,
                            row_number() OVER (ORDER BY ftrank DESC, node_id) AS rank
                     FROM (
                         SELECT DISTINCT ON (node_id)
                             node_id, store_path, type, title, plane, planes, tags,
-                            occurred_start, node_created_at, snippet, ftrank
+                            occurred_start, occurred_end, node_created_at, interiority, snippet,
+                            ftrank
                         FROM (
                             SELECT n.id AS node_id, n.store_path, n.type, n.title, n.plane,
-                                   n.planes, n.tags, n.occurred_start, n.node_created_at,
-                                   c.content AS snippet,
+                                   n.planes, n.tags, n.occurred_start, n.occurred_end,
+                                   n.node_created_at, n.interiority, c.content AS snippet,
                                    ts_rank(c.tsv, websearch_to_tsquery('english', $4)) AS ftrank
                             FROM chunks c JOIN nodes n ON n.id = c.node_id
                             WHERE c.tsv @@ websearch_to_tsquery('english', $4)
@@ -214,7 +233,8 @@ class PgSearchStore:
                               AND ($7::date IS NULL OR n.occurred_start <= $7)
                             UNION ALL
                             SELECT n.id, n.store_path, n.type, n.title, n.plane, n.planes, n.tags,
-                                   n.occurred_start, n.node_created_at, np.profile AS snippet,
+                                   n.occurred_start, n.occurred_end, n.node_created_at,
+                                   n.interiority, np.profile AS snippet,
                                    ts_rank(np.tsv, websearch_to_tsquery('english', $4)) AS ftrank
                             FROM node_profiles np JOIN nodes n ON n.id = np.node_id
                             WHERE np.tsv @@ websearch_to_tsquery('english', $4)
@@ -242,15 +262,20 @@ class PgSearchStore:
                         COALESCE(v.tags, f.tags)             AS tags,
                         COALESCE(v.snippet, f.snippet)       AS snippet,
                         COALESCE(v.occurred_start, f.occurred_start)   AS occurred_start,
+                        COALESCE(v.occurred_end, f.occurred_end)       AS occurred_end,
                         COALESCE(v.node_created_at, f.node_created_at) AS node_created_at,
+                        COALESCE(v.interiority, f.interiority)         AS interiority,
                         COALESCE(1.0 / ($9 + v.rank), 0.0)
                           + COALESCE(1.0 / ($9 + f.rank), 0.0) AS rrf
                     FROM vec v FULL OUTER JOIN fts f ON v.node_id = f.node_id
                 ),
                 scored AS (
                     -- `today` is pinned to UTC (CLAUDE convention: DB timestamps are UTC) so the
-                    -- recency age doesn't drift by a day under a non-UTC session timezone.
+                    -- recency age doesn't drift by a day under a non-UTC session timezone. The
+                    -- interiority boost ($14, ADR-055 §3a) is a bounded multiplicative nudge on
+                    -- `internal` nodes; it is 1.0 for `/search` (neutral) and only chat passes >1.
                     SELECT node_id, store_path, type, title, plane, planes, tags, snippet,
+                           occurred_start, occurred_end, node_created_at, interiority,
                            rrf * ($11::float + (1 - $11::float) * power(
                                0.5,
                                GREATEST(
@@ -259,10 +284,12 @@ class PgSearchStore:
                                               (now() AT TIME ZONE 'UTC')::date),
                                    0
                                )::float / $10::float
-                           )) AS score
+                           )) * (CASE WHEN interiority = 'internal' THEN $14::float ELSE 1.0 END)
+                           AS score
                     FROM fused
                 )
-                SELECT node_id, store_path, type, title, plane, planes, tags, snippet, score
+                SELECT node_id, store_path, type, title, plane, planes, tags, snippet, score,
+                       occurred_start, occurred_end, node_created_at, interiority
                 FROM scored
                 WHERE score >= $12
                 ORDER BY score DESC
@@ -281,6 +308,7 @@ class PgSearchStore:
                 params.recency_floor,
                 params.min_score,
                 params.top_k,
+                params.interiority_boost,
             )
         return [
             SearchHit(
@@ -293,6 +321,10 @@ class PgSearchStore:
                 tags=list(row["tags"] or []),
                 snippet=row["snippet"],
                 score=float(row["score"]),
+                occurred_start=row["occurred_start"],
+                occurred_end=row["occurred_end"],
+                created_at=row["node_created_at"],
+                interiority=row["interiority"],
             )
             for row in rows
         ]
@@ -302,7 +334,8 @@ class PgSearchStore:
             node = await conn.fetchrow(
                 """
                 SELECT n.id, n.store_path, n.type, n.title, n.plane, n.planes, n.tags, n.aliases,
-                       n.disambig, n.occurred_start, n.occurred_end, n.merged_into, np.profile
+                       n.disambig, n.occurred_start, n.occurred_end, n.merged_into,
+                       n.node_created_at, n.interiority, np.profile
                 FROM nodes n
                 LEFT JOIN node_profiles np ON np.node_id = n.id
                 WHERE n.id = $1
@@ -339,6 +372,8 @@ class PgSearchStore:
             occurred_start=node["occurred_start"],
             occurred_end=node["occurred_end"],
             merged_into=str(node["merged_into"]) if node["merged_into"] else None,
+            created_at=node["node_created_at"],
+            interiority=node["interiority"],
             profile=node["profile"],
             edges=[
                 NodeEdgeView(

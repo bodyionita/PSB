@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from ..config import Settings
@@ -49,6 +49,8 @@ class NodePreview:
     profile: str | None
     edges: list[NodeEdgeView]
     merged_into: str | None
+    created_at: datetime | None = None
+    interiority: str | None = None
 
 
 class SearchService:
@@ -71,6 +73,7 @@ class SearchService:
         until: date | None = None,
         as_of: date | None = None,
         min_score: float | None = None,
+        interiority_boost: float | None = None,
     ) -> list[SearchHit]:
         """Hybrid (vector ⊍ FTS, RRF-fused) node-grouped search + recency prior (03-api §Search).
 
@@ -93,6 +96,8 @@ class SearchService:
             recency_half_life_days=self._settings.search_recency_half_life_days,
             recency_floor=self._settings.search_recency_floor,
             min_score=(min_score if min_score is not None else self._settings.search_min_score),
+            # 1.0 = neutral (ADR-055 §3a): `/search` never boosts; only chat passes a value.
+            interiority_boost=(interiority_boost if interiority_boost is not None else 1.0),
             planes=planes or None,  # an empty filter list means "no filter"
             types=types or None,
             since=since,
@@ -124,6 +129,8 @@ class SearchService:
             profile=row.profile,  # derived entity profile (node_profiles, ADR-030 §4 / task 6)
             edges=row.edges,
             merged_into=row.merged_into,
+            created_at=row.created_at,
+            interiority=row.interiority,
         )
 
     def _clamp_top_k(self, top_k: int | None) -> int:
@@ -145,6 +152,10 @@ class SearchService:
             tags=hit.tags,
             snippet=trimmed,
             score=hit.score,
+            occurred_start=hit.occurred_start,
+            occurred_end=hit.occurred_end,
+            created_at=hit.created_at,
+            interiority=hit.interiority,
         )
 
     def _read_body(self, store_path: str) -> str:

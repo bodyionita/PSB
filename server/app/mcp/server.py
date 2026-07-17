@@ -120,13 +120,13 @@ def build_mcp_server(app: FastAPI, settings: Settings) -> FastMCP:
             return str(exc)
         except ProviderUnavailable:
             return "Search is temporarily unavailable (the embedding provider is down). Try again."
-        return render_search_results(query, hits)
+        return render_search_results(query, hits, date.today())
 
     async def get_node(id: str) -> str:
         node = await app.state.search_service.get_node(id)
         if node is None:
             return f"No node with id `{id}`."
-        return render_node(node, edge_cap=edge_cap)
+        return render_node(node, edge_cap=edge_cap, now=date.today())
 
     async def traverse(
         id: str, rel: str | None = None, direction: str = "both", cursor: str | None = None
@@ -145,7 +145,7 @@ def build_mcp_server(app: FastAPI, settings: Settings) -> FastMCP:
         ctx = await app.state.graph_service.build_context(id, depth=depth)
         if ctx is None:
             return f"No node with id `{id}`."
-        return render_build_context(ctx, edge_cap=edge_cap)
+        return render_build_context(ctx, edge_cap=edge_cap, now=date.today())
 
     async def list_planes() -> str:
         return render_planes(list(settings.planes), settings.inbox_folder)
