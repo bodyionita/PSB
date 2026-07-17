@@ -126,11 +126,6 @@ export function AppShell() {
         maxWidth: active.wide ? 'none' : 640,
         margin: '0 auto',
         width: '100%',
-        // Backstop: no screen should ever scroll sideways on a phone. `clip` (not `hidden`) adds no
-        // scroll container and doesn't trap the fixed nav / body-portaled tooltip / fixed drawers,
-        // which all live outside this box or escape it. Individual long-content fixes still wrap;
-        // this only catches anything that slips through.
-        overflowX: 'clip',
       }}
     >
       {/* A `wide` tab (Explore) owns its whole layout edge-to-edge — no reading-column padding, a

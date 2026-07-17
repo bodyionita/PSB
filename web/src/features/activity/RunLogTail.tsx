@@ -20,7 +20,15 @@ function LogLine({ line }: { line: RunLogLine }) {
       <span style={{ color: levelColor(line.level), flex: 'none', fontWeight: 600 }}>
         {line.level.toUpperCase().slice(0, 4)}
       </span>
-      <span style={{ color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+      <span
+        style={{
+          minWidth: 0,
+          color: 'var(--text)',
+          whiteSpace: 'pre-wrap',
+          overflowWrap: 'anywhere',
+          wordBreak: 'break-word',
+        }}
+      >
         {line.message}
       </span>
     </div>

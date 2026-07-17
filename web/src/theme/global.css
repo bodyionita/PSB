@@ -22,6 +22,15 @@
   box-sizing: border-box;
 }
 
+/* The app stacks content with `display: grid` (inline styles). A single-column grid's implicit
+   `auto` track sizes to its content's max-content, so one wide child — a long log line, a nowrap
+   chip, an unbreakable token — makes the whole page overflow sideways and forces a zoom-out on a
+   phone. Default every such grid to a fill-and-shrink track. Grids that set their own
+   `grid-template-columns` inline are excluded (and would win by specificity anyway). */
+[style*="display: grid"]:not([style*="grid-template-columns"]) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 html,
 body,
 #root {
