@@ -451,7 +451,8 @@ def test_config_defines_nightly_and_weekly_pipelines():
     nightly = by_name["nightly"]
     # dependency order preserved from the retired ADR-010 stagger + the M6 sleep-cycle jobs woven
     # into their slots (ADR-048): chat-distiller first, inbox-drain before reindex, then dedup-sweep
-    # after the entity jobs (it needs post-reindex embeddings).
+    # after the entity jobs (it needs post-reindex embeddings); the M8 read-only graph-health
+    # reporter is the nightly TAIL (ADR-053 §9 — reports on the settled state).
     assert [s.name for s in nightly.steps] == [
         "chat-distiller",
         "data-sync",
@@ -464,6 +465,7 @@ def test_config_defines_nightly_and_weekly_pipelines():
         "dedup-sweep",
         "store-sweep",
         "store-backup",
+        "graph-health",
     ]
     assert [s.name for s in by_name["weekly"].steps] == ["integrity-drill", "maybe-digest"]
     # continue-dominant roster (ADR-047 §4): no migrated durability step aborts the rest.

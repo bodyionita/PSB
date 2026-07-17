@@ -38,6 +38,8 @@ NIGHTLY_STEPS = [
     "dedup-sweep",
     "store-sweep",
     "store-backup",
+    # M8 nightly-tail (ADR-053 §9): the read-only graph-health reporter runs last.
+    "graph-health",
 ]
 WEEKLY_STEPS = ["integrity-drill", "maybe-digest"]
 # With no optional agent-window / sleep-cycle jobs wired, only the five backup steps survive (two of
@@ -78,6 +80,7 @@ def _full_scheduler(tmp_path: Path, **over) -> PipelineScheduler:
         inbox_drain=_FakeJob(),
         dedup_sweep=_FakeJob(),
         maybe_digest=_FakeJob(),
+        graph_health=_FakeJob(),
         **over,
     )
 
@@ -110,6 +113,7 @@ def test_step_funcs_map_to_the_intended_job_coroutines(tmp_path: Path):
     settings, jobs = _jobs(tmp_path)
     reindex, profile, backfill, capsule = _FakeJob(), _FakeJob(), _FakeJob(), _FakeJob()
     distiller, drain, dedup, digest = _FakeJob(), _FakeJob(), _FakeJob(), _FakeJob()
+    health = _FakeJob()
     scheduler = PipelineScheduler(
         settings=settings,
         jobs=jobs,
@@ -122,6 +126,7 @@ def test_step_funcs_map_to_the_intended_job_coroutines(tmp_path: Path):
         inbox_drain=drain,
         dedup_sweep=dedup,
         maybe_digest=digest,
+        graph_health=health,
     )
     funcs = scheduler._step_funcs()
     # backup jobs → BackupJobs methods; guards against a wiring swap.
@@ -140,6 +145,8 @@ def test_step_funcs_map_to_the_intended_job_coroutines(tmp_path: Path):
     assert funcs["inbox-drain"] == drain.run_scheduled
     assert funcs["dedup-sweep"] == dedup.run_scheduled
     assert funcs["maybe-digest"] == digest.run_scheduled
+    # M8 nightly-tail (ADR-053 §9): the read-only graph-health reporter.
+    assert funcs["graph-health"] == health.run_scheduled
 
 
 def test_unwired_optional_jobs_are_dropped_from_the_pipeline(tmp_path: Path):

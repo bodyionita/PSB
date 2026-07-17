@@ -493,6 +493,20 @@ class Settings(BaseSettings):
     # Upper bound on one `GET /activity/runs/{id}/logs` page (the client pages with `after_seq`).
     run_log_tail_max_lines: int = 1000
 
+    # --- Graph-health reporter (M8 task 4, ADR-053 §9 / ADR-033 #5) ---
+    # The nightly-tail read-only health check. It only computes + reports into its run's
+    # `agent_runs.details` (the console card reads the latest run) — never remediates (that is M10).
+    # These are the ADR-053 §9 threshold knobs (rule 9: no hardcoded thresholds).
+    # A still-decidable (`pending`/`maybe`) review item older than this is flagged as aged — the
+    # triage backlog signal (04-pipelines: review-aging).
+    graph_health_review_aging_days: int = 14
+    # An entity profile whose newest `(as of …)` observation stamp is older than this is flagged
+    # stale — the freshness signal (ADR-033 #5). Half a year of no fresh mention on an entity.
+    graph_health_freshness_days: int = 180
+    # How many example offenders each check lists in its findings (bounds the details JSON / card —
+    # the count is exact, the sample is illustrative). 0 keeps counts only.
+    graph_health_sample_offenders: int = 10
+
     # --- Web / CORS (dev only; in prod Caddy same-origins the app) ---
     cors_origins: CsvList = Field(default=["http://localhost:5173"])
 
@@ -503,7 +517,9 @@ class Settings(BaseSettings):
         **chat-distiller** first (its endorsed nodes must exist before reindex), then raw-input sync
         → db backup → **inbox-drain** (enriches entities before the entity jobs, before reindex) →
         reindex → derived profiles/backfill → identity capsule → **dedup-sweep** (needs post-reindex
-        embeddings) → store commit/bundle; the **weekly** pipeline is the integrity drill + the M6
+        embeddings) → store commit/bundle → **graph-health** (M8 nightly-tail read-only reporter,
+        ADR-053 §9 — reports on the settled state, `on_fail: continue`); the **weekly** pipeline is
+        the integrity drill + the M6
         **maybe-digest**. **`continue`-dominant** (ADR-047 §4): a flaky step never costs the night
         its downstream backups — no step here is a foundational precondition that should abort the
         rest, so all are `continue` (the `halt` policy exists and is exercised, but this roster
@@ -529,6 +545,9 @@ class Settings(BaseSettings):
                 step("dedup-sweep"),
                 step("store-sweep"),
                 step("store-backup"),
+                # M8 nightly-TAIL (ADR-053 §9): the read-only graph-health reporter runs last, so it
+                # reports on the settled post-reindex/post-dedup/post-backup state (04-pipelines).
+                step("graph-health"),
             ),
         )
         weekly = PipelineDef(
