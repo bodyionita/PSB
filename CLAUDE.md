@@ -64,6 +64,13 @@ freely while implementing but **push code only when the user asks**.
     committed. Enforced by `.githooks/pre-commit` (enable once: `git config core.hooksPath
     .githooks`) + a gitleaks CI job. `--no-verify` is forbidden for secret material; a
     leaked secret is treated as compromised and rotated immediately.
+12. **LLMs classify, code computes** ([ADR-056](../second-brain-docs/adr/056-temporal-correctness-date-tokens.md)).
+    No LLM-emitted arithmetic, date, or other numerical *derivation* is ever stored. The
+    model emits symbolic classifications ("10 days ago" → `{kind: relative_days, offset:
+    -10}`); deterministic code (`datetime`/`dateutil`, plain Python) performs all
+    computation against stored anchors — never wall-clock in replayable paths (P10).
+    Unresolvable input degrades (stays prose / files review), it is never guessed.
+    Binding on all pipelines, connectors, and agents.
 
 ## Conventions
 
