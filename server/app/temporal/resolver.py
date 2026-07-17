@@ -76,26 +76,23 @@ def resolve_reference(data: object, anchor: datetime | date) -> ResolvedTime | N
 
 
 def _resolve_explicit(ref: ExplicitRef, anchor: datetime | date) -> ResolvedTime | None:
-    year = ref.year
-    if year is None:
-        # No year stated → snap to the most recent occurrence at or before the anchor (a memory
-        # refers to the past by default). Snapping needs at least a month.
-        if ref.month is None:
-            return None
-        y = _anchor_date(anchor).year
-        candidate = PartialDate.from_fields(y, ref.month, ref.day, ref.hour, ref.minute)
-        if candidate is None:
-            # e.g. 29 Feb of a non-leap anchor year — step back a year and retry once.
-            candidate = PartialDate.from_fields(y - 1, ref.month, ref.day, ref.hour, ref.minute)
-            if candidate is None:
-                return None
-            return ResolvedTime(start=candidate)
-        if candidate.floor_date() > _anchor_date(anchor):
-            stepped = PartialDate.from_fields(y - 1, ref.month, ref.day, ref.hour, ref.minute)
-            candidate = stepped or candidate
-        return ResolvedTime(start=candidate)
-    pd = PartialDate.from_fields(year, ref.month, ref.day, ref.hour, ref.minute)
-    return ResolvedTime(start=pd) if pd is not None else None
+    if ref.year is not None:
+        pd = PartialDate.from_fields(ref.year, ref.month, ref.day, ref.hour, ref.minute)
+        return ResolvedTime(start=pd) if pd is not None else None
+    # No year stated → snap to the most recent occurrence at or before the anchor (a memory refers
+    # to the past by default). Snapping needs at least a month.
+    if ref.month is None:
+        return None
+    a = _anchor_date(anchor)
+    # Walk back year by year to the first occurrence that is both a real date and not in the
+    # future — so "29 Feb" resolves to the previous leap year, never a future/invalid one. The
+    # 8-year reach covers even a century-boundary leap gap (e.g. 1896 → 1904); no valid past
+    # occurrence in reach ⇒ None (fail-closed, rule 12), never a guessed date.
+    for candidate_year in range(a.year, a.year - 9, -1):
+        pd = PartialDate.from_fields(candidate_year, ref.month, ref.day, ref.hour, ref.minute)
+        if pd is not None and pd.floor_date() <= a:
+            return ResolvedTime(start=pd)
+    return None
 
 
 def _resolve_relative(ref: RelativeRef, anchor: datetime | date) -> ResolvedTime | None:

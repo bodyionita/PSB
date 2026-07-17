@@ -20,10 +20,15 @@ else→"N years" (round(a/365)). Month-granular points humanize by whole-month d
 (0→"this year", ∓1→"last"/"next year", else "N years"). Ranges and labelled points render
 absolute (a season is natural as "summer 2025", not a relative phrase). Past uses "N … ago",
 future "in N …"; N==1 uses the article ("a month ago", "in a year").
+
+All rounding is **round-half-up** on the (non-negative) magnitude via :func:`_round` — *not*
+Python's default round-half-to-even — so a web mirror using ``Math.round`` produces byte-identical
+phrases at the ``.5`` boundaries (e.g. 75 days → "3 months", 30 months → "3 years").
 """
 
 from __future__ import annotations
 
+import math
 from datetime import date
 
 from .tokens import TOKEN_RE, PartialDate, ResolvedTime, parse_inner
@@ -68,6 +73,12 @@ def render_absolute(rt: ResolvedTime) -> str:
     return _absolute_partial(rt.start)
 
 
+def _round(x: float) -> int:
+    """Round-half-**up** on a non-negative magnitude (``math.floor(x + 0.5)``), matching JS
+    ``Math.round`` so the web mirror agrees at ``.5`` ties — not Python's default half-to-even."""
+    return math.floor(x + 0.5)
+
+
 def _ago(n: int, unit: str, past: bool) -> str:
     """ "a month ago" / "3 months ago" / "in a year" / "in 5 days"."""
     quantity = f"a {unit}" if n == 1 else f"{n} {unit}s"
@@ -87,10 +98,10 @@ def _humanize_day(target: date, now: date) -> str:
     if a <= 27:
         return _ago(a, "day", past)
     if a < 330:
-        return _ago(max(1, round(a / 30)), "month", past)
+        return _ago(max(1, _round(a / 30)), "month", past)
     if a < 400:
         return _ago(1, "year", past)
-    return _ago(round(a / 365), "year", past)
+    return _ago(_round(a / 365), "year", past)
 
 
 def _humanize_month(pd: PartialDate, now: date) -> str:
@@ -105,7 +116,7 @@ def _humanize_month(pd: PartialDate, now: date) -> str:
     past = md < 0
     if a < 12:
         return _ago(a, "month", past)
-    return _ago(round(a / 12), "year", past)
+    return _ago(_round(a / 12), "year", past)
 
 
 def _humanize_year(year: int, now: date) -> str:

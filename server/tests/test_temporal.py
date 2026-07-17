@@ -219,6 +219,19 @@ def test_explicit_impossible_date_is_none():
     assert resolve(ExplicitRef(year=2021, month=2, day=30, phrase="30 Feb"), ANCHOR) is None
 
 
+def test_explicit_yearless_feb29_snaps_to_previous_leap_year_not_future():
+    # Anchor 2024-01-15 is in a leap year, but 29 Feb 2024 is *after* the anchor — snapping must
+    # walk back to the previous real leap-year occurrence (2020), never keep the future date.
+    rt = resolve(ExplicitRef(month=2, day=29, phrase="Feb 29"), datetime(2024, 1, 15))
+    assert rt is not None and rt.start == PartialDate(2020, 2, 29)
+    assert rt.occurred_start() <= date(2024, 1, 15)  # never in the future
+
+
+def test_explicit_yearless_impossible_day_finds_no_past_and_is_none():
+    # 31 April never exists → the back-walk exhausts → None (fail-closed, never guessed).
+    assert resolve(ExplicitRef(month=4, day=31, phrase="April 31"), ANCHOR) is None
+
+
 # --------------------------------------------------------------------------- resolver: season
 
 
@@ -326,6 +339,15 @@ def test_parse_inner_round_trips_and_fails_closed():
     assert parse_inner("2025-13") is None
 
 
+def test_parse_inner_mixed_granularity_range_round_trips():
+    # A range whose ends differ in granularity is valid and preserved verbatim.
+    rt = parse_inner("2025/2025-08")
+    assert rt is not None and rt.is_range
+    assert rt.start == PartialDate(2025) and rt.end == PartialDate(2025, 8)
+    assert rt.token() == "[[t:2025/2025-08]]"
+    assert rt.occurred_start() == date(2025, 1, 1) and rt.occurred_end() == date(2025, 8, 31)
+
+
 def test_find_tokens_locates_all_in_order():
     body = "Met on [[t:2026-07-07]] and again [[t:2025-06/2025-08|summer 2025]], plus [[t:bad]]."
     matches = find_tokens(body)
@@ -379,12 +401,28 @@ def test_humanize_day_buckets(target, now, expected):
     assert render_relative(rt, now) == expected
 
 
+def test_humanize_day_round_half_up_ties():
+    # 75 days → round(2.5); the spec pins round-half-UP so the web (Math.round) mirror matches
+    # exactly. Python's default round() would give banker's "2 months ago" here.
+    now = date(2026, 7, 17)
+    assert render_relative(ResolvedTime(PartialDate(2026, 5, 3)), now) == "3 months ago"  # 75d→2.5
+    assert render_relative(ResolvedTime(PartialDate(2026, 6, 2)), now) == "2 months ago"  # 45d→1.5
+
+
 def test_render_relative_month_and_year_points():
     assert render_relative(ResolvedTime(PartialDate(2026, 6)), date(2026, 7, 17)) == "last month"
     assert render_relative(ResolvedTime(PartialDate(2026, 7)), date(2026, 7, 17)) == "this month"
     assert render_relative(ResolvedTime(PartialDate(2025, 7)), date(2026, 7, 17)) == "a year ago"
     assert render_relative(ResolvedTime(PartialDate(2025)), date(2026, 7, 17)) == "last year"
     assert render_relative(ResolvedTime(PartialDate(2024)), date(2026, 7, 17)) == "2 years ago"
+
+
+def test_render_relative_future_coarse_points():
+    now = date(2026, 7, 17)
+    assert render_relative(ResolvedTime(PartialDate(2026, 8)), now) == "next month"
+    assert render_relative(ResolvedTime(PartialDate(2026, 11)), now) == "in 4 months"
+    assert render_relative(ResolvedTime(PartialDate(2027)), now) == "next year"
+    assert render_relative(ResolvedTime(PartialDate(2029)), now) == "in 3 years"
 
 
 def test_render_relative_range_is_absolute_label():
