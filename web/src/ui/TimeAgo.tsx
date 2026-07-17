@@ -2,23 +2,34 @@
 // even "400d ago") plus a CUSTOM tooltip that works on BOTH hover (desktop) and tap (mobile) —
 // ADR-054 §1 — showing the exact local time (`17 Jul 2026, 08:36`). Native `title` was rejected
 // (invisible on touch). The exact time is also in `aria-label` for screen readers. The tooltip
-// dismisses on outside-tap / scroll / Esc. `onClick` stops propagation so tapping a timestamp inside
-// a clickable row toggles the tooltip without also triggering the row.
+// dismisses on outside-tap / scroll / resize / Esc. `onClick` stops propagation so tapping a
+// timestamp inside a clickable row toggles the tooltip without also triggering the row.
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { exactTime, relativeTime } from './relativeTime';
+
+// The tooltip is rendered in a document.body PORTAL and positioned `fixed` to the viewport. An
+// absolutely-positioned bubble was clipped by any `overflow: hidden` ancestor (the Activity
+// run-detail expand animation, a line-clamped snippet, a scroll container) — cutting the time off
+// the `date, HH:MM` string. A portal escapes every such ancestor; we then measure the bubble and
+// place it above the timestamp (flipping below when there's no room), clamped into an 8px viewport
+// gutter so neither end is ever cut off.
+interface TipPos {
+  left: number;
+  top: number;
+  ready: boolean;
+}
+
+const GUTTER = 8;
+const GAP = 6;
 
 export function TimeAgo({ iso, style }: { iso: string | null; style?: CSSProperties }) {
   const [open, setOpen] = useState(false);
   const reduce = useReducedMotion();
   const ref = useRef<HTMLSpanElement>(null);
-  // Horizontal clamp: the tooltip is centered over the timestamp, but timestamps often sit at a
-  // row's right edge (`marginLeft: auto`) or on the narrow mobile column, so a centered nowrap
-  // bubble would overflow the viewport and get clipped — cutting the time off the `date, HH:MM`
-  // string and leaving a misleading date-only tooltip. After open we measure and shift it back
-  // inside the viewport (8px gutter). Reset to 0 on close so the next open re-measures from center.
   const tipRef = useRef<HTMLSpanElement>(null);
-  const [shift, setShift] = useState(0);
+  const [pos, setPos] = useState<TipPos>({ left: 0, top: 0, ready: false });
 
   useEffect(() => {
     if (!open) return;
@@ -29,31 +40,34 @@ export function TimeAgo({ iso, style }: { iso: string | null; style?: CSSPropert
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false);
     };
+    // Fixed tooltip can't follow a scrolling/resizing viewport, so dismiss on either.
     document.addEventListener('pointerdown', dismiss, true);
     document.addEventListener('scroll', dismiss, true);
     document.addEventListener('keydown', onKey, true);
+    window.addEventListener('resize', dismiss);
     return () => {
       document.removeEventListener('pointerdown', dismiss, true);
       document.removeEventListener('scroll', dismiss, true);
       document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', dismiss);
     };
   }, [open]);
 
-  // Measure once per open (deps: [open]) from the centered baseline (shift is reset to 0 on close),
-  // then clamp within the viewport. useLayoutEffect so the correction lands before paint (no jump).
+  // Measure once the bubble is in the DOM, then place + clamp it. useLayoutEffect so the corrected
+  // position lands before paint (no flash at the provisional 0,0). Not reset on close, so the exit
+  // fade plays at the last position; the next open re-measures pre-paint before it can be seen.
   useLayoutEffect(() => {
-    if (!open) {
-      setShift(0);
-      return;
-    }
-    const el = tipRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const gutter = 8;
-    let s = 0;
-    if (r.right > window.innerWidth - gutter) s = window.innerWidth - gutter - r.right;
-    else if (r.left < gutter) s = gutter - r.left;
-    if (s !== 0) setShift(s);
+    if (!open) return;
+    const trigger = ref.current;
+    const tip = tipRef.current;
+    if (!trigger || !tip) return;
+    const t = trigger.getBoundingClientRect();
+    const b = tip.getBoundingClientRect();
+    const above = t.top - GAP - b.height >= GUTTER;
+    const top = above ? t.top - GAP - b.height : t.bottom + GAP;
+    const centered = t.left + t.width / 2 - b.width / 2;
+    const left = Math.max(GUTTER, Math.min(centered, window.innerWidth - GUTTER - b.width));
+    setPos({ left, top, ready: true });
   }, [open]);
 
   if (!iso) return null;
@@ -61,7 +75,7 @@ export function TimeAgo({ iso, style }: { iso: string | null; style?: CSSPropert
   const exact = exactTime(iso);
 
   return (
-    <span ref={ref} style={{ position: 'relative', display: 'inline-flex', ...style }}>
+    <span ref={ref} style={{ display: 'inline-flex', ...style }}>
       <span
         role="button"
         tabIndex={0}
@@ -91,28 +105,23 @@ export function TimeAgo({ iso, style }: { iso: string | null; style?: CSSPropert
       >
         {phrase}
       </span>
-      <AnimatePresence>
-        {open && (
-          // Static outer span owns the centering transform (so framer's y-animation can't fight it);
-          // the inner motion span animates.
-          <span
-            style={{
-              position: 'absolute',
-              bottom: 'calc(100% + 6px)',
-              left: '50%',
-              transform: `translateX(calc(-50% + ${shift}px))`,
-              zIndex: 30,
-              pointerEvents: 'none',
-            }}
-          >
+      {createPortal(
+        <AnimatePresence>
+          {open && (
             <motion.span
               ref={tipRef}
               role="tooltip"
               initial={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
+              animate={{ opacity: pos.ready ? 1 : 0, y: 0 }}
               exit={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
               transition={{ duration: 0.14, ease: 'easeOut' }}
               style={{
+                position: 'fixed',
+                left: pos.left,
+                top: pos.top,
+                visibility: pos.ready ? 'visible' : 'hidden',
+                zIndex: 1000,
+                pointerEvents: 'none',
                 display: 'block',
                 whiteSpace: 'nowrap',
                 fontSize: 12,
@@ -127,9 +136,10 @@ export function TimeAgo({ iso, style }: { iso: string | null; style?: CSSPropert
             >
               {exact}
             </motion.span>
-          </span>
-        )}
-      </AnimatePresence>
+          )}
+        </AnimatePresence>,
+        document.body,
+      )}
     </span>
   );
 }

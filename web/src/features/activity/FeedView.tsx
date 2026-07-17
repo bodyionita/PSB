@@ -81,10 +81,12 @@ function RunChildRow({ child, depth }: { child: RunChildItem; depth: number }) {
         <p
           style={{
             margin: 0,
+            minWidth: 0,
             paddingLeft: depth * 16 + 19,
             fontSize: 12,
             color: 'var(--muted)',
             lineHeight: 1.4,
+            overflowWrap: 'anywhere',
           }}
         >
           {child.summary}
@@ -125,12 +127,12 @@ function RunDetail({ runId }: { runId: string }) {
         )}
       </div>
       {run.data.summary && (
-        <p style={{ margin: 0, fontSize: 13, color: 'var(--text)', lineHeight: 1.5 }}>
+        <p style={{ margin: 0, minWidth: 0, fontSize: 13, color: 'var(--text)', lineHeight: 1.5, overflowWrap: 'anywhere' }}>
           {run.data.summary}
         </p>
       )}
       {run.data.error && (
-        <p style={{ margin: 0, fontSize: 13, color: FAIL_COLOR, lineHeight: 1.5 }}>
+        <p style={{ margin: 0, minWidth: 0, fontSize: 13, color: FAIL_COLOR, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
           {run.data.error}
         </p>
       )}
@@ -210,10 +212,15 @@ function CaptureDetail({ captureId }: { captureId: string }) {
         <p
           style={{
             margin: 0,
+            minWidth: 0,
             fontSize: 13,
             color: 'var(--text)',
             lineHeight: 1.5,
             whiteSpace: 'pre-wrap',
+            // Break long unbroken tokens (URLs, long strings) so the raw text can't run under the
+            // card edge on a narrow phone (the grid item's default min-width: auto would let it).
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
           }}
         >
           {c.raw_text}

@@ -178,10 +178,14 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
         <p
           style={{
             margin: '10px 0 0',
+            minWidth: 0,
             fontSize: 14,
             lineHeight: 1.45,
             color: hasText ? 'var(--text)' : 'var(--muted)',
             whiteSpace: 'pre-wrap',
+            // Break long unbroken tokens so raw text never runs under the card edge on a phone.
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
             ...(expanded
               ? {}
               : {
