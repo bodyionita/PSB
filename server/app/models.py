@@ -176,6 +176,9 @@ class NodeDetailResponse(BaseModel):
     disambig: str | None = None
     occurred: date | None = None
     occurred_end: date | None = None
+    # Inner-voice dimension (M8.2 T3.5, ADR-055 §3c): `internal`|`external`|`mixed`, or null on an
+    # unstamped entity hub. Drives the `NodePreview` marker (internal = full / mixed = subtle).
+    interiority: str | None = None
     body: str
     profile: str | None = None
     edges: list[NodeEdgeItem] = Field(default_factory=list)
@@ -224,6 +227,9 @@ class MapNeighborItem(BaseModel):
     score: float | None = None
     since: date | None = None
     until: date | None = None
+    # Inner-voice dimension (M8.2 T3.5, ADR-055 §3c) — the map marks internal/mixed neighbors
+    # without a second fetch. Null on an unstamped entity hub.
+    interiority: str | None = None
 
 
 class MapZone(BaseModel):
@@ -248,6 +254,9 @@ class NeighborCenter(BaseModel):
     title: str | None = None
     plane: str | None = None
     planes: list[str] = Field(default_factory=list)
+    # Inner-voice dimension (M8.2 T3.5, ADR-055 §3c) — the focal node is markable too. Null on an
+    # unstamped entity hub.
+    interiority: str | None = None
 
 
 class NeighborZonesResponse(BaseModel):

@@ -62,6 +62,7 @@ def _map_neighbor(edge: NeighborEdge) -> MapNeighborItem:
         score=edge.score,
         since=edge.since,
         until=edge.until,
+        interiority=edge.interiority,
     )
 
 
@@ -129,6 +130,7 @@ async def get_node(
         disambig=preview.disambig,
         occurred=preview.occurred,
         occurred_end=preview.occurred_end,
+        interiority=preview.interiority,
         body=preview.body,
         profile=preview.profile,
         edges=[
@@ -219,6 +221,7 @@ async def node_neighbors(
             title=grouped.center.title,
             plane=grouped.center.plane,
             planes=grouped.center.planes,
+            interiority=grouped.center.interiority,
         )
         if grouped.center is not None
         else None

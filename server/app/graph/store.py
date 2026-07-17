@@ -124,6 +124,10 @@ class NeighborEdge:
     score: float | None
     since: date | None
     until: date | None
+    # The endpoint's inner-voice dimension (M8.2 T3.5, ADR-055 §3c): `internal`|`external`|`mixed`,
+    # or None on an unstamped entity hub — the map's inner-voice mark, no second fetch. Trailing +
+    # defaulted so existing NeighborEdge call sites (MCP render, tests) are unaffected.
+    interiority: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +142,9 @@ class NeighborHeader:
     title: str | None
     plane: str | None
     planes: list[str]
+    # The center's own inner-voice dimension (M8.2 T3.5, ADR-055 §3c) so the focal node is markable.
+    # Trailing + defaulted so existing NeighborHeader call sites (tests) are unaffected.
+    interiority: str | None = None
 
 
 @dataclass(frozen=True)
@@ -223,15 +230,16 @@ class PgNeighborStore:
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT origin, rel, dir, node_id, type, title, plane, score, since, until
+                SELECT origin, rel, dir, node_id, type, title, plane, score, since, until,
+                       interiority
                 FROM (
                     SELECT e.origin, e.rel, 'out' AS dir, e.dst_id AS node_id,
-                           n.type, n.title, n.plane, e.score, e.since, e.until
+                           n.type, n.title, n.plane, e.score, e.since, e.until, n.interiority
                     FROM edges e JOIN nodes n ON n.id = e.dst_id
                     WHERE e.src_id = $1 AND n.merged_into IS NULL
                     UNION ALL
                     SELECT e.origin, e.rel, 'in' AS dir, e.src_id AS node_id,
-                           n.type, n.title, n.plane, e.score, e.since, e.until
+                           n.type, n.title, n.plane, e.score, e.since, e.until, n.interiority
                     FROM edges e JOIN nodes n ON n.id = e.src_id
                     WHERE e.dst_id = $1 AND n.merged_into IS NULL
                 ) nbr
@@ -256,7 +264,7 @@ class PgNeighborStore:
     async def center_header(self, node_id: str) -> NeighborHeader | None:
         async with self._db.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, type, title, plane, planes FROM nodes WHERE id = $1",
+                "SELECT id, type, title, plane, planes, interiority FROM nodes WHERE id = $1",
                 node_id,
             )
         if row is None:
@@ -267,6 +275,7 @@ class PgNeighborStore:
             title=row["title"],
             plane=row["plane"],
             planes=list(row["planes"] or []),
+            interiority=row["interiority"],
         )
 
     async def neighbor_zones(
@@ -290,20 +299,21 @@ class PgNeighborStore:
             rows = await conn.fetch(
                 """
                 SELECT origin, rel, dir, node_id, type, title, plane, score, since, until,
-                       zone_total
+                       interiority, zone_total
                 FROM (
                     SELECT origin, rel, dir, node_id, type, title, plane, score, since, until,
+                           interiority,
                            ROW_NUMBER() OVER (
                                PARTITION BY rel ORDER BY origin, dir, node_id) AS rn,
                            COUNT(*) OVER (PARTITION BY rel) AS zone_total
                     FROM (
                         SELECT e.origin, e.rel, 'out' AS dir, e.dst_id AS node_id,
-                               n.type, n.title, n.plane, e.score, e.since, e.until
+                               n.type, n.title, n.plane, e.score, e.since, e.until, n.interiority
                         FROM edges e JOIN nodes n ON n.id = e.dst_id
                         WHERE e.src_id = $1 AND n.merged_into IS NULL
                         UNION ALL
                         SELECT e.origin, e.rel, 'in' AS dir, e.src_id AS node_id,
-                               n.type, n.title, n.plane, e.score, e.since, e.until
+                               n.type, n.title, n.plane, e.score, e.since, e.until, n.interiority
                         FROM edges e JOIN nodes n ON n.id = e.src_id
                         WHERE e.dst_id = $1 AND n.merged_into IS NULL
                     ) nbr
@@ -322,7 +332,8 @@ class PgNeighborStore:
 
 
 def _neighbor_edge(r) -> NeighborEdge:
-    """Build a :class:`NeighborEdge` from an asyncpg row carrying the ten neighbor columns."""
+    """Build a :class:`NeighborEdge` from an asyncpg row carrying the neighbor columns
+    (ten + ``interiority``, M8.2 T3.5)."""
     return NeighborEdge(
         origin=r["origin"],
         rel=r["rel"],
@@ -334,4 +345,5 @@ def _neighbor_edge(r) -> NeighborEdge:
         score=float(r["score"]) if r["score"] is not None else None,
         since=r["since"],
         until=r["until"],
+        interiority=r["interiority"],
     )

@@ -1283,6 +1283,11 @@ async def check_neighbor_zones(db: Database) -> None:
                 past,
                 ksim,
             )
+            # M8.2 T3.5 (ADR-055 §3c): stamp interiority so the neighbor + center reads carry it
+            # (the marker field). C = internal (center), place = mixed (a neighbor); the rest stay
+            # NULL (unstamped) — the null pass-through is asserted below.
+            await conn.execute("UPDATE nodes SET interiority = 'internal' WHERE id = $1", c)
+            await conn.execute("UPDATE nodes SET interiority = 'mixed' WHERE id = $1", place)
 
         rows = await store.neighbor_zones(c, direction=None, fanout=3)
         involves = [z for z in rows if z.edge.rel == "involves"]
@@ -1334,10 +1339,23 @@ async def check_neighbor_zones(db: Database) -> None:
             and all(z.zone_total == 5 for z in inbound),
             str([(z.edge.rel, z.zone_total) for z in inbound]),
         )
+        # M8.2 T3.5 (ADR-055 §3c): interiority flows through the neighbor SQL — the mixed 'place'
+        # neighbor carries it; an unstamped involves neighbor is NULL (pass-through, not coerced).
+        place_edge = next((z for z in at_zone if z.edge.node_id == place), None)
+        check(
+            "neighbor carries interiority ('mixed' on place); unstamped neighbor -> None",
+            place_edge is not None
+            and place_edge.edge.interiority == "mixed"
+            and involves[0].edge.interiority is None,
+            str((place_edge and place_edge.edge.interiority, involves[0].edge.interiority)),
+        )
         head = await store.center_header(c)
         check(
-            "center_header(C) = person/Hub/personal",
-            head is not None and head.type == "person" and head.plane == "personal",
+            "center_header(C) = person/Hub/personal, interiority='internal' (ADR-055 §3c)",
+            head is not None
+            and head.type == "person"
+            and head.plane == "personal"
+            and head.interiority == "internal",
             str(head),
         )
         missing = await store.center_header("ffffffff-0000-0000-0000-0000000000ee")

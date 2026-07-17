@@ -34,7 +34,7 @@ _HIT = SearchHit(
 )
 
 
-def _preview(node_id: str, *, merged_into=None) -> NodePreview:
+def _preview(node_id: str, *, merged_into=None, interiority="internal") -> NodePreview:
     return NodePreview(
         node_id=node_id,
         store_path="memory/x.md",
@@ -47,6 +47,7 @@ def _preview(node_id: str, *, merged_into=None) -> NodePreview:
         disambig=None,
         occurred=None,
         occurred_end=None,
+        interiority=interiority,
         body="# X\n\nbody",
         profile=None,
         merged_into=merged_into,
@@ -170,6 +171,22 @@ def test_get_node_returns_detail_with_edges():
     assert body["edges"][0]["dir"] == "out"
 
 
+def test_get_node_exposes_interiority():
+    # M8.2 T3.5: `interiority` is passed through NodeDetailResponse from the NodePreview (ADR-055
+    # §3c — drives the web inner-voice marker). Null on an unstamped hub.
+    nid = "11111111-1111-1111-1111-111111111111"
+    resp = _client(FakeSearchService(preview=_preview(nid, interiority="internal"))).get(
+        f"{PREFIX}/nodes/{nid}"
+    )
+    assert resp.status_code == 200
+    assert resp.json()["interiority"] == "internal"
+
+    resp2 = _client(FakeSearchService(preview=_preview(nid, interiority=None))).get(
+        f"{PREFIX}/nodes/{nid}"
+    )
+    assert resp2.json()["interiority"] is None
+
+
 def test_get_node_tombstone_redirects_to_survivor():
     nid = "11111111-1111-1111-1111-111111111111"
     survivor = "99999999-9999-9999-9999-999999999999"
@@ -197,7 +214,9 @@ _N1 = "22222222-2222-2222-2222-222222222222"
 _N2 = "33333333-3333-3333-3333-333333333333"
 
 
-def _nedge(node_id: str, *, origin="canonical", rel="involves", dir="out") -> NeighborEdge:
+def _nedge(
+    node_id: str, *, origin="canonical", rel="involves", dir="out", interiority=None
+) -> NeighborEdge:
     return NeighborEdge(
         origin=origin,
         rel=rel,
@@ -209,6 +228,7 @@ def _nedge(node_id: str, *, origin="canonical", rel="involves", dir="out") -> Ne
         score=None,
         since=None,
         until=None,
+        interiority=interiority,
     )
 
 
@@ -237,6 +257,32 @@ def test_neighbors_grouped_returns_center_and_zones():
     n = body["zones"][0]["neighbors"][0]
     assert n["node_id"] == _N1 and n["plane"] == "Work" and n["dir"] == "out"
     assert n["origin"] == "canonical"  # per-neighbor origin drives styling
+
+
+def test_neighbors_expose_interiority_on_center_and_neighbors():
+    # M8.2 T3.5: the map carries `interiority` on every neighbor AND the center (ADR-055 §3c) so the
+    # canvas marks internal/mixed nodes without a second fetch; null on an unstamped hub.
+    edges = {
+        _C1: [
+            _nedge(_N1, rel="at", interiority="internal"),
+            _nedge(_N2, rel="involves", dir="in", interiority=None),
+        ]
+    }
+    headers = {
+        _C1: NeighborHeader(
+            node_id=_C1,
+            type="memory",
+            title="Alex",
+            plane="Work",
+            planes=["Work"],
+            interiority="mixed",
+        )
+    }
+    body = _map_client(edges=edges, headers=headers).get(f"{PREFIX}/nodes/{_C1}/neighbors").json()
+    assert body["center"]["interiority"] == "mixed"
+    zones = {z["rel"]: z for z in body["zones"]}
+    assert zones["at"]["neighbors"][0]["interiority"] == "internal"
+    assert zones["involves"]["neighbors"][0]["interiority"] is None
 
 
 def test_neighbors_zone_overflow_carries_total_and_cursor():
