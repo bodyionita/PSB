@@ -37,7 +37,9 @@ export function MapList({
   const isHub = (type: string | null): boolean => (type ? entityTypes.has(type) : false);
 
   return (
-    <div style={{ height: '100%', overflowY: 'auto', padding: '4px 4px 12px' }}>
+    // Top padding clears the map's overlaid Search/Map + Canvas/List toggles (absolute, top-right)
+    // so the focal header isn't rendered under them in list view.
+    <div style={{ height: '100%', overflowY: 'auto', padding: '52px 4px 12px' }}>
       {/* Focal header — the list's stand-in for the canvas caption chip; tap to read the full node. */}
       <button
         onClick={onOpenCenter}

@@ -4,7 +4,7 @@ import type { CSSProperties, ReactNode } from 'react';
 export function Surface({
   children,
   style,
-  padding = 20,
+  padding = 16,
 }: {
   children: ReactNode;
   style?: CSSProperties;

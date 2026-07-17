@@ -140,7 +140,7 @@ export function AppShell() {
         style={
           active.wide
             ? { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }
-            : { flex: 1, padding: '28px 20px 96px' }
+            : { flex: 1, padding: '20px 16px 92px' }
         }
       >
         {/* Enter-only, keyed by tab: changing tab remounts and plays the entrance. We avoid

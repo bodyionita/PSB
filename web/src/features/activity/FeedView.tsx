@@ -4,7 +4,6 @@ import type { ActivityCategory, ActivityFeedItem, RunChildItem } from '../../api
 import { NodeRefChips } from '../capture/NodeRefChips';
 import { useCapture } from '../capture/useCaptures';
 import { Button } from '../../ui/Button';
-import { Surface } from '../../ui/Surface';
 import { TimeAgo } from '../../ui/TimeAgo';
 import { StatusBadge } from './runStatus';
 import { FAIL_COLOR } from './statusColors';
@@ -501,17 +500,9 @@ function FeedList({ category }: { category: ActivityCategory }) {
 export function FeedView({ initialCategory }: { initialCategory?: ActivityCategory } = {}) {
   const [category, setCategory] = useState<ActivityCategory>(initialCategory ?? 'agents_jobs');
   return (
-    <div style={{ display: 'grid', gap: 16 }}>
-      <div
-        style={{
-          display: 'flex',
-          gap: 4,
-          padding: 4,
-          background: 'var(--surface)',
-          border: '1px solid var(--surface-border)',
-          borderRadius: 'var(--radius)',
-        }}
-      >
+    <div style={{ display: 'grid', gap: 12 }}>
+      {/* No wrapping container — the active pill alone marks the selection (minimal chrome). */}
+      <div style={{ display: 'flex', gap: 4 }}>
         {TABS.map((t) => {
           const selected = t.id === category;
           return (
@@ -551,9 +542,7 @@ export function FeedView({ initialCategory }: { initialCategory?: ActivityCatego
         })}
       </div>
 
-      <Surface>
-        <FeedList category={category} />
-      </Surface>
+      <FeedList category={category} />
     </div>
   );
 }

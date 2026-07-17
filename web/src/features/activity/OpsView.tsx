@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { ApiError } from '../../api/client';
 import type { AgentRosterItem, LastRun, PipelineItem } from '../../api/types';
 import { Button } from '../../ui/Button';
-import { Surface } from '../../ui/Surface';
 import { TimeAgo } from '../../ui/TimeAgo';
 import { AdminOps } from './AdminOps';
 import { GraphHealthCard } from './GraphHealthCard';
@@ -120,9 +119,9 @@ function PipelineRow({ pipeline }: { pipeline: PipelineItem }) {
 function PipelinesSection() {
   const { data, isLoading, isError } = usePipelines();
   return (
-    <Surface>
+    <section>
       <h2 style={{ margin: '0 0 6px', fontSize: 16 }}>Pipelines</h2>
-      <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
+      <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
         Each pipeline runs its ordered steps on one schedule. Run a whole pipeline on demand.
       </p>
       {isLoading ? (
@@ -132,13 +131,13 @@ function PipelinesSection() {
       ) : data.length === 0 ? (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)' }}>No pipelines scheduled.</p>
       ) : (
-        <div style={{ display: 'grid', gap: 12 }}>
+        <div style={{ display: 'grid', gap: 10 }}>
           {data.map((p) => (
             <PipelineRow key={p.name} pipeline={p} />
           ))}
         </div>
       )}
-    </Surface>
+    </section>
   );
 }
 
@@ -185,9 +184,9 @@ function AgentRow({ agent }: { agent: AgentRosterItem }) {
 function RosterSection() {
   const { data, isLoading, isError } = useAgents();
   return (
-    <Surface>
+    <section>
       <h2 style={{ margin: '0 0 6px', fontSize: 16 }}>Jobs</h2>
-      <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
+      <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
         Every job, runnable on demand — with its live status and log tail. A job with no pipeline runs
         only when you trigger it.
       </p>
@@ -198,13 +197,13 @@ function RosterSection() {
       ) : data.length === 0 ? (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)' }}>No jobs registered.</p>
       ) : (
-        <div style={{ display: 'grid', gap: 12 }}>
+        <div style={{ display: 'grid', gap: 10 }}>
           {data.map((a) => (
             <AgentRow key={a.name} agent={a} />
           ))}
         </div>
       )}
-    </Surface>
+    </section>
   );
 }
 
@@ -215,12 +214,12 @@ export function OpsView() {
     agents?.find((a) => a.name === GRAPH_HEALTH)?.last_run?.run_id ?? null;
 
   return (
-    <div style={{ display: 'grid', gap: 16 }}>
+    <div style={{ display: 'grid', gap: 20 }}>
       <PipelinesSection />
       <RosterSection />
       <GraphHealthCard runId={graphHealthRunId} />
       <div>
-        <h2 style={{ margin: '4px 0 12px', fontSize: 16 }}>Operations</h2>
+        <h2 style={{ margin: '0 0 12px', fontSize: 16 }}>Operations</h2>
         <AdminOps />
       </div>
     </div>

@@ -27,20 +27,11 @@ export function ActivityScreen({
   const [view, setView] = useState<SubView>('feed');
 
   return (
-    <div style={{ display: 'grid', gap: 16 }}>
+    <div style={{ display: 'grid', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
         <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, letterSpacing: -0.4 }}>Activity</h1>
-        <div
-          style={{
-            marginLeft: 'auto',
-            display: 'flex',
-            gap: 4,
-            padding: 4,
-            background: 'var(--surface)',
-            border: '1px solid var(--surface-border)',
-            borderRadius: 'var(--radius)',
-          }}
-        >
+        {/* No wrapping container — the active pill alone marks the selection (minimal chrome). */}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
           {SUBVIEWS.map((s) => {
             const selected = s.id === view;
             return (
