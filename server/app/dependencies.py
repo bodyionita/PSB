@@ -23,6 +23,7 @@ from .services.agent_runs import AgentRunStore
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
 from .services.model_routing import ModelRoutingService
+from .services.node_time_edit import NodeTimeEditService
 from .services.reindex import ReindexService
 from .services.reprocess import ReprocessService
 from .services.review_service import ReviewService
@@ -130,6 +131,10 @@ def get_run_log_store(request: Request) -> RunLogStore:
 
 def get_review_service(request: Request) -> ReviewService:
     return request.app.state.review_service
+
+
+def get_node_time_edit_service(request: Request) -> NodeTimeEditService:
+    return request.app.state.node_time_edit_service
 
 
 def get_merge_service(request: Request) -> MergeService:

@@ -402,6 +402,20 @@ class CapturePipeline:
             raise CaptureNotFound(capture_id)
         self._spawn(self._reorganize(capture_id))
 
+    async def edit_anchor(self, capture_id: str, new_anchor: datetime) -> None:
+        """The ADR-056 §5 **anchor edit**: correct a capture's recorded-at, then re-resolve its
+        notes
+        against the new anchor in the background. Overwriting the stored anchor (data, never
+        wall-clock) invalidates every relative resolution, so a one-capture reorganize
+        (:meth:`_reorganize` — the same core as the admin reorganize / inbox drainer) re-runs the
+        organizer against the corrected time, re-computing ``occurred`` + ``[[t:…]]`` tokens
+        deterministically. 202 semantics (the reorganize runs in the background). 404 if unknown."""
+        record = await self._store.get(capture_id)
+        if record is None:
+            raise CaptureNotFound(capture_id)
+        await self._store.set_created_at(capture_id, new_anchor)
+        self._spawn(self._reorganize(capture_id))
+
     async def reorganize_capture_now(self, capture_id: str) -> None:
         """Re-organize a capture and AWAIT it inline — the nightly inbox drainer's entry (ADR-048
         §10). Same core as :meth:`reorganize_capture` (``_replace_notes_via_reorganize``: replace

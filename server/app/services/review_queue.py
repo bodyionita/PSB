@@ -35,6 +35,12 @@ KIND_VOCAB_PROPOSAL = "vocab-proposal"
 # ids, so a reprocess that rebuilds the graph can't strand them (ADR-048 §7).
 KIND_STANCE_CANDIDATE = "stance-candidate"
 KIND_DEDUP_PROPOSAL = "dedup-proposal"
+# M8.2 (ADR-056 §7): a content node with no (or coarse) `occurred` that a nightly step flagged for
+# the user to date in natural language. The payload carries the node id + a title/excerpt so the
+# card is decidable in place; resolution runs the answer through the NL classifier + resolver, then
+# applies the date via the mechanical tier (ADR-056 §5). Payloads carry a NODE id, not names — a
+# reprocess rebuilds nodes, so a stale item is harmless (points at a gone id → skipped on resolve).
+KIND_OCCURRED_ENRICHMENT = "occurred-enrichment"
 
 # Lifecycle statuses (ADR-030 §3). Items start ``pending``; ``maybe`` is a **parked, still-
 # decidable** state (ADR-048 §7) — it accepts a later agree/disagree — while ``resolved``/

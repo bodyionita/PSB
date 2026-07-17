@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 class EntityJob(Protocol):
     """A nightly agent-window / sleep-cycle job (reindex / profile-refresh / backfill /
-    identity-capsule / chat-distiller / inbox-drain / dedup-sweep / maybe-digest / graph-health) —
+    identity-capsule / chat-distiller / inbox-drain / dedup-sweep / maybe-digest / graph-health /
+    occurred-enrichment) —
     one idempotent, never-raising entry point the scheduler and CLI both drive (ADR-030 §4/§6,
     ADR-046 §5, ADR-048, ADR-053 §9).
     Some return an outcome for CLI logging; the pipeline runner ignores it."""
@@ -64,6 +65,7 @@ class PipelineScheduler:
         dedup_sweep: EntityJob | None = None,
         maybe_digest: EntityJob | None = None,
         graph_health: EntityJob | None = None,
+        occurred_enrichment: EntityJob | None = None,
         scheduler: AsyncIOScheduler | None = None,
         job_runner: JobRunner | None = None,
     ) -> None:
@@ -82,6 +84,7 @@ class PipelineScheduler:
         self._dedup_sweep = dedup_sweep
         self._maybe_digest = maybe_digest
         self._graph_health = graph_health
+        self._occurred_enrichment = occurred_enrichment
         self._tz = ZoneInfo(settings.scheduler_tz)
         self._scheduler = scheduler or AsyncIOScheduler(timezone=self._tz)
 
@@ -115,6 +118,9 @@ class PipelineScheduler:
             funcs["dedup-sweep"] = self._dedup_sweep.run_scheduled
         if self._maybe_digest is not None:
             funcs["maybe-digest"] = self._maybe_digest.run_scheduled
+        # M8.2 (ADR-056 §7): the undated-node flagger, a read-mostly tail step of `nightly`.
+        if self._occurred_enrichment is not None:
+            funcs["occurred-enrichment"] = self._occurred_enrichment.run_scheduled
         # M8 nightly-tail (ADR-053 §9): the read-only graph-health reporter, last step of `nightly`.
         if self._graph_health is not None:
             funcs["graph-health"] = self._graph_health.run_scheduled

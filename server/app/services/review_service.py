@@ -48,10 +48,12 @@ from ..indexing.indexer import NodeIndexer
 from ..indexing.store import IndexStore
 from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .agent_runs import AgentRunStore
+from .nl_time import NlTimeClassifier
 from .review_queue import (
     DECIDABLE_STATUSES,
     KIND_DEDUP_PROPOSAL,
     KIND_ENTITY_AMBIGUITY,
+    KIND_OCCURRED_ENRICHMENT,
     KIND_STANCE_CANDIDATE,
     KIND_VOCAB_PROPOSAL,
     STATUS_DISCARDED,
@@ -64,6 +66,11 @@ from .review_queue import (
     ReviewRecord,
 )
 from .store_backup import StoreBackup
+
+# Answer tokens on an ``occurred-enrichment`` resolution that are NOT a date (ADR-056 §7): park it
+# (``maybe``, re-openable) or dismiss it (the node stays undated — the user judged the event untimed
+# / not worth dating). Anything else is treated as a natural-language date phrase.
+_ENRICH_DISMISS = frozenset({"skip", "unknown", "none", "dismiss", "no date"})
 
 # The canonical edge a dedup ``link`` writes (ADR-049 §2): "related but distinct — keep both,
 # connect them." Reuses the one relatedness concept the system has (the derived layer already
@@ -134,6 +141,7 @@ class ReviewService:
         chat_ingest: ChatCaptureIngest | None = None,
         entity_store: EntityStore | None = None,
         merge_core: MergeCore | None = None,
+        time_classifier: NlTimeClassifier | None = None,
     ) -> None:
         self._settings = settings
         self._store = review_store
@@ -155,6 +163,10 @@ class ReviewService:
         # `source=chat` capture through it — the exact auto-endorse path (ADR-048 §7). None ⇒
         # stance-candidate agree unresolvable (older tests that don't file stance items).
         self._chat_ingest = chat_ingest
+        # occurred-enrichment (M8.2, ADR-056 §7): classifies the user's NL date answer into a
+        # symbolic time-ref (rule 12) then resolves it against the answer's date. None ⇒ the kind is
+        # unresolvable (older tests that don't file occurred-enrichment items).
+        self._time_classifier = time_classifier
         self._tz = ZoneInfo(settings.scheduler_tz)
 
     async def list_items(
@@ -181,12 +193,14 @@ class ReviewService:
         verdict: str | None = None,
         action: str | None = None,
         survivor: str | None = None,
+        answer: str | None = None,
     ) -> ReviewRecord:
         """Resolve one review item (POST /review/{id}); returns the updated record.
 
         The meaningful field is per-kind (``choice`` entity-ambiguity, ``verdict`` stance/vocab,
-        ``action``+``survivor`` dedup-proposal); each branch reads only its own, so a batch that
-        passes one string as all of them resolves the fitting kind and fails the rest cleanly.
+        ``action``+``survivor`` dedup-proposal, ``answer`` occurred-enrichment); each branch reads
+        only its own, so a batch that passes one string as all of them resolves the fitting kind and
+        fails the rest cleanly.
 
         Materialization (the entity edge, the stance agree capture, or the dedup merge/link) runs
         before the status transition, so a failure leaves the item decidable (retryable) rather than
@@ -215,6 +229,8 @@ class ReviewService:
             new_status, resolution = await self._resolve_stance_candidate(record, verdict)
         elif record.kind == KIND_DEDUP_PROPOSAL:
             new_status, resolution = await self._resolve_dedup(record, action, survivor)
+        elif record.kind == KIND_OCCURRED_ENRICHMENT:
+            new_status, resolution = await self._resolve_occurred_enrichment(record, answer)
         else:
             raise BadResolution(f"kind {record.kind!r} is not resolvable")
         await self._store.resolve(review_id, status=new_status, resolution=resolution)
@@ -226,16 +242,19 @@ class ReviewService:
         /review/batch, ADR-048 §8) — returns one result per id, in order.
 
         Reuses the single-item :meth:`resolve` unchanged: the ``action`` is passed as ``choice``,
-        ``verdict`` **and** ``action``, and each kind's resolver reads only the field that fits it
-        (``choice`` for entity-ambiguity picks, ``verdict`` for stance-candidate / vocab-proposal,
-        ``action`` for dedup-proposal merge/keep/link — a batch merge uses the default survivor, no
-        explicit ``survivor``) — so a homogeneous batch (triaging stance candidates, or clearing
-        dedup proposals) resolves cleanly, and an action that doesn't fit an item's kind fails just
-        that item (``ok=false`` + reason) without aborting the rest (rule 7)."""
+        ``verdict``, ``action`` **and** ``answer``, and each kind's resolver reads only the field
+        that fits it (``choice`` for entity-ambiguity picks, ``verdict`` for stance-candidate /
+        vocab-proposal, ``action`` for dedup-proposal merge/keep/link — a batch merge uses the
+        default survivor, no explicit ``survivor``; ``answer`` for occurred-enrichment, so a batch
+        ``skip`` dismisses many undated flags at once) — so a homogeneous batch resolves cleanly,
+        and an action that doesn't fit an item's kind fails just that item (``ok=false`` + reason)
+        without aborting the rest (rule 7)."""
         results: list[BatchItemResult] = []
         for review_id in ids:
             try:
-                await self.resolve(review_id, choice=action, verdict=action, action=action)
+                await self.resolve(
+                    review_id, choice=action, verdict=action, action=action, answer=action
+                )
                 results.append(BatchItemResult(id=review_id, ok=True))
             except ReviewNotFound:
                 results.append(BatchItemResult(id=review_id, ok=False, error="not found"))
@@ -435,6 +454,56 @@ class ReviewService:
             raise BadResolution("dedup-proposal node file is gone; cannot link") from None
         await self._indexer.index_paths([state.store_path])
         await self._backup.request_commit("review: link similar (dedup)")
+
+    # --- occurred-enrichment (M8.2, ADR-056 §7) -----------------------------------------
+
+    async def _resolve_occurred_enrichment(
+        self, record: ReviewRecord, answer: str | None
+    ) -> tuple[str, dict]:
+        """Resolve an ``occurred-enrichment`` item (ADR-056 §7): the user's natural-language
+        ``answer`` ("summer 2019") is classified into a symbolic time-ref (rule 12) and resolved
+        against the answer's **own** recorded time, then applied to the flagged node via the
+        mechanical tier of §5 (set ``occurred``/``occurred_end`` + re-embed). ``maybe`` parks it
+        (re-openable); a dismiss word leaves the node undated (``discarded``); an uninterpretable
+        phrase is a ``400`` so the
+        user can rephrase (never a guessed date). The payload carries a node **id** (ADR-056 §7); a
+        node reprocessed away since filing is a stale flag → discarded, not an error."""
+        text = (answer or "").strip()
+        if not text:
+            raise BadResolution("occurred-enrichment requires an 'answer' (a date phrase)")
+        low = text.lower()
+        if low == "maybe":
+            return STATUS_MAYBE, {"answer": "maybe"}
+        if low in _ENRICH_DISMISS:
+            return STATUS_DISCARDED, {"answer": text}
+        if self._time_classifier is None:  # pragma: no cover — always wired in main.py
+            raise BadResolution("occurred-enrichment resolution is not configured")
+        node_id = str(record.payload.get("node_id") or "").strip()
+        if not node_id:
+            raise BadResolution("occurred-enrichment item has no node id")
+        state = await self._index.get_index_state(node_id)
+        if state is None:
+            logger.info("occurred-enrichment %s: node %s gone → discarded", record.id, node_id)
+            return STATUS_DISCARDED, {"answer": text, "note": "node no longer exists"}
+        # The answer is a live user correction (not a replayed path), so anchoring to now (local) is
+        # legal (rule 12). Fail-closed: an uninterpretable phrase yields None → ask to rephrase.
+        resolved = await self._time_classifier.classify(text, anchor=datetime.now(self._tz))
+        if resolved is None:
+            raise BadResolution(f"could not interpret the date {text!r}; try rephrasing")
+        occurred = resolved.start_date_iso()
+        occurred_end = resolved.end_date_iso()
+        try:
+            await asyncio.to_thread(
+                self._writer.set_occurred,
+                state.store_path,
+                occurred=occurred,
+                occurred_end=occurred_end,
+            )
+        except FileNotFoundError:
+            raise BadResolution("the flagged node file is gone; cannot date it") from None
+        await self._indexer.index_paths([state.store_path])
+        await self._backup.request_commit("review: occurred-enrichment")
+        return STATUS_RESOLVED, {"answer": text, "occurred": occurred, "occurred_end": occurred_end}
 
     # --- entity-ambiguity materialization ------------------------------------------------
 

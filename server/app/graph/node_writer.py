@@ -366,6 +366,85 @@ def upsert_frontmatter_list(raw_text: str, key: str, values: tuple[str, ...] | l
     return f"---\n{chr(10).join(lines)}\n---\n{body}"
 
 
+# Top-level frontmatter keys the `occurred`/`occurred_end` lines are inserted *before* when absent,
+# so a freshly-dated node keeps the 02 §2 key order (occurred/occurred_end sit right after
+# `created:`, ahead of interiority/source/…/edges). Order within the tuple is irrelevant — the first
+# of these present in the block is the insertion point.
+_OCCURRED_INSERT_BEFORE = (
+    "interiority",
+    "source",
+    "source_ref",
+    "plane",
+    "planes",
+    "tags",
+    "aliases",
+    "disambig",
+    "organizer_version",
+)
+
+
+def replace_body_token(raw_text: str, old_token: str, new_token: str) -> tuple[str, int]:
+    """Replace the FIRST occurrence of a ``[[t:…]]`` token in a node's **body** (never its
+    frontmatter), leaving every other byte untouched — the mechanical token edit (ADR-056 §5: the
+    token *is* the edit anchor, no text-span bookkeeping). Pure (no I/O) so it is unit-tested
+    directly. Returns ``(new_text, replaced)`` where ``replaced`` is 0 (the token is not in the
+    body) or 1. A file with no frontmatter is returned verbatim (there is no contract node)."""
+    inner, body = split_frontmatter(raw_text)
+    if inner is None:
+        return raw_text, 0
+    idx = body.find(old_token)
+    if idx == -1:
+        return raw_text, 0
+    new_body = body[:idx] + new_token + body[idx + len(old_token) :]
+    return f"---\n{inner.rstrip(chr(10))}\n---\n{new_body}", 1
+
+
+def _set_scalar_line(
+    lines: list[str], key: str, value: str | None, *, insert_before: tuple[str, ...]
+) -> None:
+    """In-place upsert (or removal) of a top-level ``key: value`` frontmatter line. ``value=None``
+    removes it. When inserting a new line it lands before the first of ``insert_before`` present in
+    the block (else before the ``edges:`` block, else at the end), preserving the contract key
+    order. Only a whole-key match at column 0 is touched (never an indented edge sub-field)."""
+    rendered = f"{key}: {_yaml_scalar(value)}" if value is not None else None
+    for i, line in enumerate(lines):
+        if line[:1] not in (" ", "\t") and line.partition(":")[0].strip() == key:
+            if rendered is None:
+                lines.pop(i)
+            else:
+                lines[i] = rendered
+            return
+    if rendered is None:
+        return
+    pos = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if line.strip() == "edges:" or line.partition(":")[0].strip() in insert_before
+        ),
+        len(lines),
+    )
+    lines.insert(pos, rendered)
+
+
+def set_occurred_frontmatter(
+    raw_text: str, *, occurred: str | None, occurred_end: str | None
+) -> str:
+    """Set (or clear) the ``occurred`` / ``occurred_end`` scalar frontmatter lines (ADR-056 §5/§7 —
+    the mechanical tier of a date edit and the ``occurred-enrichment`` apply). Pure. ``None``
+    removes the line; ``occurred_end`` lands right after ``occurred`` (its insert scan hits the same
+    successor key). Values are day-granular partial-ISO (``2025`` / ``2025-07`` / ``2025-07-07``) —
+    the indexer re-expands them to the ``occurred_start``/``occurred_end`` date columns, so no DB is
+    written directly (rule 1). Raises :class:`ValueError` if the file has no frontmatter."""
+    inner, body = split_frontmatter(raw_text)
+    if inner is None:
+        raise ValueError("cannot set occurred: node file has no frontmatter")
+    lines = inner.rstrip("\n").split("\n")
+    _set_scalar_line(lines, "occurred", occurred, insert_before=_OCCURRED_INSERT_BEFORE)
+    _set_scalar_line(lines, "occurred_end", occurred_end, insert_before=_OCCURRED_INSERT_BEFORE)
+    return f"---\n{chr(10).join(lines)}\n---\n{body}"
+
+
 def render_tombstone(*, node_id: str, node_type: str, survivor_id: str) -> str:
     """A merged node's replacement file: keeps only ``id``/``type``/``merged_into`` (02 §2, ADR-030
     §5). The id keeps resolving (old links + source_refs redirect to the survivor); the indexer
@@ -532,6 +611,49 @@ class NodeWriter:
         raw_text = path.read_text(encoding="utf-8")
         folded = [fold_diacritics(a) for a in aliases]
         self._atomic_write(path, upsert_frontmatter_list(raw_text, "aliases", folded))
+
+    def set_occurred(
+        self, store_path: str, *, occurred: str | None, occurred_end: str | None
+    ) -> bool:
+        """Set a node file's ``occurred``/``occurred_end`` frontmatter (ADR-056 §7 — the
+        ``occurred-enrichment`` apply, and the event-date leg of a token edit). Day-granular
+        partial-ISO; the indexer re-expands to the date columns on the next index. Atomic; returns
+        whether the file changed. A missing file raises ``FileNotFoundError`` (the caller degrades,
+        rule 7)."""
+        path = self._root / Path(*store_path.split("/"))
+        raw_text = path.read_text(encoding="utf-8")
+        new_text = set_occurred_frontmatter(raw_text, occurred=occurred, occurred_end=occurred_end)
+        if new_text == raw_text:
+            return False
+        self._atomic_write(path, new_text)
+        return True
+
+    def edit_time_token(
+        self,
+        store_path: str,
+        *,
+        old_token: str,
+        new_token: str,
+        occurred: str | None,
+        occurred_end: str | None,
+        update_occurred: bool,
+    ) -> int:
+        """The mechanical **token edit** (ADR-056 §5): rewrite the first ``old_token`` in the body
+        to ``new_token`` and, when it is the node's event date (``update_occurred``), reset
+        ``occurred``/``occurred_end`` to match — in one atomic write. Returns the number of tokens
+        replaced (0 ⇒ the token wasn't in the body; the caller 400s and nothing is written). A
+        missing file raises ``FileNotFoundError`` (the caller degrades, rule 7). Re-embedding is the
+        caller's next step (reindex the path)."""
+        path = self._root / Path(*store_path.split("/"))
+        raw_text = path.read_text(encoding="utf-8")
+        new_text, replaced = replace_body_token(raw_text, old_token, new_token)
+        if replaced and update_occurred:
+            new_text = set_occurred_frontmatter(
+                new_text, occurred=occurred, occurred_end=occurred_end
+            )
+        if new_text != raw_text:
+            self._atomic_write(path, new_text)
+        return replaced
 
     def write_tombstone(
         self, store_path: str, *, node_id: str, node_type: str, survivor_id: str

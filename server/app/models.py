@@ -41,8 +41,16 @@ class FollowUpRequest(BaseModel):
     answer: str = Field(min_length=1)
 
 
+class CaptureAnchorEditRequest(BaseModel):
+    """Body for ``PUT /captures/{id}/anchor`` — the ADR-056 §5 anchor edit. ``anchor`` is the
+    corrected recorded-at (an ISO-8601 datetime); overwriting the stored anchor triggers a
+    background one-capture reorganize that re-resolves every relative date against it."""
+
+    anchor: datetime
+
+
 class CaptureAcceptedResponse(BaseModel):
-    """202 body shared by the capture-accepting endpoints (text/voice/retry/follow-up)."""
+    """202 body shared by the capture-accepting endpoints (text/voice/retry/follow-up/anchor)."""
 
     capture_id: str
     status: str = "received"
@@ -171,6 +179,31 @@ class NodeDetailResponse(BaseModel):
     body: str
     profile: str | None = None
     edges: list[NodeEdgeItem] = Field(default_factory=list)
+
+
+class NodeDateTokenEditRequest(BaseModel):
+    """Body for ``PUT /nodes/{id}/date-token`` — the ADR-056 §5 mechanical token edit. ``old`` is
+    the exact ``[[t:…]]`` token string currently in the body (the edit anchor — no text-span
+    bookkeeping); ``start`` (and optional ``end`` for a range) are the new **partial-ISO** date(s)
+    (``2025`` / ``2025-07`` / ``2025-07-07``); ``label`` is an optional absolute display label. The
+    server rewrites the token, updates ``occurred`` iff it is the event date, then re-embeds."""
+
+    old: str = Field(min_length=1)
+    start: str = Field(min_length=1)
+    end: str | None = None
+    label: str | None = None
+
+
+class NodeDateTokenEditResponse(BaseModel):
+    """Result of a token edit (``PUT /nodes/{id}/date-token``). ``occurred_updated`` is true when
+    the edited token was the node's event date; ``occurred``/``occurred_end`` (day-granular
+    partial-ISO) are then the new event date, else null (the token changed but ``occurred`` did
+    not)."""
+
+    node_id: str
+    occurred_updated: bool
+    occurred: str | None = None
+    occurred_end: str | None = None
 
 
 # --- Map / neighbors (03-api.md §Search & graph, M7 / ADR-051) ---
@@ -434,12 +467,15 @@ class ReviewResolveRequest(BaseModel):
     ``verdict`` (``"approve"`` | ``"reject"``); stance-candidate → ``verdict``
     (``"agree"``/``"disagree"``/``"maybe"``); dedup-proposal (ADR-049) → ``action``
     (``"merge"``/``"keep"``/``"link"``) with an optional ``survivor`` (a node id, defaulting to the
-    payload's ``default_survivor`` for a merge). The server validates per kind (400 otherwise)."""
+    payload's ``default_survivor`` for a merge); occurred-enrichment (ADR-056 §7) → ``answer`` (a
+    natural-language date like ``"summer 2019"``, or ``"maybe"`` to park / ``"skip"`` to dismiss).
+    The server validates per kind (400 otherwise)."""
 
     choice: str | None = None
     verdict: str | None = None
     action: str | None = None
     survivor: str | None = None
+    answer: str | None = None
 
 
 class ReviewBatchRequest(BaseModel):

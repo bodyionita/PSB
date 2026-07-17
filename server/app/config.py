@@ -516,6 +516,12 @@ class Settings(BaseSettings):
     # the count is exact, the sample is illustrative). 0 keeps counts only.
     graph_health_sample_offenders: int = 10
 
+    # --- Occurred-enrichment flagger (M8.2 Task 3-E, ADR-056 §7) ---
+    # The nightly step that files an `occurred-enrichment` review item per undated content node
+    # (idempotent — skips nodes already flagged). Bounds how many it files per run so the review
+    # queue never floods on the first night of a large graph (rule 9).
+    occurred_enrichment_max_per_run: int = 20
+
     # --- Web / CORS (dev only; in prod Caddy same-origins the app) ---
     cors_origins: CsvList = Field(default=["http://localhost:5173"])
 
@@ -554,6 +560,10 @@ class Settings(BaseSettings):
                 step("dedup-sweep"),
                 step("store-sweep"),
                 step("store-backup"),
+                # M8.2 (ADR-056 §7): flag undated content nodes for occurred-enrichment. Runs after
+                # reindex so `occurred_start` is current; it only files review items (no store
+                # write), so it sits with the read-mostly tail before graph-health.
+                step("occurred-enrichment"),
                 # M8 nightly-TAIL (ADR-053 §9): the read-only graph-health reporter runs last, so it
                 # reports on the settled post-reindex/post-dedup/post-backup state (04-pipelines).
                 step("graph-health"),

@@ -70,6 +70,9 @@ from .services.graph_health import build_graph_health_service
 from .services.job_runner import JobRunner
 from .services.maybe_digest import MaybeDigestService
 from .services.model_routing import build_model_routing
+from .services.nl_time import NlTimeClassifier
+from .services.node_time_edit import NodeTimeEditService
+from .services.occurred_enrichment import build_occurred_enrichment_service
 from .services.rate_limit import RateLimiter
 from .services.reindex import ReindexService
 from .services.reprocess import PgReprocessStore, ReprocessService
@@ -364,6 +367,21 @@ async def lifespan(app: FastAPI):
         # wired. The Review surface is where a dedup decision becomes graph structure.
         entity_store=entity_store,
         merge_core=merge_core,
+        # occurred-enrichment resolution (M8.2, ADR-056 §7): the NL answer is classified into a
+        # symbolic time-ref (rule 12) and resolved against the answer's own date; the classifier
+        # routes `conspect` (same tier as the organizer). None ⇒ the kind is unresolvable.
+        time_classifier=NlTimeClassifier(settings=settings, routing=app.state.model_routing),
+    )
+
+    # Two-tier date edits (M8.2, ADR-056 §5): the mechanical **token edit** (rewrite a body
+    # `[[t:…]]` + update `occurred` if it is the event date + re-embed). The anchor edit rides the
+    # capture pipeline's reorganize (below). Reads node state via the search service, writes via the
+    # shared node writer + indexer.
+    app.state.node_time_edit_service = NodeTimeEditService(
+        search_service=app.state.search_service,
+        node_writer=node_writer,
+        indexer=indexer,
+        store_backup=store_backup,
     )
 
     # Auto-recorded registry (M6 task 4, ADR-048 §11/§12): backs the chat-scoped "recently auto-
@@ -449,6 +467,9 @@ async def lifespan(app: FastAPI):
         # manually runnable via `POST /agents/graph-health/run` (T3 reads it off the scheduler's
         # live step map). No DB writes beyond its own agent_runs row.
         graph_health_service = build_graph_health_service(settings, db)
+        # occurred-enrichment (M8.2, ADR-056 §7): the undated-node flagger, a read-mostly nightly
+        # tail step + manually runnable via `POST /agents/occurred-enrichment/run`. DB-only.
+        occurred_enrichment_service = build_occurred_enrichment_service(settings, db)
         scheduler = PipelineScheduler(
             settings=settings,
             jobs=build_backup_jobs(settings, db, store_backup),
@@ -462,6 +483,7 @@ async def lifespan(app: FastAPI):
             dedup_sweep=app.state.dedup_sweep_service,
             maybe_digest=app.state.maybe_digest_service,
             graph_health=graph_health_service,
+            occurred_enrichment=occurred_enrichment_service,
             job_runner=app.state.job_runner,
         )
         scheduler.start()

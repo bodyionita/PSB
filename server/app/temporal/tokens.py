@@ -150,6 +150,19 @@ class ResolvedTime:
     def is_range(self) -> bool:
         return self.end is not None
 
+    def start_date_iso(self) -> str:
+        """The start partial as a **date-granular** partial-ISO string for the frontmatter
+        ``occurred`` field (``2025`` / ``2025-07`` / ``2025-07-07``) — any time-of-day dropped
+        (``occurred_*`` are day-granular; tokens own sub-day, ADR-056 §6). Granularity is preserved
+        (a bare year stays ``2025``), so the indexer re-expands it to the same day range."""
+        return self.start.iso().split("T", 1)[0]
+
+    def end_date_iso(self) -> str | None:
+        """The end partial as a date-granular partial-ISO for the frontmatter ``occurred_end``
+        field, or ``None`` when this is not a range (a coarse single partial's span is implicit in
+        its own granularity, so it needs no explicit end — mirrors the organizer's emission)."""
+        return self.end.iso().split("T", 1)[0] if self.end is not None else None
+
     def occurred_start(self) -> date:
         """The day-granular ``occurred_start`` for the DB (floor of the start partial)."""
         return self.start.floor_date()

@@ -457,9 +457,7 @@ def _resolve_time_refs(
     new_body = _splice_tokens(body, placements)
     if event_rt is None:
         return new_body, None, None
-    occurred = _date_iso(event_rt.start)
-    occurred_end = _date_iso(event_rt.end) if event_rt.end is not None else None
-    return new_body, occurred, occurred_end
+    return new_body, event_rt.start_date_iso(), event_rt.end_date_iso()
 
 
 def _splice_tokens(body: str, placements: list[tuple[int, int, str]]) -> str:
@@ -479,13 +477,6 @@ def _splice_tokens(body: str, placements: list[tuple[int, int, str]]) -> str:
         cursor = end
     out.append(body[cursor:])
     return "".join(out)
-
-
-def _date_iso(pd) -> str:
-    """A :class:`~app.temporal.tokens.PartialDate` as a **date-granular** partial-ISO string for the
-    frontmatter ``occurred``/``occurred_end`` (tokens own sub-day, ADR-056 §6): its partial ISO with
-    any time-of-day dropped (``2025`` / ``2025-07`` / ``2025-07-07``)."""
-    return pd.iso().split("T", 1)[0]
 
 
 def _clean_entities(

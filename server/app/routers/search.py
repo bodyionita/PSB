@@ -18,7 +18,12 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
-from ..dependencies import get_graph_service, get_search_service, require_session
+from ..dependencies import (
+    get_graph_service,
+    get_node_time_edit_service,
+    get_search_service,
+    require_session,
+)
 from ..graph.service import GraphService, InvalidCursor
 from ..graph.store import NeighborEdge
 from ..models import (
@@ -27,6 +32,8 @@ from ..models import (
     NeighborCenter,
     NeighborPageResponse,
     NeighborZonesResponse,
+    NodeDateTokenEditRequest,
+    NodeDateTokenEditResponse,
     NodeDetailResponse,
     NodeEdgeItem,
     SearchRequest,
@@ -34,6 +41,11 @@ from ..models import (
 )
 from ..providers.base import ProviderUnavailable
 from ..search.service import SearchService
+from ..services.node_time_edit import (
+    BadTimeEdit,
+    NodeNotFound,
+    NodeTimeEditService,
+)
 
 router = APIRouter(tags=["search"], dependencies=[Depends(require_session)])
 
@@ -133,6 +145,38 @@ async def get_node(
             )
             for e in preview.edges
         ],
+    )
+
+
+@router.put("/nodes/{node_id}/date-token", response_model=NodeDateTokenEditResponse)
+async def edit_node_date_token(
+    node_id: uuid.UUID,
+    request: NodeDateTokenEditRequest,
+    service: NodeTimeEditService = Depends(get_node_time_edit_service),
+) -> NodeDateTokenEditResponse:
+    """The mechanical **token edit** (03-api §Search & graph, ADR-056 §5): rewrite an exact body
+    ``[[t:…]]`` token to a new date and, when it is the node's event date, update ``occurred`` too —
+    then re-embed. No LLM, instant. ``422`` malformed id; ``404`` unknown/merged node; ``400`` a bad
+    token/date payload or a token not present in the body."""
+    try:
+        result = await service.edit_token(
+            str(node_id),
+            old_token=request.old,
+            start=request.start,
+            end=request.end,
+            label=request.label,
+        )
+    except NodeNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="node not found"
+        ) from None
+    except BadTimeEdit as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return NodeDateTokenEditResponse(
+        node_id=result.node_id,
+        occurred_updated=result.occurred_updated,
+        occurred=result.occurred,
+        occurred_end=result.occurred_end,
     )
 
 

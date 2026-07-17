@@ -108,7 +108,9 @@ async def run_pipeline(name: str) -> int:
         from .inbox.drain import InboxDrainService
         from .services.capture_pipeline import build_capture_pipeline
         from .services.capture_store import PgCaptureStore
+        from .services.graph_health import build_graph_health_service
         from .services.maybe_digest import build_maybe_digest_service
+        from .services.occurred_enrichment import build_occurred_enrichment_service
 
         pipeline = build_capture_pipeline(settings, db, store_backup)
         scheduler = PipelineScheduler(
@@ -128,6 +130,10 @@ async def run_pipeline(name: str) -> int:
             ),
             dedup_sweep=build_dedup_sweep_service(settings, db, vocab),
             maybe_digest=build_maybe_digest_service(settings, db),
+            # Read-mostly nightly-tail reporters (M8/M8.2) — wired so `pipeline nightly` faithfully
+            # runs the whole roster the cron does (this method's contract), not a subset.
+            graph_health=build_graph_health_service(settings, db),
+            occurred_enrichment=build_occurred_enrichment_service(settings, db),
         )
         runners = {defn.name: runner for defn, runner in scheduler.pipeline_runners()}
         if name not in runners:

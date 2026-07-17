@@ -114,6 +114,7 @@ async def resolve_review(
             verdict=request.verdict,
             action=request.action,
             survivor=request.survivor,
+            answer=request.answer,
         )
     except ReviewNotFound:
         raise HTTPException(

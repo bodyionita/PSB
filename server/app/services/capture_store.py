@@ -125,6 +125,12 @@ class CaptureStore(Protocol):
 
     async def set_follow_up_answer(self, capture_id: str, answer: str) -> None: ...
 
+    async def set_created_at(self, capture_id: str, created_at: datetime) -> None:
+        """Correct a capture's recorded-at — the ADR-056 §5 anchor edit. The stored anchor is data
+        (never wall-clock), so overwriting it makes a subsequent reorganize re-resolve every
+        relative date against the corrected time (reprocess-deterministic)."""
+        ...
+
     async def reset_for_retry(self, capture_id: str) -> None:
         """Clear the failure and put the capture back in-flight (``received``, no error)."""
         ...
@@ -300,6 +306,9 @@ class PgCaptureStore:
 
     async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None:
         await self._set(capture_id, "node_paths = $2", node_paths)
+
+    async def set_created_at(self, capture_id: str, created_at: datetime) -> None:
+        await self._set(capture_id, "created_at = $2", created_at)
 
     async def set_follow_up_question(self, capture_id: str, question: str) -> None:
         await self._set(capture_id, "follow_up_question = $2", question)

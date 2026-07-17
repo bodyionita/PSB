@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from ..dependencies import get_capture_pipeline, require_session
 from ..models import (
     CaptureAcceptedResponse,
+    CaptureAnchorEditRequest,
     CaptureTextRequest,
     CaptureView,
     FollowUpRequest,
@@ -99,6 +100,27 @@ async def retry_capture(
     except NotRetryable:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="capture is not in a failed state"
+        ) from None
+    return CaptureAcceptedResponse(capture_id=capture_id)
+
+
+@router.put(
+    "/captures/{capture_id}/anchor",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=CaptureAcceptedResponse,
+)
+async def edit_anchor(
+    capture_id: str,
+    payload: CaptureAnchorEditRequest,
+    pipeline: CapturePipeline = Depends(get_capture_pipeline),
+) -> CaptureAcceptedResponse:
+    """The ADR-056 §5 **anchor edit**: correct a capture's recorded-at, then re-resolve its notes
+    against the new anchor in the background (one-capture reorganize). ``202``; ``404`` unknown."""
+    try:
+        await pipeline.edit_anchor(capture_id, payload.anchor)
+    except CaptureNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="capture not found"
         ) from None
     return CaptureAcceptedResponse(capture_id=capture_id)
 
