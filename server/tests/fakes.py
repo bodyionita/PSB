@@ -948,6 +948,33 @@ class FakeAgentRunStore:
     async def get(self, run_id: str) -> AgentRun | None:
         return self.runs.get(run_id)
 
+    async def children_tree(self, run_id: str):
+        # Mirror PgAgentRunStore.children_tree over the in-memory runs: collect every descendant of
+        # `run_id` (BFS down parent_run_id links), preserving insertion order for stable early→late
+        # siblings, then hand the flat rows to the shared `build_run_tree` builder.
+        from app.services.agent_runs import RunTreeRow, build_run_tree
+
+        descendants: list[str] = []
+        frontier = [run_id]
+        while frontier:
+            parent = frontier.pop(0)
+            for rid, run in self.runs.items():
+                if run.parent_run_id == parent and rid not in descendants:
+                    descendants.append(rid)
+                    frontier.append(rid)
+        flat = [
+            RunTreeRow(
+                id=r.id,
+                agent=r.agent,
+                status=r.status,
+                ts=r.started_at,
+                summary=r.summary,
+                parent_run_id=r.parent_run_id,
+            )
+            for r in (self.runs[d] for d in descendants)
+        ]
+        return build_run_tree(flat, run_id)
+
 
 class FakeRunLogStore:
     """In-memory RunLogStore (M8 task 1): accumulates flushed lines per run, serves the after_seq

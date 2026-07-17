@@ -11,6 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from .services.agent_runs import RunChild
 from .services.capture_store import CaptureRecord
 
 
@@ -60,6 +61,10 @@ class CaptureView(BaseModel):
     error: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # The capture's origin (M8.1, ADR-054 §4): `mcp`/`chat`, or NULL for a web capture (the client
+    # falls back to `kind` for the source badge). Carried so the Captures expand
+    # (GET /captures/{id}) renders the badge without re-reading the feed row.
+    source: str | None = None
 
     @classmethod
     def from_record(cls, record: CaptureRecord) -> CaptureView:
@@ -74,6 +79,7 @@ class CaptureView(BaseModel):
             error=record.error,
             created_at=record.created_at,
             updated_at=record.updated_at,
+            source=record.source,
         )
 
 
@@ -443,10 +449,35 @@ class ReviewBatchResponse(BaseModel):
 
 
 # --- Activity (03-api.md §Activity feed) ---
+class RunChildModel(BaseModel):
+    """One node of a run's recursive step tree (GET /activity/runs/{id}, M8.1 ADR-054 §2). A lighter
+    shape than the run itself — ``name``/``ts`` — plus its own ``children`` (a distiller step's
+    spawned ``capture`` runs sit one level deeper). Siblings are ordered early→late."""
+
+    id: str
+    name: str
+    status: str
+    ts: datetime | None = None
+    summary: str | None = None
+    children: list[RunChildModel] = Field(default_factory=list)
+
+    @classmethod
+    def from_run_child(cls, child: RunChild) -> RunChildModel:
+        return cls(
+            id=child.id,
+            name=child.name,
+            status=child.status,
+            ts=child.ts,
+            summary=child.summary,
+            children=[cls.from_run_child(c) for c in child.children],
+        )
+
+
 class AgentRunResponse(BaseModel):
     """One ``agent_runs`` row (GET /activity/runs/{id}). M2 pull-forward of the M4 feed so the
     Admin tab can poll a reindex / tags-apply run's live status + ``details`` counts. ``trigger``
-    (M8, ADR-053 §5) is the run's origin (``scheduled``/``manual``)."""
+    (M8, ADR-053 §5) is the run's origin (``scheduled``/``manual``). ``children`` (M8.1, ADR-054 §2)
+    is the recursive step subtree — empty for a leaf run, populated for a pipeline parent."""
 
     id: str
     agent: str
@@ -459,6 +490,7 @@ class AgentRunResponse(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     trigger: str = "scheduled"
+    children: list[RunChildModel] = Field(default_factory=list)
 
 
 class RunLogLineModel(BaseModel):

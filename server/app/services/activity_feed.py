@@ -5,20 +5,22 @@ The merged ``GET /activity`` feed is a **UNION-of-views projection**, not a new 
 ``review_queue`` that drifts from the source rows — against rule 1's durable-truth spirit; the
 source rows *are* the events). Each source row is normalized to a common
 ``{id, category, kind, ts, title, snippet, ref}`` shape (+ ``parent_ref`` for the pipeline
-parent→child nesting, ADR-053 §11), the union is ordered ``ts DESC`` and **keyset-paginated on
-``(ts, id)``** via the opaque ``before=`` cursor.
+parent→child nesting, ADR-053 §11; + ``status``/``source`` for the M8.1 Captures row, ADR-054 §4),
+the union is ordered ``ts DESC`` and **keyset-paginated on ``(ts, id)``** via the opaque ``before=``
+cursor.
 
 **Category is by *origin*, not table** (ADR-053 §5): the same ``agent_runs`` row is
 ``agents_jobs`` when scheduled and ``manual_actions`` when hand-triggered, read off the M8
 ``agent_runs.trigger`` column — a hand-run ``reindex`` lands under manual actions rather than
 looking like a nightly job. The three categories:
 
-* **agents_jobs** — scheduled ``agent_runs`` (pipeline parents + their step children, linked by
-  ``parent_run_id`` so the client nests them).
-* **conversations** — auto-endorsed ``source=chat`` captures (the M6 "recently auto-recorded" list
-  folds in here, ADR-053 §4; one-tap-removed captures excluded via ``removed_at``).
-* **manual_actions** — human-initiated ops: manually-triggered ``agent_runs`` + review verdicts
-  (resolved ``review_queue`` items).
+* **agents_jobs** — scheduled ``agent_runs``, **parentless runs only** (M8.1 ADR-054 §2: a pipeline
+  run is one row; its step children live under ``GET /activity/runs/{id}``'s recursive tree).
+* **captures** — all captures regardless of source (voice/text/mcp/chat), keyset-paginated (M8.1
+  ADR-054 §4; renamed from ``conversations``, widened from chat-only). The M6 "recently
+  auto-recorded" chat list folds in here; one-tap-removed captures excluded via ``removed_at``.
+* **manual_actions** — human-initiated ops: manually-triggered ``agent_runs`` (also parentless
+  only) + review verdicts (resolved ``review_queue`` items).
 
 :class:`ActivityFeedService` owns the cursor encode/decode + limit clamp (business logic, rule 5);
 :class:`PgActivityFeedStore` is the plain-SQL asyncpg read (no ORM, rule 5 / ADR-011). The service
@@ -37,24 +39,28 @@ from typing import Literal, Protocol
 
 from ..db import Database
 
-# --- Categories (ADR-053 §4) --------------------------------------------------------------------
+# --- Categories (ADR-053 §4; M8.1 ADR-054 §4 renamed conversations→captures) --------------------
 CATEGORY_AGENTS_JOBS = "agents_jobs"
-CATEGORY_CONVERSATIONS = "conversations"
+# M8.1 (ADR-054 §4): the old ``conversations`` category becomes ``captures`` — it now carries *all*
+# captures (voice/text/mcp/chat), not only auto-endorsed chat memories. The wire value changed with
+# it (03-api §Activity M8.1 addendum); chat rows still fold their one-tap-remove loop in here.
+CATEGORY_CAPTURES = "captures"
 CATEGORY_MANUAL_ACTIONS = "manual_actions"
 
 # The wire enum for the ``?category=`` filter; typing the query param with it makes FastAPI 422 an
 # unknown value at the boundary (no service-side validation needed).
-ActivityCategory = Literal["agents_jobs", "conversations", "manual_actions"]
+ActivityCategory = Literal["agents_jobs", "captures", "manual_actions"]
 VALID_CATEGORIES: tuple[str, ...] = (
     CATEGORY_AGENTS_JOBS,
-    CATEGORY_CONVERSATIONS,
+    CATEGORY_CAPTURES,
     CATEGORY_MANUAL_ACTIONS,
 )
 
 # Normalized row kinds (the source-entity discriminator the client renders on; the specific agent
-# name / review kind rides in ``title``).
+# name / review kind rides in ``title``). M8.1 (ADR-054 §4): the capture kind is ``capture`` (was
+# ``chat_capture``) now that the Captures branch carries every source, not only chat memories.
 KIND_AGENT_RUN = "agent_run"
-KIND_CHAT_CAPTURE = "chat_capture"
+KIND_CAPTURE = "capture"
 KIND_REVIEW_VERDICT = "review_verdict"
 
 # Page-size + snippet bounds. Kept as module constants (not config knobs) because M8 Batch B owns no
@@ -81,7 +87,12 @@ class ActivityRow:
     """One normalized feed row (a projection of an ``agent_runs``/``captures``/``review_queue``
     source row). ``ref`` is the drill-down target (a run id → ``GET /activity/runs/{id}``, a chat
     session id → open the conversation, a review id); ``parent_ref`` links a pipeline step child to
-    its parent run (``None`` otherwise)."""
+    its parent run (``None`` otherwise).
+
+    ``status`` + ``source`` (M8.1, ADR-054 §4) carry the source row's lifecycle status and — for a
+    capture — its origin (``COALESCE(source, kind)`` → ``text``/``voice``/``mcp``/``chat``), so a
+    Captures row renders its status + source badge without a per-row detail fetch. ``source`` is
+    ``None`` for the non-capture branches."""
 
     id: str
     category: str
@@ -91,6 +102,8 @@ class ActivityRow:
     snippet: str | None
     ref: str | None
     parent_ref: str | None
+    status: str | None = None
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -191,13 +204,20 @@ def _row(record: object) -> ActivityRow:
         snippet=record["snippet"],  # type: ignore[index]
         ref=record["ref"],  # type: ignore[index]
         parent_ref=record["parent_ref"],  # type: ignore[index]
+        status=record["status"],  # type: ignore[index]
+        source=record["source"],  # type: ignore[index]
     )
 
 
 # The per-source SELECT branches of the UNION. Every category/kind/trigger literal here is our own
 # constant (never user input), so inlining them is injection-safe; the only user-supplied values —
 # the keyset cursor + limit — are bound parameters in :meth:`PgActivityFeedStore.read`. Each branch
-# emits the same 8 columns in the same order/types so the ``UNION ALL`` type-checks.
+# emits the same 10 columns in the same order/types so the ``UNION ALL`` type-checks.
+#
+# M8.1 (ADR-054 §2): the agent_runs branch returns **only parentless runs** (``parent_run_id IS
+# NULL``) — a pipeline run is one feed row (its rollup summary already carries the step counts); the
+# step children live under ``GET /activity/runs/{id}``'s recursive ``children[]`` tree.
+# ``parent_ref`` stays on the wire for compatibility but is always NULL here now (parentless rows).
 _AGENT_RUNS_BRANCH = f"""
     SELECT
         r.id::text AS id,
@@ -208,23 +228,32 @@ _AGENT_RUNS_BRANCH = f"""
         r.agent AS title,
         left(r.summary, {SNIPPET_MAX_CHARS}) AS snippet,
         r.id::text AS ref,
-        r.parent_run_id::text AS parent_ref
+        r.parent_run_id::text AS parent_ref,
+        r.status AS status,
+        NULL::text AS source
     FROM agent_runs r
-    {{agent_runs_where}}
+    WHERE r.parent_run_id IS NULL{{agent_runs_and}}
 """
 
+# M8.1 (ADR-054 §4): all captures regardless of source (was ``source = 'chat'`` only). ``source`` is
+# the origin badge ``COALESCE(source, kind)`` (a web text/voice capture has NULL ``source`` → falls
+# back to its kind); ``status`` is the capture lifecycle. One-tap-removed captures stay excluded via
+# ``removed_at``. ``ref`` keeps the chat-session id (``source_ref``) so chat rows still open their
+# conversation; the row id is the capture id the client expands via ``GET /captures/{id}``.
 _CAPTURES_BRANCH = f"""
     SELECT
         c.id::text AS id,
-        '{CATEGORY_CONVERSATIONS}' AS category,
-        '{KIND_CHAT_CAPTURE}' AS kind,
+        '{CATEGORY_CAPTURES}' AS category,
+        '{KIND_CAPTURE}' AS kind,
         c.created_at AS ts,
         NULL::text AS title,
         left(c.raw_text, {SNIPPET_MAX_CHARS}) AS snippet,
         c.source_ref AS ref,
-        NULL::text AS parent_ref
+        NULL::text AS parent_ref,
+        c.status AS status,
+        COALESCE(c.source, c.kind) AS source
     FROM captures c
-    WHERE c.source = 'chat' AND c.removed_at IS NULL
+    WHERE c.removed_at IS NULL
 """
 
 _REVIEW_BRANCH = f"""
@@ -236,7 +265,9 @@ _REVIEW_BRANCH = f"""
         q.kind AS title,
         left(q.excerpt, {SNIPPET_MAX_CHARS}) AS snippet,
         q.id::text AS ref,
-        NULL::text AS parent_ref
+        NULL::text AS parent_ref,
+        q.status AS status,
+        NULL::text AS source
     FROM review_queue q
     WHERE q.resolved_at IS NOT NULL
 """
@@ -255,17 +286,18 @@ class PgActivityFeedStore:
         # one is requested (both requested → no filter, the CASE assigns each row by origin).
         want_scheduled = CATEGORY_AGENTS_JOBS in categories
         want_manual = CATEGORY_MANUAL_ACTIONS in categories
+        # The branch always filters `parent_run_id IS NULL` (M8.1 §2); the trigger predicate is
+        # ANDed on when only one of the two run categories is requested (both → the CASE assigns
+        # each row by origin, no trigger filter needed).
         if want_scheduled and want_manual:
-            branches.append(_AGENT_RUNS_BRANCH.format(agent_runs_where=""))
+            branches.append(_AGENT_RUNS_BRANCH.format(agent_runs_and=""))
         elif want_scheduled:
             branches.append(
-                _AGENT_RUNS_BRANCH.format(agent_runs_where="WHERE r.trigger = 'scheduled'")
+                _AGENT_RUNS_BRANCH.format(agent_runs_and=" AND r.trigger = 'scheduled'")
             )
         elif want_manual:
-            branches.append(
-                _AGENT_RUNS_BRANCH.format(agent_runs_where="WHERE r.trigger = 'manual'")
-            )
-        if CATEGORY_CONVERSATIONS in categories:
+            branches.append(_AGENT_RUNS_BRANCH.format(agent_runs_and=" AND r.trigger = 'manual'"))
+        if CATEGORY_CAPTURES in categories:
             branches.append(_CAPTURES_BRANCH)
         if want_manual:  # review verdicts are human-initiated → manual actions
             branches.append(_REVIEW_BRANCH)
@@ -285,7 +317,7 @@ class PgActivityFeedStore:
         # `$1 IS NULL` guard short-circuits to the newest page. `id` is a uuid rendered as text, so
         # it is a stable, unique tiebreaker across the three source tables.
         sql = f"""
-            SELECT id, category, kind, ts, title, snippet, ref, parent_ref
+            SELECT id, category, kind, ts, title, snippet, ref, parent_ref, status, source
             FROM (
             {union}
             ) feed

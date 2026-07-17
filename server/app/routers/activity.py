@@ -35,7 +35,7 @@ from ..dependencies import (
     get_settings,
     require_session,
 )
-from ..models import AgentRunResponse, RunLogLineModel, RunLogsResponse
+from ..models import AgentRunResponse, RunChildModel, RunLogLineModel, RunLogsResponse
 from ..services.activity_feed import (
     FEED_DEFAULT_LIMIT,
     ActivityCategory,
@@ -57,7 +57,9 @@ class ActivityFeedItem(BaseModel):
     (a run id → ``GET /activity/runs/{id}``, a chat-session id → the conversation, a review id);
     ``parent_ref`` links a pipeline step child to its parent run so the client nests them (null
     otherwise). ``title``/``snippet`` are null where the source row has none (a running run has no
-    summary yet; a chat capture has no title until organized)."""
+    summary yet; a capture has no title until organized). ``status`` is the source row's lifecycle
+    status; ``source`` (M8.1, ADR-054 §4) is a Captures row's origin badge
+    (``text``/``voice``/``mcp``/``chat``), null on the non-capture branches."""
 
     id: str
     category: str
@@ -67,6 +69,8 @@ class ActivityFeedItem(BaseModel):
     snippet: str | None = None
     ref: str | None = None
     parent_ref: str | None = None
+    status: str | None = None
+    source: str | None = None
 
     @classmethod
     def from_row(cls, row: ActivityRow) -> ActivityFeedItem:
@@ -79,6 +83,8 @@ class ActivityFeedItem(BaseModel):
             snippet=row.snippet,
             ref=row.ref,
             parent_ref=row.parent_ref,
+            status=row.status,
+            source=row.source,
         )
 
 
@@ -129,6 +135,9 @@ async def get_run(
     run = await store.get(str(run_id))
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run not found")
+    # The recursive step subtree (M8.1, ADR-054 §2) — empty for a leaf run, the full pipeline tree
+    # for a parent. Only fetched here, on the drill-down, never in the flat feed.
+    children = await store.children_tree(str(run_id))
     return AgentRunResponse(
         id=run.id,
         agent=run.agent,
@@ -141,6 +150,7 @@ async def get_run(
         details=run.details,
         error=run.error,
         trigger=run.trigger,
+        children=[RunChildModel.from_run_child(c) for c in children],
     )
 
 

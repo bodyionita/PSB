@@ -13,7 +13,7 @@ import pytest
 
 from app.services.activity_feed import (
     CATEGORY_AGENTS_JOBS,
-    CATEGORY_CONVERSATIONS,
+    CATEGORY_CAPTURES,
     CATEGORY_MANUAL_ACTIONS,
     FEED_MAX_LIMIT,
     ActivityFeedService,
@@ -71,20 +71,20 @@ def _service(rows: list[ActivityRow]) -> tuple[ActivityFeedService, FakeActivity
 async def test_no_category_reads_all_three():
     rows = [
         _row("a", CATEGORY_AGENTS_JOBS, offset_seconds=1),
-        _row("c", CATEGORY_CONVERSATIONS, offset_seconds=2),
+        _row("c", CATEGORY_CAPTURES, offset_seconds=2),
         _row("m", CATEGORY_MANUAL_ACTIONS, offset_seconds=3),
     ]
     service, store = _service(rows)
     page = await service.feed()
     assert {i.category for i in page.items} == {
         CATEGORY_AGENTS_JOBS,
-        CATEGORY_CONVERSATIONS,
+        CATEGORY_CAPTURES,
         CATEGORY_MANUAL_ACTIONS,
     }
     # All three categories reach the store when the filter is omitted.
     assert store.calls[0]["categories"] == {
         CATEGORY_AGENTS_JOBS,
-        CATEGORY_CONVERSATIONS,
+        CATEGORY_CAPTURES,
         CATEGORY_MANUAL_ACTIONS,
     }
 
@@ -92,13 +92,13 @@ async def test_no_category_reads_all_three():
 async def test_category_filter_narrows_to_one_tab():
     rows = [
         _row("a", CATEGORY_AGENTS_JOBS, offset_seconds=1),
-        _row("c", CATEGORY_CONVERSATIONS, offset_seconds=2),
+        _row("c", CATEGORY_CAPTURES, offset_seconds=2),
         _row("m", CATEGORY_MANUAL_ACTIONS, offset_seconds=3),
     ]
     service, store = _service(rows)
-    page = await service.feed(category=CATEGORY_CONVERSATIONS)
+    page = await service.feed(category=CATEGORY_CAPTURES)
     assert [i.id for i in page.items] == ["c"]
-    assert store.calls[0]["categories"] == {CATEGORY_CONVERSATIONS}
+    assert store.calls[0]["categories"] == {CATEGORY_CAPTURES}
 
 
 async def test_newest_first_order_with_id_tiebreak():

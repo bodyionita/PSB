@@ -1347,6 +1347,153 @@ async def check_neighbor_zones(db: Database) -> None:
         await db.pool.execute("DELETE FROM nodes WHERE id = ANY($1::uuid[])", ids)
 
 
+async def check_run_children_tree(db: Database) -> None:
+    """M8.1 (ADR-054 §2): the real recursive ``PgAgentRunStore.children_tree`` — the descendant CTE
+    + ``build_run_tree`` assembly, un-fakeable (recursion + ``started_at`` ordering). Exercises a
+    genuine depth-2 tree (parent → step → a run nested under the step) to prove the recursion goes
+    beyond the flat one-level case; a leaf run returns an empty forest."""
+    print("\n== PgAgentRunStore.children_tree recursive subtree (M8.1 — ADR-054 §2) ==")
+    runs = PgAgentRunStore(db)
+    opened: list[str] = []
+    try:
+        parent = await runs.start("smoke-tree-parent")
+        opened.append(parent)
+        with child_run_scope(parent):
+            step_a = await runs.start("smoke-tree-stepA")
+            opened.append(step_a)
+            # A run nested one level deeper (a step opening its own child scope) — proves depth ≥ 2.
+            with child_run_scope(step_a):
+                grand = await runs.start("smoke-tree-grand")
+                await runs.finish(grand, status=SUCCEEDED, summary="grand ok")
+            opened.append(grand)
+            await runs.finish(step_a, status=SUCCEEDED, summary="stepA ok")
+            step_b = await runs.start("smoke-tree-stepB")
+            await runs.finish(step_b, status=SUCCEEDED, summary="stepB ok")
+            opened.append(step_b)
+        await runs.finish(parent, status=SUCCEEDED, summary="parent ok")
+
+        forest = await runs.children_tree(parent)
+        check("parent has two direct children", len(forest) == 2, str([c.name for c in forest]))
+        check(
+            "direct children ordered early→late (stepA before stepB)",
+            [c.name for c in forest] == ["smoke-tree-stepA", "smoke-tree-stepB"],
+            str([c.name for c in forest]),
+        )
+        node_a = forest[0]
+        check(
+            "stepA nests its grandchild (depth-2 recursion)",
+            len(node_a.children) == 1 and node_a.children[0].name == "smoke-tree-grand",
+            str(node_a),
+        )
+        check(
+            "child node carries name/status/summary",
+            node_a.status == SUCCEEDED and node_a.summary == "stepA ok",
+            str(node_a),
+        )
+        check("a leaf run has an empty forest", await runs.children_tree(grand) == [], "")
+        unknown = "ffffffff-0000-0000-0000-0000000000ee"
+        check("unknown run id → empty forest", await runs.children_tree(unknown) == [], "")
+    finally:
+        if opened:
+            await db.pool.execute("DELETE FROM agent_runs WHERE id = ANY($1::uuid[])", opened)
+
+
+async def check_activity_feed_m81(db: Database) -> None:
+    """M8.1 (ADR-054 §2/§4): the real ``PgActivityFeedStore`` projection — the agent_runs branch
+    returns only parentless runs, and the captures branch carries **all** sources with the new
+    ``status``/``source`` columns (``COALESCE(source, kind)``) and the ``removed_at`` exclusion. All
+    un-fakeable SQL (the parent filter, the source-badge coalesce, the tombstone exclusion)."""
+    import uuid as _uuid
+
+    from app.services.activity_feed import (
+        CATEGORY_CAPTURES,
+        KIND_CAPTURE,
+        VALID_CATEGORIES,
+        PgActivityFeedStore,
+    )
+
+    print("\n== activity feed M8.1 (ADR-054 §2/§4 — parentless runs + all-source captures) ==")
+    store = PgActivityFeedStore(db)
+    runs = PgAgentRunStore(db)
+    captures = PgCaptureStore(db)
+    opened: list[str] = []
+    cap_ids: list[str] = []
+    try:
+        parent = await runs.start("smoke-feed-parent")
+        await runs.finish(parent, status=SUCCEEDED, summary="feed parent")
+        opened.append(parent)
+        with child_run_scope(parent):
+            child = await runs.start("smoke-feed-step")
+            await runs.finish(child, status=SUCCEEDED, summary="feed step")
+        opened.append(child)
+
+        chat_cap = await captures.create(
+            capture_id=str(_uuid.uuid4()),
+            kind=KIND_TEXT,
+            status=INDEXED,
+            raw_text="chat memory",
+            source="chat",
+            source_ref="smoke-sess-1",
+        )
+        web_cap = await captures.create(
+            capture_id=str(_uuid.uuid4()),
+            kind=KIND_TEXT,
+            status=INDEXED,
+            raw_text="web text capture",
+        )
+        gone_cap = await captures.create(
+            capture_id=str(_uuid.uuid4()),
+            kind=KIND_TEXT,
+            status=INDEXED,
+            raw_text="removed capture",
+            source="chat",
+            source_ref="smoke-sess-2",
+        )
+        cap_ids += [chat_cap.id, web_cap.id, gone_cap.id]
+        await db.pool.execute("UPDATE captures SET removed_at = now() WHERE id = $1", gone_cap.id)
+
+        rows = await store.read(categories=set(VALID_CATEGORIES), before=None, limit=500)
+        by_id = {r.id: r for r in rows}
+        check("parentless pipeline run surfaces in the feed", parent in by_id, "")
+        check("step child run filtered out (parentless-only, §2)", child not in by_id, "")
+        check(
+            "parentless run carries status + null source",
+            parent in by_id and by_id[parent].status == SUCCEEDED and by_id[parent].source is None,
+            str(by_id.get(parent)),
+        )
+        check(
+            "chat capture: category=captures, kind=capture, source=chat, status carried",
+            chat_cap.id in by_id
+            and by_id[chat_cap.id].category == CATEGORY_CAPTURES
+            and by_id[chat_cap.id].kind == KIND_CAPTURE
+            and by_id[chat_cap.id].source == "chat"
+            and by_id[chat_cap.id].status == INDEXED,
+            str(by_id.get(chat_cap.id)),
+        )
+        check(
+            "web capture surfaces with source=kind fallback (text)",
+            web_cap.id in by_id and by_id[web_cap.id].source == KIND_TEXT,
+            str(by_id.get(web_cap.id)),
+        )
+        check("one-tap-removed capture excluded (removed_at)", gone_cap.id not in by_id, "")
+
+        cap_rows = await store.read(categories={CATEGORY_CAPTURES}, before=None, limit=500)
+        cap_row_ids = {r.id for r in cap_rows}
+        check(
+            "captures category returns only captures, includes both live captures",
+            all(r.category == CATEGORY_CAPTURES for r in cap_rows)
+            and chat_cap.id in cap_row_ids
+            and web_cap.id in cap_row_ids
+            and parent not in cap_row_ids,
+            "",
+        )
+    finally:
+        if cap_ids:
+            await db.pool.execute("DELETE FROM captures WHERE id = ANY($1::uuid[])", cap_ids)
+        if opened:
+            await db.pool.execute("DELETE FROM agent_runs WHERE id = ANY($1::uuid[])", opened)
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -1748,6 +1895,8 @@ async def main() -> int:
         await check_dedup_sweep(db)
         await check_inbox_drain(db)
         await check_neighbor_zones(db)
+        await check_run_children_tree(db)
+        await check_activity_feed_m81(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1

@@ -196,6 +196,67 @@ class AgentRun:
     trigger: str = SCHEDULED
 
 
+# --- Recursive run subtree (M8.1, ADR-054 §2) ---------------------------------------------------
+# ``GET /activity/runs/{id}`` returns the run's descendant runs as a recursive ``children[]`` tree
+# (a pipeline parent → its step children → any runs a step itself spawned, e.g. a distiller step's
+# ``capture`` runs). The flat feed only lists parentless runs; depth lives here, in the structure.
+#
+# Defensive recursion bound for the descendant walk. The ``parent_run_id`` linkage is a DAG by
+# construction (a child links to an already-open parent, so it can't point forward into a cycle),
+# but a bounded recursive CTE is cheap insurance against a bad row looping the query. Real pipeline
+# depth is 2–3 (parent → step → spawned capture run); 32 is far above any real tree.
+RUN_TREE_MAX_DEPTH = 32
+
+
+@dataclass
+class RunChild:
+    """One node of the recursive run tree (03-api §Activity M8.1 addendum): a lighter shape than
+    :class:`AgentRun` — ``name``/``ts`` (not ``agent``/``started_at``) — carrying only what the run
+    detail's step tree renders, plus its own ``children``."""
+
+    id: str
+    name: str
+    status: str
+    ts: datetime | None = None
+    summary: str | None = None
+    children: list[RunChild] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RunTreeRow:
+    """A flat descendant row feeding :func:`build_run_tree` (keeps the builder pure/testable — no
+    asyncpg Record). ``parent_run_id`` is what links it to its place in the tree."""
+
+    id: str
+    agent: str
+    status: str
+    ts: datetime | None
+    summary: str | None
+    parent_run_id: str | None
+
+
+def build_run_tree(rows: list[RunTreeRow], root_id: str) -> list[RunChild]:
+    """Assemble a flat descendant list (all runs under ``root_id``) into the recursive
+    ``children[]`` forest hanging off ``root_id``. ``rows`` must be ordered ascending by ``ts`` so
+    siblings read early→late (03-api §Activity M8.1 addendum); every node is pre-created first, so
+    ordering only fixes sibling order, never attachment. A row whose parent isn't in the set (should
+    not happen — the query returns only descendants) is defensively kept at the top level, never
+    dropped (rule 7 — nothing vanishes silently)."""
+    made: dict[str, RunChild] = {
+        r.id: RunChild(id=r.id, name=r.agent, status=r.status, ts=r.ts, summary=r.summary)
+        for r in rows
+    }
+    roots: list[RunChild] = []
+    for r in rows:
+        child = made[r.id]
+        parent = made.get(r.parent_run_id) if r.parent_run_id != root_id else None
+        if parent is None:
+            roots.append(child)  # direct child of the queried run (or a defensive orphan)
+        else:
+            parent.children.append(child)
+    return roots
+
+
 class AgentRunStore(Protocol):
     async def start(self, agent: str) -> str: ...
 
@@ -214,6 +275,11 @@ class AgentRunStore(Protocol):
     async def latest(self, agent: str, *, status: str | None = None) -> AgentRun | None: ...
 
     async def get(self, run_id: str) -> AgentRun | None: ...
+
+    async def children_tree(self, run_id: str) -> list[RunChild]:
+        """The recursive descendant forest under ``run_id`` (M8.1, ADR-054 §2), siblings ordered
+        early→late. Empty for a leaf run (no children) or an unknown id."""
+        ...
 
 
 def _details(value: Any) -> dict[str, Any]:
@@ -334,3 +400,41 @@ class PgAgentRunStore:
                 run_id,
             )
         return _row_to_run(row)
+
+    async def children_tree(self, run_id: str) -> list[RunChild]:
+        # A single recursive CTE walks the descendant runs (step children + anything they spawned),
+        # bounded by RUN_TREE_MAX_DEPTH (cycle insurance). Ordered ascending by started_at so
+        # siblings read early→late; `build_run_tree` assembles the flat rows into the forest.
+        async with self._db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH RECURSIVE tree AS (
+                    SELECT id, agent, status, started_at, summary, parent_run_id, 1 AS depth
+                      FROM agent_runs
+                     WHERE parent_run_id = $1
+                    UNION ALL
+                    SELECT c.id, c.agent, c.status, c.started_at, c.summary,
+                           c.parent_run_id, t.depth + 1
+                      FROM agent_runs c
+                      JOIN tree t ON c.parent_run_id = t.id
+                     WHERE t.depth < $2
+                )
+                SELECT id, agent, status, started_at, summary, parent_run_id
+                  FROM tree
+                 ORDER BY started_at ASC NULLS FIRST, id ASC
+                """,
+                run_id,
+                RUN_TREE_MAX_DEPTH,
+            )
+        flat = [
+            RunTreeRow(
+                id=str(r["id"]),
+                agent=r["agent"],
+                status=r["status"],
+                ts=r["started_at"],
+                summary=r["summary"],
+                parent_run_id=str(r["parent_run_id"]) if r["parent_run_id"] is not None else None,
+            )
+            for r in rows
+        ]
+        return build_run_tree(flat, run_id)

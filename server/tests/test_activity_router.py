@@ -22,7 +22,7 @@ from app.dependencies import (
 from app.routers import activity
 from app.services.activity_feed import (
     CATEGORY_AGENTS_JOBS,
-    CATEGORY_CONVERSATIONS,
+    CATEGORY_CAPTURES,
     CATEGORY_MANUAL_ACTIONS,
     ActivityFeedService,
     ActivityRow,
@@ -91,6 +91,56 @@ def test_get_run_reports_trigger():
     store.runs[run_id] = AgentRun(id=run_id, agent="reindex", status=SUCCEEDED, trigger="manual")
     body = _client(store).get(f"{PREFIX}/activity/runs/{run_id}").json()
     assert body["trigger"] == "manual"
+
+
+def test_get_run_leaf_has_empty_children():
+    store = FakeAgentRunStore()
+    run_id = str(uuid.uuid4())
+    store.runs[run_id] = AgentRun(id=run_id, agent="reindex", status=SUCCEEDED)
+    body = _client(store).get(f"{PREFIX}/activity/runs/{run_id}").json()
+    assert body["children"] == []
+
+
+def test_get_run_returns_recursive_children_tree():
+    # A parent → two step children → one grandchild under stepA. The detail must render the tree,
+    # siblings early→late, with the grandchild nested one level deeper (M8.1, ADR-054 §2).
+    store = FakeAgentRunStore()
+    parent = str(uuid.uuid4())
+    step_a = str(uuid.uuid4())
+    step_b = str(uuid.uuid4())
+    grand = str(uuid.uuid4())
+    t0 = datetime(2026, 7, 17, 3, 0, 0, tzinfo=UTC)
+    store.runs[parent] = AgentRun(id=parent, agent="nightly", status=SUCCEEDED, started_at=t0)
+    store.runs[step_a] = AgentRun(
+        id=step_a,
+        agent="chat-distill",
+        status=SUCCEEDED,
+        started_at=t0 + timedelta(seconds=1),
+        summary="distilled",
+        parent_run_id=parent,
+    )
+    store.runs[grand] = AgentRun(
+        id=grand,
+        agent="capture",
+        status="failed",
+        started_at=t0 + timedelta(seconds=2),
+        parent_run_id=step_a,
+    )
+    store.runs[step_b] = AgentRun(
+        id=step_b,
+        agent="reindex",
+        status=SUCCEEDED,
+        started_at=t0 + timedelta(seconds=3),
+        parent_run_id=parent,
+    )
+    body = _client(store).get(f"{PREFIX}/activity/runs/{parent}").json()
+    children = body["children"]
+    assert [c["name"] for c in children] == ["chat-distill", "reindex"]  # early→late
+    assert children[0]["summary"] == "distilled"
+    grand_nodes = children[0]["children"]
+    assert [g["name"] for g in grand_nodes] == ["capture"]
+    assert grand_nodes[0]["status"] == "failed"
+    assert children[1]["children"] == []
 
 
 # --- GET /activity/runs/{id}/logs — the M8 live log tail (poll) --------------------------------
@@ -207,13 +257,24 @@ def _feed_client(rows: list[ActivityRow]) -> TestClient:
 def test_feed_returns_normalized_rows_newest_first():
     rows = [
         _feed_row("a", CATEGORY_AGENTS_JOBS, n=1),
-        _feed_row("c", CATEGORY_CONVERSATIONS, n=2),
+        _feed_row("c", CATEGORY_CAPTURES, n=2),
         _feed_row("m", CATEGORY_MANUAL_ACTIONS, n=3, parent_ref="parent-1"),
     ]
     body = _feed_client(rows).get(f"{PREFIX}/activity").json()
     assert [i["id"] for i in body["items"]] == ["m", "c", "a"]  # ts desc
     first = body["items"][0]
-    assert set(first) == {"id", "category", "kind", "ts", "title", "snippet", "ref", "parent_ref"}
+    assert set(first) == {
+        "id",
+        "category",
+        "kind",
+        "ts",
+        "title",
+        "snippet",
+        "ref",
+        "parent_ref",
+        "status",
+        "source",
+    }
     assert first["category"] == CATEGORY_MANUAL_ACTIONS
     assert first["parent_ref"] == "parent-1"
     assert body["next_before"] is None  # whole feed fit in one page
@@ -222,13 +283,11 @@ def test_feed_returns_normalized_rows_newest_first():
 def test_feed_category_filter():
     rows = [
         _feed_row("a", CATEGORY_AGENTS_JOBS, n=1),
-        _feed_row("c", CATEGORY_CONVERSATIONS, n=2),
+        _feed_row("c", CATEGORY_CAPTURES, n=2),
         _feed_row("m", CATEGORY_MANUAL_ACTIONS, n=3),
     ]
     body = (
-        _feed_client(rows)
-        .get(f"{PREFIX}/activity", params={"category": CATEGORY_CONVERSATIONS})
-        .json()
+        _feed_client(rows).get(f"{PREFIX}/activity", params={"category": CATEGORY_CAPTURES}).json()
     )
     assert [i["id"] for i in body["items"]] == ["c"]
 
