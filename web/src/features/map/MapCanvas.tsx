@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph2D, { type ForceGraphMethods } from 'react-force-graph-2d';
 import { useTheme } from '../../theme/theme-context';
 import { THEMES } from '../../theme/themes';
+import { INTERIORITY_GLYPH, interiorityMark } from '../../ui/interiority';
 import { edgeLabel, typeIcon } from '../../ui/nodeTypes';
 import { planeColor } from '../../ui/planeColors';
 import type { GraphData, MapLink, MapNode } from './graphModel';
@@ -67,6 +68,7 @@ export function MapCanvas({
   const palette = useMemo(
     () => ({
       accent: tokens.accent,
+      accent2: tokens.accent2,
       text: tokens.text,
       canonical: rgba(tokens.text, 0.5),
       derived: rgba(tokens.text, 0.24),
@@ -163,6 +165,21 @@ export function MapCanvas({
     ctx.arc(x, y, r, 0, 2 * Math.PI);
     ctx.stroke();
 
+    // Inner-voice ring (ADR-055 §3c): a subtle accent-2 halo outside the mark — solid for
+    // `internal` (full), thin+dashed for `mixed` (subtle). `external`/null draw nothing.
+    if (node.interiority === 'internal' || node.interiority === 'mixed') {
+      const full = node.interiority === 'internal';
+      ctx.save();
+      ctx.globalAlpha = full ? 0.9 : 0.55;
+      ctx.strokeStyle = pal.accent2;
+      ctx.lineWidth = full ? 1.6 : 1;
+      ctx.setLineDash(full ? [] : [2, 2.5]);
+      ctx.beginPath();
+      ctx.arc(x, y, r + 3, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     ctx.font = `${r * 1.35}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -216,11 +233,13 @@ export function MapCanvas({
       backgroundColor="rgba(0,0,0,0)"
       enableNodeDrag={false}
       nodeRelSize={R_CONTENT}
-      nodeLabel={(n) =>
-        n.kind === 'more'
-          ? `Show ${n.remaining} more · ${(n.rel ?? '').replace(/_/g, ' ')}`
-          : (n.title ?? '')
-      }
+      nodeLabel={(n) => {
+        if (n.kind === 'more')
+          return `Show ${n.remaining} more · ${(n.rel ?? '').replace(/_/g, ' ')}`;
+        const mark = interiorityMark(n.interiority ?? null);
+        const title = n.title ?? '';
+        return mark ? `${INTERIORITY_GLYPH} ${title} · ${mark.label}`.trim() : title;
+      }}
       nodeCanvasObject={drawNode}
       nodePointerAreaPaint={drawPointerArea}
       linkColor={linkColor}

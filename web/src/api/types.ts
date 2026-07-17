@@ -77,6 +77,12 @@ export interface PlanesResponse {
   inbox: string;
 }
 
+// The user's inner-voice dimension stamped by the organizer (M8.2 T3.5, ADR-055 §3c): `internal`
+// = feelings/reflection/self-talk, `external` = a record of the world, `mixed` = both after
+// extraction. `null` on unstamped entity hubs. Drives the Map/NodePreview inner-voice marker
+// (`internal` = full marker, `mixed` = subtle, `external`/`null` = none).
+export type Interiority = 'internal' | 'external' | 'mixed' | null;
+
 // --- Search & graph (03-api.md §Search & graph, M3 / ADR-026/030) ---
 export interface SearchRequest {
   query: string;
@@ -130,6 +136,8 @@ export interface NodeDetailResponse {
   disambig: string | null;
   occurred: string | null;
   occurred_end: string | null;
+  // Inner-voice dimension (M8.2 T3.5, ADR-055 §3c) — drives the NodePreview marker.
+  interiority: Interiority;
   body: string;
   profile: string | null;
   edges: NodeEdgeItem[];
@@ -150,6 +158,8 @@ export interface MapNeighborItem {
   score: number | null;
   since: string | null;
   until: string | null;
+  // Inner-voice dimension (M8.2 T3.5, ADR-055 §3c) — drives the map node's inner-voice marker.
+  interiority: Interiority;
 }
 
 // One `rel` zone of a center's neighborhood, capped at `map_zone_fanout` (ADR-052: keyed by `rel` —
@@ -170,6 +180,8 @@ export interface NeighborCenter {
   title: string | null;
   plane: string | null;
   planes: string[];
+  // Inner-voice dimension of the focal node (M8.2 T3.5, ADR-055 §3c) — so the center is markable too.
+  interiority: Interiority;
 }
 
 // Grouped first page of GET /nodes/{id}/neighbors (no `rel`). `center` is null + `zones` empty when
@@ -187,6 +199,27 @@ export interface NeighborPageResponse {
   direction: string;
   neighbors: MapNeighborItem[];
   next_cursor: string | null;
+}
+
+// --- Date-token edit (03-api.md §Search & graph, M8.2 / ADR-056 §5) ---
+// PUT /nodes/{id}/date-token — the mechanical token edit. `old` is the EXACT `[[t:…]]` token
+// string currently in the body (the edit anchor, no text-span bookkeeping); `start` (+ optional
+// `end` for a range) are the new partial-ISO date(s) (`2025` / `2025-07` / `2025-07-07`); `label`
+// is an optional absolute display label. When `old` is the node's event date, `occurred` moves too.
+export interface NodeDateTokenEdit {
+  old: string;
+  start: string;
+  end?: string | null;
+  label?: string | null;
+}
+
+// PUT /nodes/{id}/date-token result. `occurred_updated` is true when the edited token was the
+// node's event date; `occurred`/`occurred_end` are then the new event date (else null).
+export interface NodeDateTokenEditResponse {
+  node_id: string;
+  occurred_updated: boolean;
+  occurred: string | null;
+  occurred_end: string | null;
 }
 
 // --- Chat (03-api.md §Chat, M4 / ADR-025 / ADR-043) ---
@@ -383,14 +416,16 @@ export interface EntityCandidate {
   aliases: string[];
 }
 
-// POST /review/{id} resolution body (ADR-048/049) — the meaningful field is per-kind:
-// entity-ambiguity `choice`, stance-candidate/vocab `verdict`, dedup-proposal `action`(+`survivor`).
-// The server reads only the field that fits the item's kind (400 otherwise).
+// POST /review/{id} resolution body (ADR-048/049/056) — the meaningful field is per-kind:
+// entity-ambiguity `choice`, stance-candidate/vocab `verdict`, dedup-proposal `action`(+`survivor`),
+// occurred-enrichment `answer` (a natural-language date phrase, or `"maybe"` to park / `"skip"` to
+// dismiss — ADR-056 §7). The server reads only the field that fits the item's kind (400 otherwise).
 export interface ReviewResolveBody {
   choice?: ReviewChoice;
   verdict?: ReviewVerdict | StanceVerdict;
   action?: DedupAction;
   survivor?: string;
+  answer?: string;
 }
 
 // One item's outcome in a batch resolve (POST /review/batch, ADR-048 §8): best-effort per item — an

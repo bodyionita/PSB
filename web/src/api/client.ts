@@ -24,6 +24,8 @@ import type {
   ModelRoutingUpdate,
   NeighborPageResponse,
   NeighborZonesResponse,
+  NodeDateTokenEdit,
+  NodeDateTokenEditResponse,
   NodeDetailResponse,
   PipelineItem,
   PlanesResponse,
@@ -115,6 +117,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ answer }),
     }),
+  // The anchor edit (M8.2, ADR-056 §5): correct a capture's recorded-at, then re-resolve its
+  // relative dates against the new anchor in the background (one-capture reorganize). 202; the
+  // `anchor` is an ISO-8601 datetime. 404 = unknown capture.
+  editCaptureAnchor: (id: string, anchor: string) =>
+    request<CaptureAcceptedResponse>(`/captures/${encodeURIComponent(id)}/anchor`, {
+      method: 'PUT',
+      body: JSON.stringify({ anchor }),
+    }),
 
   // --- Meta / Search & graph (03-api.md §Meta, §Search & graph) ---
   planes: () => request<PlanesResponse>('/planes'),
@@ -131,6 +141,14 @@ export const api = {
     }),
   getNode: (id: string) =>
     request<NodeDetailResponse>(`/nodes/${encodeURIComponent(id)}`),
+  // The mechanical date-token edit (M8.2, ADR-056 §5): rewrite an exact body `[[t:…]]` token to a
+  // new date; when it's the node's event date, `occurred` moves too and chunks re-embed. No LLM,
+  // instant. 400 = a bad token/date or a token not in the body; 404 = unknown/merged node.
+  editNodeDateToken: (id: string, body: NodeDateTokenEdit) =>
+    request<NodeDateTokenEditResponse>(`/nodes/${encodeURIComponent(id)}/date-token`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   // --- Map / neighbors (03-api.md §Search & graph, M7 / ADR-051 + ADR-052) ---
   // No `rel` → the grouped first page (one zone per rel, each capped + total + next_cursor). With

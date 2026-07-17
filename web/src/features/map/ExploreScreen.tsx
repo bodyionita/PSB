@@ -519,6 +519,9 @@ export function ExploreScreen({
           title: navTarget.title,
           plane: null,
           planes: [],
+          // The transient in-flight placeholder has no interiority yet — the real center (with its
+          // marker) lands a frame later when its neighborhood resolves.
+          interiority: null,
         }
       : center;
 

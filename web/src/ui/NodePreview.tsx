@@ -3,11 +3,49 @@
 // profile (entity nodes only, ADR-030), and the node's edges — canonical (typed) + derived
 // (similarity), both directions. A design-system primitive so neither feature clones it (rule 10).
 import { motion } from 'framer-motion';
+import { useMemo } from 'react';
 import type { NodeEdgeItem } from '../api/types';
+import { TokenizedBody } from './TokenizedBody';
+import {
+  parsePartial,
+  renderAbsolute,
+  renderRelative,
+  todayCivil,
+  type ResolvedTime,
+} from './dateToken';
+import { HoverTip } from './HoverTip';
+import { InteriorityBadge } from './InteriorityBadge';
 import { baseName, useNode } from './nodeDetail';
 import { edgeLabel, typeIcon } from './nodeTypes';
 
 const FAIL_COLOR = '#ff6b6b';
+
+// The node's canonical event date (`occurred`[/`occurred_end`]) as a live phrase + exact-date
+// tooltip — read-only here (the editable copy is the body token, ADR-056 §5). Day-granular
+// partial-ISO strings; a range renders absolute. Renders nothing when the node has no `occurred`.
+function OccurredLine({ occurred, occurredEnd }: { occurred: string | null; occurredEnd: string | null }) {
+  const now = useMemo(() => todayCivil(), []);
+  const rt = useMemo<ResolvedTime | null>(() => {
+    if (!occurred) return null;
+    const start = parsePartial(occurred);
+    if (!start) return null;
+    const end = occurredEnd ? parsePartial(occurredEnd) : null;
+    return { start, end, label: null };
+  }, [occurred, occurredEnd]);
+  if (!rt) return null;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--muted)' }}>
+      <span aria-hidden>◷</span>
+      <HoverTip
+        tip={renderAbsolute(rt)}
+        ariaLabel={`occurred ${renderRelative(rt, now)}, ${renderAbsolute(rt)}`}
+        style={{ color: 'var(--text)' }}
+      >
+        {renderRelative(rt, now)}
+      </HoverTip>
+    </span>
+  );
+}
 
 export function PlaneBadge({ plane }: { plane: string | null }) {
   if (!plane) return null;
@@ -160,6 +198,16 @@ export function NodePreview({
       style={{ overflow: 'hidden' }}
     >
       <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--surface-border)' }}>
+        {/* Meta row — the inner-voice marker (ADR-055 §3c) + the event date (ADR-056), when present. */}
+        {(data.interiority === 'internal' ||
+          data.interiority === 'mixed' ||
+          data.occurred) && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <InteriorityBadge interiority={data.interiority} />
+            <OccurredLine occurred={data.occurred} occurredEnd={data.occurred_end} />
+          </div>
+        )}
+
         {/* Entity identity line — disambiguator + known aliases (entity nodes only, ADR-030). */}
         {(data.disambig || data.aliases.length > 0) && (
           <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
@@ -202,7 +250,11 @@ export function NodePreview({
             color: 'var(--text)',
           }}
         >
-          {data.body.trim() || '(no body)'}
+          {data.body.trim() ? (
+            <TokenizedBody body={data.body.trim()} nodeId={nodeId} />
+          ) : (
+            '(no body)'
+          )}
         </pre>
 
         {canonical.length > 0 && (

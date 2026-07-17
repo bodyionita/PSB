@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ApiError } from '../../api/client';
 import type {
   EntityCandidate,
   ReviewItemResponse,
@@ -24,6 +25,7 @@ const KIND_ENTITY = 'entity-ambiguity';
 const KIND_VOCAB = 'vocab-proposal';
 const KIND_STANCE = 'stance-candidate';
 const KIND_DEDUP = 'dedup-proposal';
+const KIND_OCCURRED = 'occurred-enrichment';
 
 // Only the M6 kinds (stance-candidate / dedup-proposal) show a batch select box; entity/vocab keep
 // their single-item flows (ADR-048 §8 frames batch around stance triage + dedup dismissal).
@@ -114,6 +116,20 @@ function dedupOf(item: ReviewItemResponse): DedupInfo {
     cosine: typeof signals.cosine === 'number' ? signals.cosine : null,
     sharedEntities: strList(signals.shared_entity_titles),
     occurredOverlap: signals.occurred_overlap === true,
+  };
+}
+
+interface OccurredInfo {
+  nodeId: string;
+  title: string;
+  type: string | null;
+}
+
+function occurredOf(item: ReviewItemResponse): OccurredInfo {
+  return {
+    nodeId: str(item.payload.node_id) ?? '',
+    title: str(item.payload.title) ?? '(untitled)',
+    type: typeof item.payload.type === 'string' ? item.payload.type : null,
   };
 }
 
@@ -576,6 +592,103 @@ function DedupProposalCard({ item, selected, onToggleSelect }: CardProps) {
   );
 }
 
+// --- occurred-enrichment (M8.2, ADR-056 §7) -------------------------------------------------
+
+// The undated content node a nightly step flagged. The user tags its event time in NATURAL
+// LANGUAGE ("summer 2019", "last Tuesday ~6pm") — resolved server-side via the same classify →
+// deterministic-resolver path (rule 12, fail-closed). An uninterpretable phrase comes back as a 400
+// so the user rephrases (never a guessed date); "maybe" parks, "skip" leaves it undated.
+function OccurredEnrichmentCard({ item }: { item: ReviewItemResponse }) {
+  const resolve = useResolveReview();
+  const { nodeId, title, type } = occurredOf(item);
+  const [answer, setAnswer] = useState('');
+  const busy = resolve.isPending;
+  const parked = item.status === 'maybe';
+
+  const send = (value: string) => resolve.mutate({ id: item.id, body: { answer: value } });
+  const submit = () => {
+    const trimmed = answer.trim();
+    if (!trimmed || busy) return;
+    send(trimmed);
+  };
+
+  // A 400 is the "couldn't interpret — rephrase" signal (ADR-056 §7): surface the server's message
+  // verbatim so the user knows to try different words; other failures get a generic retry line.
+  const errorMsg = resolve.isError
+    ? resolve.error instanceof ApiError && resolve.error.status === 400
+      ? resolve.error.message
+      : 'Couldn’t save that — try again.'
+    : null;
+
+  return (
+    <Surface>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <span aria-hidden style={{ flexShrink: 0 }}>{typeIcon(type)}</span>
+          <span style={{ fontSize: 13, color: 'var(--muted)' }}>When did this happen?</span>
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          {parked && <AgingTag item={item} />}
+          <KindBadge label="Add a date" />
+        </div>
+      </div>
+
+      {/* The flagged node is a NodeChip — peek at it in the shared drawer before dating it. */}
+      {nodeId && (
+        <div style={{ marginTop: 12 }}>
+          <NodeChip nodeId={nodeId} type={type} title={title} />
+        </div>
+      )}
+      <Excerpt text={item.excerpt} />
+
+      <p style={{ margin: '12px 0 8px', fontSize: 12.5, color: 'var(--muted)' }}>
+        Describe when it happened in plain words — “summer 2019”, “last March”, “last Tuesday ~6pm”.
+      </p>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <input
+          value={answer}
+          onChange={(e) => setAnswer(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          placeholder="e.g. summer 2019"
+          disabled={busy}
+          style={{
+            flex: 1,
+            minWidth: 160,
+            padding: '9px 12px',
+            borderRadius: 'var(--radius)',
+            border: '1px solid var(--surface-border)',
+            background: 'var(--surface)',
+            color: 'var(--text)',
+            fontSize: 13,
+            outline: 'none',
+          }}
+        />
+        <Button onClick={submit} disabled={busy || answer.trim() === ''} style={{ padding: '9px 16px', fontSize: 13 }}>
+          Set date
+        </Button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+        {!parked && (
+          <Button variant="ghost" onClick={() => send('maybe')} disabled={busy}>
+            Maybe later
+          </Button>
+        )}
+        <Button variant="ghost" onClick={() => send('skip')} disabled={busy}>
+          Not dated
+        </Button>
+      </div>
+
+      {errorMsg && <p style={{ margin: '12px 0 0', fontSize: 13, color: FAIL_COLOR }}>{errorMsg}</p>}
+    </Surface>
+  );
+}
+
 // --- card dispatch --------------------------------------------------------------------------
 
 function ReviewCard({ item, selected, onToggleSelect }: CardProps) {
@@ -595,6 +708,8 @@ function ReviewCard({ item, selected, onToggleSelect }: CardProps) {
         <StanceCandidateCard item={item} selected={selected} onToggleSelect={onToggleSelect} />
       ) : item.kind === KIND_DEDUP ? (
         <DedupProposalCard item={item} selected={selected} onToggleSelect={onToggleSelect} />
+      ) : item.kind === KIND_OCCURRED ? (
+        <OccurredEnrichmentCard item={item} />
       ) : (
         // Unknown/future kind: show it, don't hide it.
         <Surface>

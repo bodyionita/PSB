@@ -1,8 +1,8 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useMemo, useState } from 'react';
-import type { ActivityCategory, ActivityFeedItem, RunChildItem } from '../../api/types';
+import type { ActivityCategory, ActivityFeedItem, CaptureView, RunChildItem } from '../../api/types';
 import { NodeRefChips } from '../capture/NodeRefChips';
-import { useCapture } from '../capture/useCaptures';
+import { useCapture, useEditCaptureAnchor } from '../capture/useCaptures';
 import { Button } from '../../ui/Button';
 import { TimeAgo } from '../../ui/TimeAgo';
 import { StatusBadge } from './runStatus';
@@ -200,6 +200,116 @@ function SourceBadge({ source }: { source: string | null }) {
   );
 }
 
+// An ISO instant → the `datetime-local` input value (local `YYYY-MM-DDThh:mm`, no seconds/zone).
+function toLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// The anchor-edit affordance (M8.2, ADR-056 §5): correct when a capture was recorded. Overwriting
+// the stored anchor triggers a background one-capture reorganize that re-resolves every relative
+// date ("10 days ago") against the new anchor — the P10-deterministic replay. Voice + text alike.
+function AnchorEditor({ capture }: { capture: CaptureView }) {
+  const edit = useEditCaptureAnchor();
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState('');
+  const [done, setDone] = useState(false);
+
+  if (!capture.created_at) return null;
+
+  const startEditing = () => {
+    setValue(toLocalInput(capture.created_at as string));
+    setDone(false);
+    setOpen(true);
+    edit.reset();
+  };
+
+  const save = () => {
+    if (!value) return;
+    const iso = new Date(value).toISOString();
+    edit.mutate(
+      { id: capture.capture_id, anchor: iso },
+      {
+        onSuccess: () => {
+          setOpen(false);
+          setDone(true);
+        },
+      },
+    );
+  };
+
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Recorded</span>
+        <TimeAgo iso={capture.created_at} style={{ fontSize: 12, color: 'var(--text)' }} />
+        {!open && (
+          <button
+            type="button"
+            onClick={startEditing}
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--accent)',
+              cursor: 'pointer',
+            }}
+          >
+            Edit time
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <input
+            type="datetime-local"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            aria-label="Corrected recorded-at"
+            style={{
+              padding: '7px 10px',
+              borderRadius: 'var(--radius)',
+              border: '1px solid var(--surface-border)',
+              background: 'var(--surface)',
+              color: 'var(--text)',
+              fontSize: 13,
+              outline: 'none',
+            }}
+          />
+          <Button
+            onClick={save}
+            disabled={edit.isPending || !value}
+            style={{ padding: '7px 14px', fontSize: 13 }}
+          >
+            {edit.isPending ? 'Saving…' : 'Save'}
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => setOpen(false)}
+            disabled={edit.isPending}
+            style={{ padding: '7px 14px', fontSize: 13 }}
+          >
+            Cancel
+          </Button>
+        </div>
+      )}
+
+      {edit.isError && (
+        <p style={{ margin: 0, fontSize: 12, color: FAIL_COLOR }}>Couldn’t update the time — try again.</p>
+      )}
+      {done && (
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--muted)' }}>
+          Re-resolving this capture’s dates in the background…
+        </p>
+      )}
+    </div>
+  );
+}
+
 function CaptureDetail({ captureId }: { captureId: string }) {
   const capture = useCapture(captureId);
   if (capture.isLoading)
@@ -232,6 +342,7 @@ function CaptureDetail({ captureId }: { captureId: string }) {
         </p>
       )}
       <NodeRefChips paths={c.node_paths} refs={c.node_refs} />
+      <AnchorEditor capture={c} />
       {c.error && (
         <p style={{ margin: 0, fontSize: 12, color: FAIL_COLOR }}>{c.error}</p>
       )}

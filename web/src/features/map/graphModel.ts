@@ -1,7 +1,7 @@
 // Transform a center + its rel-keyed zones (ADR-052) into force-graph nodes + links, assigning each
 // zone its own angular sector so a custom d3 force can settle "people one side, topics another"
 // (ADR-051 §3). The client only ever holds one node's neighborhood (re-center, never accumulate).
-import type { MapNeighborItem, NeighborCenter } from '../../api/types';
+import type { Interiority, MapNeighborItem, NeighborCenter } from '../../api/types';
 
 export interface MapNode {
   id: string;
@@ -9,6 +9,9 @@ export interface MapNode {
   title: string | null;
   type: string | null;
   plane: string | null;
+  // Inner-voice dimension (M8.2 T3.5, ADR-055 §3c) — drives the canvas inner-voice ring; undefined
+  // on `more` affordance nodes.
+  interiority?: Interiority;
   // Neighbor edge metadata (drives link styling); undefined on center + more nodes.
   neighbor?: MapNeighborItem;
   // "show more" affordance: which zone + how many remain + the cursor to fetch the next page.
@@ -66,6 +69,7 @@ export function buildGraph(center: NeighborCenter, zones: EffectiveZone[]): Grap
       title: center.title,
       type: center.type,
       plane: center.plane,
+      interiority: center.interiority,
       x: 0,
       y: 0,
       fx: 0,
@@ -95,6 +99,7 @@ export function buildGraph(center: NeighborCenter, zones: EffectiveZone[]): Grap
           title: n.title,
           type: n.type,
           plane: n.plane,
+          interiority: n.interiority,
           neighbor: n,
           rel: zone.rel,
           tx,

@@ -82,6 +82,21 @@ export function useRetryCapture() {
   });
 }
 
+// The anchor edit (M8.2, ADR-056 §5): correct a capture's recorded-at, triggering a background
+// one-capture reorganize (202). Invalidate both the list and the capture's detail so the corrected
+// recorded-at + the re-cycling status render; polling re-engages via `isSettling`/`isInFlight` as
+// the reorganize moves it through organizing→…→indexed again.
+export function useEditCaptureAnchor() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; anchor: string }) => api.editCaptureAnchor(v.id, v.anchor),
+    onSuccess: (_data, v) => {
+      qc.invalidateQueries({ queryKey: CAPTURES_KEY });
+      qc.invalidateQueries({ queryKey: ['captures', 'detail', v.id] });
+    },
+  });
+}
+
 export function useSubmitFollowUp() {
   const qc = useQueryClient();
   return useMutation({
