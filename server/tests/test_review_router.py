@@ -59,13 +59,16 @@ class FakeReviewService:
         self.get_args = {"review_id": review_id}
         return self.get_result
 
-    async def resolve(self, review_id, *, choice=None, verdict=None, action=None, survivor=None):
+    async def resolve(
+        self, review_id, *, choice=None, verdict=None, action=None, survivor=None, answer=None
+    ):
         self.resolve_args = {
             "review_id": review_id,
             "choice": choice,
             "verdict": verdict,
             "action": action,
             "survivor": survivor,
+            "answer": answer,
         }
         if self.raises is not None:
             raise self.raises
@@ -140,7 +143,16 @@ def test_resolve_delegates_and_serialises(client_and_service):
         "verdict": None,
         "action": None,
         "survivor": None,
+        "answer": None,
     }
+
+
+def test_resolve_passes_occurred_enrichment_answer(client_and_service):
+    # An occurred-enrichment resolution forwards the NL `answer` through the router (ADR-056 §7).
+    client, fake = client_and_service
+    resp = client.post(f"{PREFIX}/review/{REVIEW_ID}", json={"answer": "summer 2019"})
+    assert resp.status_code == 200
+    assert fake.resolve_args["answer"] == "summer 2019"
 
 
 def test_resolve_passes_dedup_action_and_survivor(client_and_service):

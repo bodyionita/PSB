@@ -36,6 +36,8 @@ class FakeCapturePipeline:
         self.voice_calls: list[tuple[bytes, str]] = []
         self.retried: list[str] = []
         self.follow_ups: list[tuple[str, str]] = []
+        self.anchor_edits: list[tuple[str, datetime]] = []
+        self.anchor_error: Exception | None = None
         self.voice_error: Exception | None = None
         self.retry_error: Exception | None = None
         self.follow_up_error: Exception | None = None
@@ -65,6 +67,11 @@ class FakeCapturePipeline:
         if self.follow_up_error is not None:
             raise self.follow_up_error
         self.follow_ups.append((capture_id, answer))
+
+    async def edit_anchor(self, capture_id: str, new_anchor: datetime) -> None:
+        if self.anchor_error is not None:
+            raise self.anchor_error
+        self.anchor_edits.append((capture_id, new_anchor))
 
 
 def _record(capture_id: str, **over) -> CaptureRecord:
@@ -238,6 +245,23 @@ def test_follow_up_delegates_and_maps_errors(client_and_pipeline):
 def test_follow_up_rejects_empty_answer(client_and_pipeline):
     client, _ = client_and_pipeline
     resp = client.post(f"{PREFIX}/captures/a/follow-up", json={"answer": ""})
+    assert resp.status_code == 422
+
+
+def test_anchor_edit_delegates_and_maps_errors(client_and_pipeline):
+    client, fake = client_and_pipeline
+    resp = client.put(f"{PREFIX}/captures/a/anchor", json={"anchor": "2026-07-07T08:40:00+03:00"})
+    assert resp.status_code == 202
+    assert len(fake.anchor_edits) == 1 and fake.anchor_edits[0][0] == "a"
+
+    fake.anchor_error = CaptureNotFound("a")
+    r = client.put(f"{PREFIX}/captures/a/anchor", json={"anchor": "2026-07-07T08:40:00+03:00"})
+    assert r.status_code == 404
+
+
+def test_anchor_edit_rejects_missing_anchor(client_and_pipeline):
+    client, _ = client_and_pipeline
+    resp = client.put(f"{PREFIX}/captures/a/anchor", json={})
     assert resp.status_code == 422
 
 

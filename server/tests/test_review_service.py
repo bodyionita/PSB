@@ -10,7 +10,7 @@ delegation routes correctly (ADR-035 / M3 task 7).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -27,6 +27,7 @@ from app.providers.registry import ProviderRegistry
 from app.services.review_queue import (
     KIND_DEDUP_PROPOSAL,
     KIND_ENTITY_AMBIGUITY,
+    KIND_OCCURRED_ENRICHMENT,
     KIND_STANCE_CANDIDATE,
     KIND_VOCAB_PROPOSAL,
     ReviewItem,
@@ -709,6 +710,127 @@ async def test_dedup_batch_keep_clears_proposals(tmp_path: Path):
 
     assert all(r.ok for r in results)
     assert review.records[r1].status == "discarded" and review.records[r2].status == "discarded"
+
+
+# --- occurred-enrichment resolution (M8.2, ADR-056 §7) ------------------------------------
+
+
+class FakeTimeClassifier:
+    """Stands in for NlTimeClassifier: returns a preset ResolvedTime (or None), records the call."""
+
+    def __init__(self, resolved) -> None:
+        self._resolved = resolved
+        self.calls: list[str] = []
+
+    async def classify(self, phrase, *, anchor):
+        self.calls.append(phrase)
+        return self._resolved
+
+
+ENRICH_NODE = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+
+def _occurred_build(tmp_path: Path, resolved):
+    settings = _settings(tmp_path)
+    writer = NodeWriter(settings.graph_store_path)
+    review = FakeReviewQueue()
+    index = FakeIndexStore()
+    indexer = FakeIndexer()
+    backup = FakeStoreBackup()
+    classifier = FakeTimeClassifier(resolved)
+    service = ReviewService(
+        settings=settings,
+        review_store=review,
+        index_store=index,
+        indexer=indexer,
+        node_writer=writer,
+        store_backup=backup,
+        run_store=FakeAgentRunStore(),
+        time_classifier=classifier,
+    )
+    return service, review, index, indexer, backup, classifier, writer, settings
+
+
+def _enrich_item(node_id=ENRICH_NODE) -> ReviewItem:
+    return ReviewItem(
+        kind=KIND_OCCURRED_ENRICHMENT,
+        payload={"node_id": node_id, "title": "A trip", "type": "memory"},
+        excerpt="A trip",
+        source="occurred-enrichment",
+        source_ref=node_id,
+    )
+
+
+async def test_occurred_enrichment_applies_the_resolved_date(tmp_path: Path):
+    from app.temporal.tokens import PartialDate, ResolvedTime
+
+    resolved = ResolvedTime(PartialDate(2019, 6), PartialDate(2019, 8), label="summer 2019")
+    service, review, index, indexer, backup, classifier, writer, _ = _occurred_build(
+        tmp_path, resolved
+    )
+    sp = _seed_content_node(writer, index, ENRICH_NODE, "memory")
+    rid = await review.enqueue(_enrich_item())
+
+    record = await service.resolve(rid, answer="summer 2019")
+
+    assert classifier.calls == ["summer 2019"]
+    assert record.status == "resolved"
+    assert record.resolution["occurred"] == "2019-06"
+    assert record.resolution["occurred_end"] == "2019-08"
+    # The node file now carries the dates; it was re-indexed + a commit requested.
+    raw = (Path(writer._root) / Path(*sp.split("/"))).read_text(encoding="utf-8")
+    meta = parse_node_metadata(raw, store_path=sp, fallback_created=CREATED)
+    assert meta.occurred_start == date(2019, 6, 1) and meta.occurred_end == date(2019, 8, 31)
+    assert indexer.calls == [[sp]] and backup.reasons
+
+
+async def test_occurred_enrichment_maybe_parks_without_writing(tmp_path: Path):
+    service, review, index, indexer, _, classifier, writer, _ = _occurred_build(tmp_path, None)
+    _seed_content_node(writer, index, ENRICH_NODE, "memory")
+    rid = await review.enqueue(_enrich_item())
+
+    record = await service.resolve(rid, answer="maybe")
+    assert record.status == "maybe" and classifier.calls == [] and indexer.calls == []
+
+
+async def test_occurred_enrichment_skip_discards(tmp_path: Path):
+    service, review, index, _, _, classifier, writer, _ = _occurred_build(tmp_path, None)
+    _seed_content_node(writer, index, ENRICH_NODE, "memory")
+    rid = await review.enqueue(_enrich_item())
+
+    record = await service.resolve(rid, answer="skip")
+    assert record.status == "discarded" and classifier.calls == []
+
+
+async def test_occurred_enrichment_empty_answer_rejected(tmp_path: Path):
+    service, review, index, _, _, _, writer, _ = _occurred_build(tmp_path, None)
+    _seed_content_node(writer, index, ENRICH_NODE, "memory")
+    rid = await review.enqueue(_enrich_item())
+    with pytest.raises(BadResolution):
+        await service.resolve(rid, answer="   ")
+
+
+async def test_occurred_enrichment_uninterpretable_answer_rejected(tmp_path: Path):
+    # The classifier fails closed (None) → 400 so the user can rephrase; the item stays decidable.
+    service, review, index, _, _, classifier, writer, _ = _occurred_build(tmp_path, None)
+    _seed_content_node(writer, index, ENRICH_NODE, "memory")
+    rid = await review.enqueue(_enrich_item())
+    with pytest.raises(BadResolution):
+        await service.resolve(rid, answer="whenever, who knows")
+    assert classifier.calls == ["whenever, who knows"]
+    assert review.records[rid].status == "pending"  # still decidable
+
+
+async def test_occurred_enrichment_stale_node_discarded(tmp_path: Path):
+    from app.temporal.tokens import PartialDate, ResolvedTime
+
+    # The flagged node was reprocessed away (not in the index): the stale item is discarded.
+    service, review, _index, indexer, _, _, _, _ = _occurred_build(
+        tmp_path, ResolvedTime(PartialDate(2019))
+    )
+    rid = await review.enqueue(_enrich_item())
+    record = await service.resolve(rid, answer="2019")
+    assert record.status == "discarded" and indexer.calls == []
 
 
 # --- lifecycle + listing ------------------------------------------------------------------

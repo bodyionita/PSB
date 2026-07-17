@@ -288,3 +288,83 @@ def test_neighbors_bad_cursor_is_422():
 def test_neighbors_malformed_uuid_is_422():
     resp = _map_client().get(f"{PREFIX}/nodes/not-a-uuid/neighbors")
     assert resp.status_code == 422
+
+
+# --- token edit (PUT /nodes/{id}/date-token, M8.2 · ADR-056 §5) ---------------------------
+
+_NODE = "11111111-1111-1111-1111-111111111111"
+
+
+class FakeNodeTimeEditService:
+    def __init__(self, *, result=None, raises=None) -> None:
+        self.result = result
+        self.raises = raises
+        self.args = None
+
+    async def edit_token(self, node_id, *, old_token, start, end=None, label=None):
+        self.args = {
+            "node_id": node_id,
+            "old": old_token,
+            "start": start,
+            "end": end,
+            "label": label,
+        }
+        if self.raises is not None:
+            raise self.raises
+        return self.result
+
+
+def _edit_client(service) -> TestClient:
+    from app.dependencies import get_node_time_edit_service
+
+    app = FastAPI()
+    app.include_router(search.router, prefix=PREFIX)
+    app.dependency_overrides[get_node_time_edit_service] = lambda: service
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def test_edit_date_token_returns_result():
+    from app.services.node_time_edit import TimeEditResult
+
+    svc = FakeNodeTimeEditService(
+        result=TimeEditResult(
+            node_id=_NODE, occurred_updated=True, occurred="2025-08", occurred_end=None
+        )
+    )
+    resp = _edit_client(svc).put(
+        f"{PREFIX}/nodes/{_NODE}/date-token",
+        json={"old": "[[t:2025-07-07|7 July 2025]]", "start": "2025-08"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["occurred_updated"] is True and body["occurred"] == "2025-08"
+    assert svc.args["old"] == "[[t:2025-07-07|7 July 2025]]" and svc.args["start"] == "2025-08"
+
+
+def test_edit_date_token_unknown_node_is_404():
+    from app.services.node_time_edit import NodeNotFound
+
+    svc = FakeNodeTimeEditService(raises=NodeNotFound(_NODE))
+    resp = _edit_client(svc).put(
+        f"{PREFIX}/nodes/{_NODE}/date-token", json={"old": "[[t:2025]]", "start": "2026"}
+    )
+    assert resp.status_code == 404
+
+
+def test_edit_date_token_bad_payload_is_400():
+    from app.services.node_time_edit import BadTimeEdit
+
+    svc = FakeNodeTimeEditService(raises=BadTimeEdit("bad date"))
+    resp = _edit_client(svc).put(
+        f"{PREFIX}/nodes/{_NODE}/date-token", json={"old": "[[t:2025]]", "start": "nope"}
+    )
+    assert resp.status_code == 400
+
+
+def test_edit_date_token_malformed_uuid_is_422():
+    svc = FakeNodeTimeEditService()
+    resp = _edit_client(svc).put(
+        f"{PREFIX}/nodes/not-a-uuid/date-token", json={"old": "[[t:2025]]", "start": "2026"}
+    )
+    assert resp.status_code == 422

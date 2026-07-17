@@ -17,8 +17,10 @@ from app.graph.node_writer import (
     merged_alias_union,
     render_node,
     render_tombstone,
+    replace_body_token,
     retarget_edges,
     retype_edge,
+    set_occurred_frontmatter,
     upsert_frontmatter_list,
 )
 from app.indexing.frontmatter import parse_node_metadata
@@ -413,3 +415,125 @@ def test_entity_hub_node_omits_interiority_line():
         parse_node_metadata(raw, store_path="person/a.md", fallback_created=CREATED).interiority
         is None
     )
+
+
+# --- Two-tier date edits: token replace + occurred setter (M8.2 · ADR-056 §5/§7) ----------
+
+
+def _dated_doc() -> NodeDocument:
+    return NodeDocument(
+        id="66666666-6666-4666-8666-666666666666",
+        type="memory",
+        title="A trip",
+        body="We left [[t:2025-07-07|7 July 2025]] and it was warm.",
+        created_local=CREATED,
+        source="text",
+        occurred="2025-07-07",
+    )
+
+
+def test_replace_body_token_touches_body_only():
+    raw = render_node(_dated_doc())
+    out, replaced = replace_body_token(
+        raw, "[[t:2025-07-07|7 July 2025]]", "[[t:2025-08|August 2025]]"
+    )
+    assert replaced == 1
+    assert "[[t:2025-08|August 2025]]" in out
+    assert "[[t:2025-07-07" not in out
+    # Frontmatter untouched (occurred still the old value — the setter is a separate concern).
+    assert "occurred: 2025-07-07" in out
+
+
+def test_replace_body_token_not_found_is_verbatim():
+    raw = render_node(_dated_doc())
+    out, replaced = replace_body_token(raw, "[[t:1999-01-01]]", "[[t:2000]]")
+    assert replaced == 0 and out == raw
+
+
+def test_replace_body_token_no_frontmatter_is_noop():
+    out, replaced = replace_body_token("plain text [[t:2025]]", "[[t:2025]]", "[[t:2026]]")
+    assert replaced == 0 and out == "plain text [[t:2025]]"
+
+
+def test_set_occurred_frontmatter_inserts_replaces_and_clears():
+    # A memory with no occurred: inserting sets both lines in order, ahead of `source`.
+    raw = render_node(
+        NodeDocument(
+            id="77777777-7777-4777-8777-777777777777",
+            type="memory",
+            title="Undated",
+            body="something happened",
+            created_local=CREATED,
+            source="text",
+        )
+    )
+    assert "occurred:" not in raw
+    inserted = set_occurred_frontmatter(raw, occurred="2019", occurred_end=None)
+    meta = parse_node_metadata(inserted, store_path="memory/u.md", fallback_created=CREATED)
+    assert meta.occurred_start == date(2019, 1, 1) and meta.occurred_end == date(2019, 12, 31)
+    # occurred sits before source (contract key order).
+    assert inserted.index("occurred: 2019") < inserted.index("source:")
+    # Replacing with a range writes both lines; occurred_end follows occurred.
+    ranged = set_occurred_frontmatter(inserted, occurred="2025-06", occurred_end="2025-08")
+    assert ranged.index("occurred: 2025-06") < ranged.index("occurred_end: 2025-08")
+    rmeta = parse_node_metadata(ranged, store_path="memory/u.md", fallback_created=CREATED)
+    assert rmeta.occurred_start == date(2025, 6, 1) and rmeta.occurred_end == date(2025, 8, 31)
+    # Clearing removes both lines.
+    cleared = set_occurred_frontmatter(ranged, occurred=None, occurred_end=None)
+    assert "occurred:" not in cleared and "occurred_end:" not in cleared
+
+
+def test_writer_set_occurred_atomic(tmp_path: Path):
+    writer = NodeWriter(str(tmp_path))
+    [written] = writer.write_nodes(
+        [
+            NodeDocument(
+                id="88888888-8888-4888-8888-888888888888",
+                type="memory",
+                title="Undated",
+                body="it happened",
+                created_local=CREATED,
+                source="text",
+            )
+        ]
+    )
+    assert writer.set_occurred(written.store_path, occurred="2019", occurred_end=None) is True
+    raw = (tmp_path / Path(*written.store_path.split("/"))).read_text(encoding="utf-8")
+    meta = parse_node_metadata(raw, store_path=written.store_path, fallback_created=CREATED)
+    assert meta.occurred_start == date(2019, 1, 1) and meta.occurred_end == date(2019, 12, 31)
+    assert not list((tmp_path / "memory").glob(".*.tmp"))
+
+
+def test_writer_edit_time_token_updates_event_date(tmp_path: Path):
+    writer = NodeWriter(str(tmp_path))
+    [written] = writer.write_nodes([_dated_doc()])
+    # Editing the event-date token to August: body token + occurred both move.
+    replaced = writer.edit_time_token(
+        written.store_path,
+        old_token="[[t:2025-07-07|7 July 2025]]",
+        new_token="[[t:2025-08|August 2025]]",
+        occurred="2025-08",
+        occurred_end=None,
+        update_occurred=True,
+    )
+    assert replaced == 1
+    raw = (tmp_path / Path(*written.store_path.split("/"))).read_text(encoding="utf-8")
+    assert "[[t:2025-08|August 2025]]" in raw
+    meta = parse_node_metadata(raw, store_path=written.store_path, fallback_created=CREATED)
+    assert meta.occurred_start == date(2025, 8, 1) and meta.occurred_end == date(2025, 8, 31)
+
+
+def test_writer_edit_time_token_missing_token_no_write(tmp_path: Path):
+    writer = NodeWriter(str(tmp_path))
+    [written] = writer.write_nodes([_dated_doc()])
+    replaced = writer.edit_time_token(
+        written.store_path,
+        old_token="[[t:1999]]",
+        new_token="[[t:2000]]",
+        occurred="2000",
+        occurred_end=None,
+        update_occurred=True,
+    )
+    assert replaced == 0
+    raw = (tmp_path / Path(*written.store_path.split("/"))).read_text(encoding="utf-8")
+    assert "occurred: 2025-07-07" in raw  # occurred untouched when the token wasn't found

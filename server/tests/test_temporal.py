@@ -294,6 +294,17 @@ def test_partial_date_floor_ceil():
     assert PartialDate.parse("2025").floor_date() == date(2025, 1, 1)
     assert PartialDate.parse("2025").ceil_date() == date(2025, 12, 31)
     assert PartialDate.parse("2024-02").ceil_date() == date(2024, 2, 29)  # leap
+
+
+def test_resolved_time_frontmatter_iso_helpers():
+    # start_date_iso preserves granularity (bare year stays "2025"); end_date_iso is None unless a
+    # range; a minute-precise start drops its time-of-day for the day-granular occurred field.
+    assert ResolvedTime(PartialDate(2019)).start_date_iso() == "2019"
+    assert ResolvedTime(PartialDate(2019)).end_date_iso() is None
+    ranged = ResolvedTime(PartialDate(2025, 6), PartialDate(2025, 8), label="summer 2025")
+    assert ranged.start_date_iso() == "2025-06" and ranged.end_date_iso() == "2025-08"
+    precise = ResolvedTime(PartialDate(2026, 7, 7, 22, 0))
+    assert precise.start_date_iso() == "2026-07-07"  # time-of-day dropped (occurred day-granular)
     assert PartialDate.parse("2025-02").ceil_date() == date(2025, 2, 28)
     assert PartialDate.parse("2025-07-07").ceil_date() == date(2025, 7, 7)
 
