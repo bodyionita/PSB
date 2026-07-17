@@ -1,35 +1,101 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useState } from 'react';
-import type { ActivityCategory, ActivityFeedItem } from '../../api/types';
+import type { ActivityCategory, ActivityFeedItem, RunChildItem } from '../../api/types';
+import { NodeRefChips } from '../capture/NodeRefChips';
+import { useCapture } from '../capture/useCaptures';
 import { Button } from '../../ui/Button';
 import { Surface } from '../../ui/Surface';
 import { TimeAgo } from '../../ui/TimeAgo';
 import { StatusBadge } from './runStatus';
 import { FAIL_COLOR } from './statusColors';
-import { useActivityFeed, useRemoveConversation, useRun } from './useActivity';
+import { useActivityFeed, useRemoveCapture, useRun } from './useActivity';
 
-// The Feed — "what did my brain do" (06 §3, ADR-053 §4): the merged GET /activity as three
-// categorized tabs (agents/jobs · conversations · manual actions), newest-first keyset infinite
-// scroll. An agent-run / review row expands to its full run detail; a conversation row carries the
-// one-tap remove that folds in the M6 auto-recorded control.
+// The Feed — "what did my brain do" (06 §3, ADR-053 §4; M8.1 ADR-054 §2/§4): the merged GET
+// /activity as three categorized tabs (agents & jobs · captures · manual actions), newest-first
+// keyset infinite scroll. An agent-run row expands to its recursive step subtree
+// (GET /activity/runs/{id}, depth-indented, early→late); a capture row expands to its full detail
+// (GET /captures/{id}: raw text + node chips + source badge) and, for a chat-sourced capture,
+// carries the one-tap Remove that folds in the M6 auto-recorded control.
 
 const KIND_AGENT_RUN = 'agent_run';
-const KIND_CHAT_CAPTURE = 'chat_capture';
+const KIND_CAPTURE = 'capture';
 const KIND_REVIEW_VERDICT = 'review_verdict';
 
 const TABS: { id: ActivityCategory; label: string }[] = [
   { id: 'agents_jobs', label: 'Agents & jobs' },
-  { id: 'conversations', label: 'Conversations' },
+  { id: 'captures', label: 'Captures' },
   { id: 'manual_actions', label: 'Manual actions' },
 ];
 
 function tabEmptyText(category: ActivityCategory): string {
-  if (category === 'conversations') return 'No memories recorded from conversations yet.';
+  if (category === 'captures') return 'No captures yet.';
   if (category === 'manual_actions') return 'No manual actions yet.';
   return 'No scheduled runs yet.';
 }
 
-// --- Expanded run detail (agent_run / review rows) ----------------------------------------------
+// A capture row's `title` is always null server-side (03-api §Activity) — the row headline is
+// derived from its source badge instead. `chat` keeps the pre-M8.1 "Recorded from a conversation"
+// phrasing (the one case with an established, warmer voice); the rest are plain and factual.
+function captureHeadline(source: string | null): string {
+  switch (source) {
+    case 'chat':
+      return 'Recorded from a conversation';
+    case 'voice':
+      return 'Voice capture';
+    case 'text':
+      return 'Text capture';
+    case 'mcp':
+      return 'MCP capture';
+    default:
+      return 'Capture';
+  }
+}
+
+// --- Expanded agent-run detail: status/summary/error + the recursive step subtree --------------
+
+// One node of the recursive `children[]` tree (M8.1 ADR-054 §2), depth-indented — a distiller
+// step's spawned `capture` runs sit one level deeper, and since the tree is genuinely recursive
+// (not client-grouped), any future deeper nesting renders its true depth for free.
+function RunChildRow({ child, depth }: { child: RunChildItem; depth: number }) {
+  return (
+    <div style={{ display: 'grid', gap: 4 }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          flexWrap: 'wrap',
+          paddingLeft: depth * 16,
+        }}
+      >
+        <span aria-hidden style={{ color: 'var(--muted)', fontSize: 11 }}>
+          ↳
+        </span>
+        <StatusBadge status={child.status} />
+        <span style={{ fontSize: 13, fontWeight: 600 }}>{child.name}</span>
+        {child.ts && (
+          <TimeAgo iso={child.ts} style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)' }} />
+        )}
+      </div>
+      {child.summary && (
+        <p
+          style={{
+            margin: 0,
+            paddingLeft: depth * 16 + 19,
+            fontSize: 12,
+            color: 'var(--muted)',
+            lineHeight: 1.4,
+          }}
+        >
+          {child.summary}
+        </p>
+      )}
+      {child.children.map((c) => (
+        <RunChildRow key={c.id} child={c} depth={depth + 1} />
+      ))}
+    </div>
+  );
+}
 
 function RunDetail({ runId }: { runId: string }) {
   const run = useRun(runId);
@@ -88,6 +154,75 @@ function RunDetail({ runId }: { runId: string }) {
           ))}
         </div>
       )}
+      {run.data.children.length > 0 && (
+        <div
+          style={{
+            display: 'grid',
+            gap: 8,
+            paddingTop: 8,
+            borderTop: '1px solid var(--surface-border)',
+          }}
+        >
+          {run.data.children.map((c) => (
+            <RunChildRow key={c.id} child={c} depth={0} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Expanded capture detail: full raw text + node chips + source badge -------------------------
+
+function SourceBadge({ source }: { source: string | null }) {
+  return (
+    <span
+      style={{
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: 0.3,
+        textTransform: 'uppercase',
+        color: 'var(--muted)',
+        border: '1px solid var(--surface-border)',
+        borderRadius: 999,
+        padding: '2px 8px',
+      }}
+    >
+      {source ?? 'web'}
+    </span>
+  );
+}
+
+function CaptureDetail({ captureId }: { captureId: string }) {
+  const capture = useCapture(captureId);
+  if (capture.isLoading)
+    return <span style={{ fontSize: 12, color: 'var(--muted)' }}>Loading…</span>;
+  if (capture.isError || !capture.data)
+    return <span style={{ fontSize: 12, color: FAIL_COLOR }}>Couldn’t load this capture.</span>;
+  const c = capture.data;
+  return (
+    <div style={{ display: 'grid', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <SourceBadge source={c.source ?? c.kind} />
+        <span style={{ fontSize: 11, color: 'var(--muted)' }}>{c.status}</span>
+      </div>
+      {c.raw_text && (
+        <p
+          style={{
+            margin: 0,
+            fontSize: 13,
+            color: 'var(--text)',
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          {c.raw_text}
+        </p>
+      )}
+      <NodeRefChips paths={c.node_paths} refs={c.node_refs} />
+      {c.error && (
+        <p style={{ margin: 0, fontSize: 12, color: FAIL_COLOR }}>{c.error}</p>
+      )}
     </div>
   );
 }
@@ -96,10 +231,10 @@ function RunDetail({ runId }: { runId: string }) {
 
 function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
   const [open, setOpen] = useState(false);
-  const remove = useRemoveConversation();
-  const isChild = item.parent_ref != null;
-  const expandable = item.kind === KIND_AGENT_RUN && item.ref != null;
-  const isConversation = item.kind === KIND_CHAT_CAPTURE;
+  const remove = useRemoveCapture();
+  const isCapture = item.kind === KIND_CAPTURE;
+  const isChatCapture = isCapture && item.source === 'chat';
+  const expandable = (item.kind === KIND_AGENT_RUN && item.ref != null) || isCapture;
 
   return (
     <motion.div
@@ -108,21 +243,21 @@ function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
       transition={{ duration: 0.22, delay: Math.min(index, 8) * 0.03, ease: 'easeOut' }}
       style={{
         padding: 14,
-        marginLeft: isChild ? 18 : 0,
         borderRadius: 'var(--radius)',
         border: '1px solid var(--surface-border)',
-        borderLeft: isChild ? '2px solid var(--accent)' : '1px solid var(--surface-border)',
         display: 'grid',
         gap: 8,
       }}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-        {isChild && <span style={{ color: 'var(--muted)', fontSize: 12 }}>↳ step</span>}
         <span style={{ fontSize: 14, fontWeight: 700 }}>
           {item.kind === KIND_REVIEW_VERDICT
             ? `Reviewed: ${item.title ?? 'item'}`
-            : item.title ?? (isConversation ? 'Recorded from a conversation' : 'Run')}
+            : isCapture
+              ? captureHeadline(item.source)
+              : (item.title ?? 'Run')}
         </span>
+        {isCapture && item.source && <SourceBadge source={item.source} />}
         <TimeAgo
           iso={item.ts}
           style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--muted)' }}
@@ -163,7 +298,7 @@ function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
             {open ? 'Hide details' : 'Details'}
           </button>
         )}
-        {isConversation && (
+        {isChatCapture && (
           <button
             onClick={() => remove.mutate(item.id)}
             disabled={remove.isPending}
@@ -184,14 +319,14 @@ function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
       </div>
 
       <AnimatePresence>
-        {open && expandable && item.ref && (
+        {open && expandable && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
             style={{ overflow: 'hidden', paddingTop: 4 }}
           >
-            <RunDetail runId={item.ref} />
+            {isCapture ? <CaptureDetail captureId={item.id} /> : item.ref && <RunDetail runId={item.ref} />}
           </motion.div>
         )}
       </AnimatePresence>
@@ -232,8 +367,8 @@ function FeedList({ category }: { category: ActivityCategory }) {
   );
 }
 
-export function FeedView() {
-  const [category, setCategory] = useState<ActivityCategory>('agents_jobs');
+export function FeedView({ initialCategory }: { initialCategory?: ActivityCategory } = {}) {
+  const [category, setCategory] = useState<ActivityCategory>(initialCategory ?? 'agents_jobs');
   return (
     <div style={{ display: 'grid', gap: 16 }}>
       <div

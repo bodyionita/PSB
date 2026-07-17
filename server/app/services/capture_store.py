@@ -8,6 +8,7 @@ script, not the CI unit suite.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
@@ -30,6 +31,24 @@ KIND_TEXT = "text"
 KIND_VOICE = "voice"
 
 
+@dataclass(frozen=True)
+class CaptureNodeRef:
+    """One of a capture's resulting nodes, **id-resolved** (M8.1 T4, ADR-054 §5 replan).
+
+    ``CaptureRecord.node_paths`` are graph-store *paths* — projections, not identity
+    (02-data-model §Identity: "paths are projections") — so a web client can't open
+    ``NodePreview`` (``GET /nodes/{id}``, uuid-keyed) from a path alone. This is the read-time
+    ``node_paths -> nodes.id`` join (no migration, no write) that resolves each path to its
+    frontmatter uuid + a title/type hint, so the client can render a clickable ``NodeChip``
+    without a follow-up round-trip. A path with no matching (or since-tombstoned) ``nodes`` row
+    is simply absent here — degrades to the plain path list, never an error."""
+
+    id: str
+    store_path: str
+    type: str | None
+    title: str | None
+
+
 @dataclass
 class CaptureRecord:
     id: str
@@ -38,6 +57,10 @@ class CaptureRecord:
     raw_text: str | None = None
     audio_path: str | None = None
     node_paths: list[str] = field(default_factory=list)
+    # Id-resolved projection of `node_paths` (M8.1 T4, ADR-054 §5 replan) — see `CaptureNodeRef`.
+    # Populated by `get`/`list_recent`'s read-time join; empty on a freshly-created record (no
+    # nodes yet) and never written back to `captures` (derived, not stored).
+    node_refs: list[CaptureNodeRef] = field(default_factory=list)
     follow_up_question: str | None = None
     follow_up_answer: str | None = None
     error: str | None = None
@@ -73,9 +96,14 @@ class CaptureStore(Protocol):
         source_ref: str | None = None,
     ) -> CaptureRecord: ...
 
-    async def get(self, capture_id: str) -> CaptureRecord | None: ...
+    async def get(self, capture_id: str) -> CaptureRecord | None:
+        """A single capture, its ``node_refs`` (M8.1 T4) resolved via the ``node_paths -> nodes.id``
+        read-time join (a path with no live node row is simply omitted)."""
+        ...
 
-    async def list_recent(self, limit: int) -> list[CaptureRecord]: ...
+    async def list_recent(self, limit: int) -> list[CaptureRecord]:
+        """Newest-first, ``node_refs``-resolved like :meth:`get`."""
+        ...
 
     async def list_inbox_materialized(self, *, folder: str, limit: int) -> list[CaptureRecord]:
         """Captures still materialized as an ``inbox/`` fallback — any ``node_paths`` element under
@@ -112,8 +140,43 @@ _COLUMNS = (
     "removed_at"
 )
 
+# The M8.1 T4 read-time `node_paths -> nodes.id` join (ADR-054 §5 replan; no migration, no write —
+# `nodes` is the derived index, `captures.node_paths` stays the store-path projection). A LATERAL
+# subquery per capture row, jsonb-aggregating the resolved refs in `node_paths` order
+# (`array_position`) so the client can render them in the order the organizer wrote them; a path
+# with no live `nodes` row (not yet indexed, or tombstoned) is simply absent, never an error.
+# `jsonb_agg` over zero matching rows returns SQL NULL, decoded to `[]` by `_node_refs`.
+_NODE_REFS_JOIN = """
+    LEFT JOIN LATERAL (
+        SELECT jsonb_agg(
+                 jsonb_build_object('id', n.id, 'store_path', n.store_path,
+                                     'type', n.type, 'title', n.title)
+                 ORDER BY array_position(c.node_paths, n.store_path)
+               ) AS refs
+          FROM nodes n
+         WHERE n.store_path = ANY(c.node_paths)
+    ) node_refs ON true
+"""
 
-def _record(row) -> CaptureRecord:
+
+def _node_refs(raw: object) -> list[CaptureNodeRef]:
+    # asyncpg returns jsonb as text by default; tolerate both text and an already-decoded list
+    # (mirrors `agent_runs._details` / `graph_health`'s jsonb decode convention).
+    if raw is None:
+        return []
+    items = json.loads(raw) if isinstance(raw, str) else raw
+    return [
+        CaptureNodeRef(
+            id=str(item["id"]),
+            store_path=item["store_path"],
+            type=item.get("type"),
+            title=item.get("title"),
+        )
+        for item in items
+    ]
+
+
+def _record(row, *, node_refs: list[CaptureNodeRef] | None = None) -> CaptureRecord:
     return CaptureRecord(
         id=str(row["id"]),
         kind=row["kind"],
@@ -121,6 +184,7 @@ def _record(row) -> CaptureRecord:
         raw_text=row["raw_text"],
         audio_path=row["audio_path"],
         node_paths=list(row["node_paths"] or []),
+        node_refs=node_refs or [],
         follow_up_question=row["follow_up_question"],
         follow_up_answer=row["follow_up_answer"],
         error=row["error"],
@@ -171,15 +235,30 @@ class PgCaptureStore:
 
     async def get(self, capture_id: str) -> CaptureRecord | None:
         async with self._db.acquire() as conn:
-            row = await conn.fetchrow(f"SELECT {_COLUMNS} FROM captures WHERE id = $1", capture_id)
-        return _record(row) if row is not None else None
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_COLUMNS}, node_refs.refs AS node_refs
+                  FROM captures c
+                {_NODE_REFS_JOIN}
+                 WHERE c.id = $1
+                """,
+                capture_id,
+            )
+        return _record(row, node_refs=_node_refs(row["node_refs"])) if row is not None else None
 
     async def list_recent(self, limit: int) -> list[CaptureRecord]:
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT {_COLUMNS} FROM captures ORDER BY created_at DESC LIMIT $1", limit
+                f"""
+                SELECT {_COLUMNS}, node_refs.refs AS node_refs
+                  FROM captures c
+                {_NODE_REFS_JOIN}
+                 ORDER BY c.created_at DESC
+                 LIMIT $1
+                """,
+                limit,
             )
-        return [_record(r) for r in rows]
+        return [_record(r, node_refs=_node_refs(r["node_refs"])) for r in rows]
 
     async def list_inbox_materialized(self, *, folder: str, limit: int) -> list[CaptureRecord]:
         # `EXISTS (unnest … LIKE folder/%)`: any node_path under the inbox folder marks an

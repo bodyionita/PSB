@@ -5,12 +5,14 @@ import { ChatScreen } from './features/chat/ChatScreen';
 import { ReviewScreen } from './features/review/ReviewScreen';
 import { useReview } from './features/review/useReview';
 import { ActivityScreen } from './features/activity/ActivityScreen';
+import { ActivityNavContext } from './features/activity/activityNav';
 import { SettingsScreen } from './features/settings/SettingsScreen';
 import { ExploreScreen } from './features/map/ExploreScreen';
 import { MapNavContext } from './features/map/mapNav';
 import { ReviewNavContext } from './features/review/reviewNav';
 import { NodePreviewNavContext, type NodeHint } from './ui/nodePreviewNav';
 import { NodePreviewDrawer, type PreviewTarget } from './ui/NodePreviewDrawer';
+import type { ActivityCategory } from './api/types';
 
 type TabId = 'capture' | 'explore' | 'chat' | 'review' | 'activity' | 'settings';
 
@@ -20,6 +22,7 @@ interface TabCtx {
   seed: string | null;
   clearSeed: () => void;
   reviewSeed: string | null;
+  activityCategory: ActivityCategory | null;
 }
 
 // `wide` tabs opt out of the shell's 640px reading column to a full-viewport surface (ADR-051 §7 —
@@ -51,7 +54,14 @@ const TABS: Tab[] = [
     icon: '⚖',
     render: ({ reviewSeed }) => <ReviewScreen seed={reviewSeed} />,
   },
-  { id: 'activity', label: 'Activity', icon: '≋', render: () => <ActivityScreen /> },
+  {
+    id: 'activity',
+    label: 'Activity',
+    icon: '≋',
+    render: ({ activityCategory }) => (
+      <ActivityScreen initialCategory={activityCategory ?? undefined} />
+    ),
+  },
   { id: 'settings', label: 'Settings', icon: '⚙', render: () => <SettingsScreen /> },
 ];
 
@@ -63,6 +73,10 @@ export function AppShell() {
   // One-shot seed for the Review tab: a graph-health aging-review offender sets it via
   // `openReviewItem`, the Review screen scrolls-to + highlights it and clears it (ADR-054 §5).
   const [reviewSeed, setReviewSeed] = useState<string | null>(null);
+  // One-shot starting category for the Activity tab's Feed: the Capture tab's Recents "see all"
+  // sets it to 'captures' via `openCaptures` (ADR-054 §4). Cleared on manual nav so a later direct
+  // Activity tap doesn't re-force the Captures sub-tab.
+  const [activityCategory, setActivityCategory] = useState<ActivityCategory | null>(null);
   // The single app-level NodePreview drawer's current target (ADR-054 §5): any NodeChip sets it via
   // `openNode`; the drawer renders it. Null = closed.
   const [previewTarget, setPreviewTarget] = useState<PreviewTarget | null>(null);
@@ -85,6 +99,12 @@ export function AppShell() {
   }, []);
   const reviewNav = useMemo(() => ({ openReviewItem }), [openReviewItem]);
 
+  const openCaptures = useCallback(() => {
+    setActivityCategory('captures');
+    setTab('activity');
+  }, []);
+  const activityNav = useMemo(() => ({ openCaptures }), [openCaptures]);
+
   const openNode = useCallback((nodeId: string, hint?: NodeHint) => {
     setPreviewTarget({ id: nodeId, hint: hint ?? null });
   }, []);
@@ -94,6 +114,7 @@ export function AppShell() {
   return (
     <MapNavContext.Provider value={mapNav}>
     <ReviewNavContext.Provider value={reviewNav}>
+    <ActivityNavContext.Provider value={activityNav}>
     <NodePreviewNavContext.Provider value={nodePreviewNav}>
     <div
       style={{
@@ -121,6 +142,7 @@ export function AppShell() {
             seed: mapSeed,
             clearSeed: () => setMapSeed(null),
             reviewSeed,
+            activityCategory,
           })}
         </motion.div>
       </main>
@@ -147,10 +169,11 @@ export function AppShell() {
           return (
             <button
               key={t.id}
-              // Manual navigation clears any pending review deep-link seed so opening Review directly
-              // never re-highlights a stale item (openReviewItem sets it again via its own path).
+              // Manual navigation clears pending one-shot deep-link seeds so opening Review or
+              // Activity directly never re-applies a stale item (the deep-link paths re-set them).
               onClick={() => {
                 setReviewSeed(null);
+                setActivityCategory(null);
                 setTab(t.id);
               }}
               aria-current={selected ? 'page' : undefined}
@@ -217,6 +240,7 @@ export function AppShell() {
       <NodePreviewDrawer target={previewTarget} onClose={closePreview} onExploreInMap={openInMap} />
     </div>
     </NodePreviewNavContext.Provider>
+    </ActivityNavContext.Provider>
     </ReviewNavContext.Provider>
     </MapNavContext.Provider>
   );

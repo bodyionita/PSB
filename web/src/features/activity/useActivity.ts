@@ -202,12 +202,14 @@ export function useConsolidateVocabApply() {
   });
 }
 
-// --- Conversations one-tap remove (folds in the M6 auto-recorded remove, ADR-053 §4) ------------
+// --- Captures one-tap remove (folds in the M6 auto-recorded remove, ADR-053 §4 / M8.1 ADR-054 §4) -
 
-// A conversation feed row's `id` IS the capture id, so remove targets it directly. On success we
-// invalidate the feed (the row drops via the server's `removed_at` filter) + the chat-scoped
-// auto-recorded list so both views stay in sync.
-export function useRemoveConversation() {
+// A chat-sourced Captures row's `id` IS the capture id, so remove targets it directly (the M6
+// one-tap remove — auto-endorsed chat memories only; 404s on a non-auto-recorded id, same
+// pre-existing semantics as the old Conversations tab). On success we invalidate the feed (the row
+// drops via the server's `removed_at` filter) + the chat-scoped auto-recorded list so both views
+// stay in sync.
+export function useRemoveCapture() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (captureId: string) => api.removeAutoRecorded(captureId),

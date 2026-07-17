@@ -12,7 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from .services.agent_runs import RunChild
-from .services.capture_store import CaptureRecord
+from .services.capture_store import CaptureNodeRef, CaptureRecord
 
 
 # --- Auth ---
@@ -48,6 +48,22 @@ class CaptureAcceptedResponse(BaseModel):
     status: str = "received"
 
 
+class CaptureNodeRefModel(BaseModel):
+    """One of a capture's resulting nodes, **id-resolved** (M8.1 T4, ADR-054 §5 replan): the
+    read-time ``node_paths -> nodes.id`` join, so the web can open a ``NodeChip`` (uuid-keyed
+    ``GET /nodes/{id}``) straight from a capture — ``node_paths`` are store *paths*, not identity
+    (02-data-model §Identity). ``type``/``title`` ride along as the chip's instant-paint hint."""
+
+    id: str
+    store_path: str
+    type: str | None = None
+    title: str | None = None
+
+    @classmethod
+    def from_ref(cls, ref: CaptureNodeRef) -> CaptureNodeRefModel:
+        return cls(id=ref.id, store_path=ref.store_path, type=ref.type, title=ref.title)
+
+
 class CaptureView(BaseModel):
     """Pipeline state for the capture-screen strip / detail poll (03-api.md)."""
 
@@ -56,6 +72,10 @@ class CaptureView(BaseModel):
     status: str
     raw_text: str | None = None
     node_paths: list[str] = Field(default_factory=list)
+    # Id-resolved projection of `node_paths` (M8.1 T4) — see `CaptureNodeRefModel`. A path with no
+    # live `nodes` row (not yet indexed, or tombstoned) is simply absent, never null/error; the
+    # client falls back to the plain `node_paths` list when a path has no matching ref.
+    node_refs: list[CaptureNodeRefModel] = Field(default_factory=list)
     follow_up_question: str | None = None
     follow_up_answer: str | None = None
     error: str | None = None
@@ -74,6 +94,7 @@ class CaptureView(BaseModel):
             status=record.status,
             raw_text=record.raw_text,
             node_paths=list(record.node_paths),
+            node_refs=[CaptureNodeRefModel.from_ref(r) for r in record.node_refs],
             follow_up_question=record.follow_up_question,
             follow_up_answer=record.follow_up_answer,
             error=record.error,

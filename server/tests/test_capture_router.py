@@ -22,7 +22,7 @@ from app.services.capture_pipeline import (
     NotRetryable,
     UnsupportedAudio,
 )
-from app.services.capture_store import KIND_TEXT, RECEIVED, CaptureRecord
+from app.services.capture_store import KIND_TEXT, RECEIVED, CaptureNodeRef, CaptureRecord
 
 PREFIX = "/api/v1"
 
@@ -164,6 +164,47 @@ def test_get_capture_found_and_missing(client_and_pipeline):
     fake.records["a"] = _record("a")
     assert client.get(f"{PREFIX}/captures/a").json()["capture_id"] == "a"
     assert client.get(f"{PREFIX}/captures/missing").status_code == 404
+
+
+def test_get_capture_carries_node_refs(client_and_pipeline):
+    # M8.1 T4 (ADR-054 §5 replan): CaptureView.node_refs is the id-resolved projection of
+    # node_paths — the field the web NodeChip needs (GET /nodes/{id} is uuid-keyed, paths aren't
+    # identity). A path with no resolved ref (not yet indexed / tombstoned) is simply absent.
+    client, fake = client_and_pipeline
+    fake.records["a"] = _record(
+        "a",
+        node_paths=["memory/2026-07-12--a--018f0001.md", "inbox/2026-07-12--b--018f0002.md"],
+        node_refs=[
+            CaptureNodeRef(
+                id="018f0001-0000-0000-0000-000000000001",
+                store_path="memory/2026-07-12--a--018f0001.md",
+                type="memory",
+                title="A calm thought",
+            )
+        ],
+    )
+    body = client.get(f"{PREFIX}/captures/a").json()
+    assert body["node_paths"] == [
+        "memory/2026-07-12--a--018f0001.md",
+        "inbox/2026-07-12--b--018f0002.md",
+    ]
+    assert body["node_refs"] == [
+        {
+            "id": "018f0001-0000-0000-0000-000000000001",
+            "store_path": "memory/2026-07-12--a--018f0001.md",
+            "type": "memory",
+            "title": "A calm thought",
+        }
+    ]
+
+
+def test_list_captures_node_refs_default_empty(client_and_pipeline):
+    # A capture with no node_refs (freshly received, or the fake's default) round-trips an empty
+    # list, never null — the web renders `node_paths` plain in that case.
+    client, fake = client_and_pipeline
+    fake.records["a"] = _record("a")
+    body = client.get(f"{PREFIX}/captures").json()
+    assert body[0]["node_refs"] == []
 
 
 def test_retry_delegates_and_maps_errors(client_and_pipeline):

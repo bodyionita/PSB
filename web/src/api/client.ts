@@ -103,6 +103,9 @@ export const api = {
     return request<CaptureAcceptedResponse>('/capture/voice', { method: 'POST', body: form });
   },
   listCaptures: (limit = 20) => request<CaptureView[]>(`/captures?limit=${limit}`),
+  // Full pipeline state for one capture (03-api.md) — the Activity Captures-tab row expand + any
+  // in-place detail fetch (M8.1, ADR-054 §4): raw text, node_refs, status, source badge.
+  getCapture: (id: string) => request<CaptureView>(`/captures/${encodeURIComponent(id)}`),
   retryCapture: (id: string) =>
     request<CaptureAcceptedResponse>(`/captures/${encodeURIComponent(id)}/retry`, {
       method: 'POST',

@@ -36,12 +36,25 @@ function isSettling(c: CaptureView): boolean {
   return Number.isFinite(updated) && Date.now() - updated < SETTLE_MS;
 }
 
-export function useCaptures() {
+// `limit` (M8.1, ADR-054 §4): the Capture-tab Recents strip shrinks to ~5 with a "see all → Activity"
+// link; the default 20 stays for any caller that still wants the fuller strip.
+export function useCaptures(limit = 20) {
   return useQuery({
-    queryKey: CAPTURES_KEY,
-    queryFn: () => api.listCaptures(20),
+    queryKey: [...CAPTURES_KEY, limit],
+    queryFn: () => api.listCaptures(limit),
     refetchInterval: (query) =>
       query.state.data?.some((c) => isInFlight(c) || isSettling(c)) ? POLL_MS : false,
+  });
+}
+
+// One capture's full detail (GET /captures/{id}) — the Activity Captures-tab row expand (M8.1,
+// ADR-054 §4): the feed row only carries a truncated snippet, so drilling in re-fetches the full
+// raw_text + node_refs + status/source. `id` null ⇒ disabled (not expanded yet).
+export function useCapture(id: string | null) {
+  return useQuery({
+    queryKey: ['captures', 'detail', id],
+    queryFn: () => api.getCapture(id!),
+    enabled: id != null,
   });
 }
 

@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
 import { useState } from 'react';
+import type { ActivityCategory } from '../../api/types';
 import { FeedView } from './FeedView';
 import { OpsView } from './OpsView';
 
@@ -15,7 +16,14 @@ const SUBVIEWS: { id: SubView; label: string }[] = [
   { id: 'ops', label: 'Ops' },
 ];
 
-export function ActivityScreen() {
+// `initialCategory` (M8.1, ADR-054 §4): a cross-tab "see all" deep-link (activityNav's
+// `openCaptures`) lands here already wanting the Captures feed sub-tab open. Read once via the
+// FeedView's `useState` initializer — this screen remounts fresh on every tab visit (AppShell keys
+// the active tab's subtree), so no seed-consumption dance is needed (unlike ReviewScreen's
+// scroll-to-highlight, this is just a starting selection).
+export function ActivityScreen({
+  initialCategory,
+}: { initialCategory?: ActivityCategory } = {}) {
   const [view, setView] = useState<SubView>('feed');
 
   return (
@@ -72,7 +80,7 @@ export function ActivityScreen() {
         </div>
       </div>
 
-      {view === 'feed' ? <FeedView /> : <OpsView />}
+      {view === 'feed' ? <FeedView initialCategory={initialCategory} /> : <OpsView />}
     </div>
   );
 }

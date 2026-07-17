@@ -2,11 +2,16 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useState, type FormEvent } from 'react';
 import type { CaptureStatus, CaptureView } from '../../api/types';
 import { Surface } from '../../ui/Surface';
-import { typeIcon } from '../../ui/nodeTypes';
 import { TimeAgo } from '../../ui/TimeAgo';
+import { useActivityNav } from '../activity/activityNav';
+import { NodeRefChips } from './NodeRefChips';
 import { useCaptures, useRetryCapture, useSubmitFollowUp } from './useCaptures';
 
 // Recent captures strip with live pipeline status (06 §Capture). Polling lives in useCaptures.
+// M8.1 (ADR-054 §4): the strip shrinks to ~5 (RECENTS_LIMIT) with in-place expand (full text,
+// unclamped) + a "see all → Activity" link into the Captures feed tab.
+
+const RECENTS_LIMIT = 5;
 
 type Tone = 'progress' | 'done' | 'fail';
 
@@ -23,18 +28,6 @@ const FAIL_COLOR = '#ff6b6b';
 
 function metaFor(status: CaptureStatus): { label: string; tone: Tone } {
   return STATUS_META[status] ?? { label: status, tone: 'progress' };
-}
-
-// A store path is `<type>/<slug>--<shortid>.md` (an inbox-fallback node lives under `inbox/`).
-// The folder is the node type (for its icon); the display name is the slug without the short-id.
-function pathType(path: string): string {
-  return path.split('/')[0] ?? '';
-}
-
-function nodeName(path: string): string {
-  const parts = path.split('/');
-  const file = (parts[parts.length - 1] ?? path).replace(/\.md$/, '');
-  return file.replace(/--[0-9a-f]+$/i, '');
 }
 
 function StatusPill({ status }: { status: CaptureStatus }) {
@@ -145,12 +138,18 @@ function NudgePrompt({ capture }: { capture: CaptureView }) {
   );
 }
 
+// In-place expand threshold: below this the 3-line clamp never actually truncates anything, so no
+// "Show more" affordance is offered (M8.1, ADR-054 §4 — expand only where there's more to show).
+const EXPAND_THRESHOLD = 180;
+
 function CaptureRow({ capture }: { capture: CaptureView }) {
   const retry = useRetryCapture();
+  const [expanded, setExpanded] = useState(false);
   const isVoice = capture.kind === 'voice';
   const hasText = capture.raw_text != null && capture.raw_text.trim() !== '';
   // Status is conveyed by the pill; the snippet just labels a not-yet-transcribed voice note.
   const snippet = hasText ? capture.raw_text : isVoice ? 'Voice note' : '…';
+  const expandable = hasText && (capture.raw_text as string).length > EXPAND_THRESHOLD;
   const showNudge =
     capture.follow_up_question != null && capture.follow_up_answer == null;
 
@@ -182,41 +181,41 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
             fontSize: 14,
             lineHeight: 1.45,
             color: hasText ? 'var(--text)' : 'var(--muted)',
-            display: '-webkit-box',
-            WebkitLineClamp: 3,
-            WebkitBoxOrient: 'vertical',
-            overflow: 'hidden',
+            whiteSpace: 'pre-wrap',
+            ...(expanded
+              ? {}
+              : {
+                  display: '-webkit-box',
+                  WebkitLineClamp: 3,
+                  WebkitBoxOrient: 'vertical' as const,
+                  overflow: 'hidden',
+                }),
           }}
         >
           {snippet}
         </p>
+        {expandable && (
+          <button
+            type="button"
+            onClick={() => setExpanded((e) => !e)}
+            style={{
+              marginTop: 4,
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--accent)',
+              cursor: 'pointer',
+            }}
+          >
+            {expanded ? 'Show less' : 'Show more'}
+          </button>
+        )}
 
         {capture.node_paths.length > 0 && (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-            {capture.node_paths.map((p) => (
-              <span
-                key={p}
-                title={p}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 5,
-                  fontSize: 11,
-                  color: 'var(--accent)',
-                  background: 'var(--surface)',
-                  border: '1px solid var(--surface-border)',
-                  borderRadius: 999,
-                  padding: '3px 9px',
-                  maxWidth: '100%',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                <span aria-hidden>{typeIcon(pathType(p))}</span>
-                {nodeName(p)}
-              </span>
-            ))}
+          <div style={{ marginTop: 10 }}>
+            <NodeRefChips paths={capture.node_paths} refs={capture.node_refs} />
           </div>
         )}
 
@@ -253,22 +252,58 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
 }
 
 export function RecentCaptures() {
-  const { data, isLoading, isError } = useCaptures();
+  const { data, isLoading, isError } = useCaptures(RECENTS_LIMIT);
+  const activityNav = useActivityNav();
 
   return (
     <section style={{ width: '100%' }}>
-      <h2
+      <div
         style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          justifyContent: 'space-between',
+          gap: 10,
           margin: '0 0 12px',
-          fontSize: 13,
-          fontWeight: 700,
-          letterSpacing: 0.6,
-          textTransform: 'uppercase',
-          color: 'var(--muted)',
         }}
       >
-        Recent
-      </h2>
+        <h2
+          style={{
+            margin: 0,
+            fontSize: 13,
+            fontWeight: 700,
+            letterSpacing: 0.6,
+            textTransform: 'uppercase',
+            color: 'var(--muted)',
+          }}
+        >
+          Recent
+        </h2>
+        {/* "see all → Activity" (M8.1, ADR-054 §4): degrades to an inert label until AppShell wires
+            ActivityNavContext (see the M8.1 T4 report) — mirrors the NodeChip/ReviewOffenderChip
+            no-provider degrade rather than rendering a dead-looking click target. */}
+        {activityNav ? (
+          <button
+            type="button"
+            onClick={() => activityNav.openCaptures()}
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--accent)',
+              cursor: 'pointer',
+            }}
+          >
+            See all →
+          </button>
+        ) : (
+          data &&
+          data.length >= RECENTS_LIMIT && (
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>See all in Activity</span>
+          )
+        )}
+      </div>
 
       {isLoading ? (
         <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>Loading…</p>

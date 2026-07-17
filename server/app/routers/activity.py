@@ -106,7 +106,7 @@ def get_activity_feed_service(request: Request) -> ActivityFeedService:
 @router.get("", response_model=ActivityFeedResponse)
 async def get_activity(
     category: ActivityCategory | None = Query(
-        default=None, description="agents_jobs | conversations | manual_actions; all when omitted"
+        default=None, description="agents_jobs | captures | manual_actions; all when omitted"
     ),
     limit: int = Query(default=FEED_DEFAULT_LIMIT, ge=1),
     before: str | None = Query(default=None, description="opaque keyset cursor from next_before"),

@@ -31,17 +31,36 @@ export type CaptureStatus =
   | 'indexed'
   | 'failed';
 
+// One of a capture's resulting nodes, id-resolved (M8.1 T4, ADR-054 §5 replan): the server's
+// read-time `node_paths -> nodes.id` join. `node_paths` are store *paths*, not identity
+// (02-data-model §Identity: "paths are projections"), so a plain path can't open the uuid-keyed
+// `NodePreview` — this is what lets a capture's node references render as a clickable `NodeChip`.
+// A path with no live node row (not yet indexed, or tombstoned) is simply absent here.
+export interface CaptureNodeRef {
+  id: string;
+  store_path: string;
+  type: string | null;
+  title: string | null;
+}
+
 export interface CaptureView {
   capture_id: string;
   kind: CaptureKind;
   status: CaptureStatus;
   raw_text: string | null;
   node_paths: string[];
+  // Id-resolved projection of `node_paths` (M8.1 T4) — see `CaptureNodeRef`. May be shorter than
+  // `node_paths` (an unresolved path is simply absent); the client falls back to a plain path pill
+  // for those.
+  node_refs: CaptureNodeRef[];
   follow_up_question: string | null;
   follow_up_answer: string | null;
   error: string | null;
   created_at: string | null;
   updated_at: string | null;
+  // The capture's origin (M8.1, ADR-054 §4): `mcp`/`chat`, or null for a web capture (falls back
+  // to `kind` for the source badge).
+  source: string | null;
 }
 
 // 202 body shared by text/voice/retry/follow-up. The real status is polled via GET /captures.
@@ -390,9 +409,22 @@ export interface ReviewBatchResponse {
 // --- Activity (03-api.md §Activity feed, M2 pull-forward) ---
 export type RunStatus = 'running' | 'succeeded' | 'failed' | 'skipped';
 
+// One node of a run's recursive step tree (GET /activity/runs/{id}, M8.1 ADR-054 §2). A pipeline
+// step's own spawned `capture` runs sit one level deeper in `children`; siblings are ordered
+// early→late (server-side, no client sort needed).
+export interface RunChildItem {
+  id: string;
+  name: string;
+  status: RunStatus;
+  ts: string | null;
+  summary: string | null;
+  children: RunChildItem[];
+}
+
 // One agent_runs row (GET /activity/runs/{id}) — the ops console polls this for live run status +
 // `details` counts. `details` is an opaque JSON blob whose shape depends on the agent. `trigger`
-// (M8, ADR-053 §5) is the run's origin (scheduled | manual).
+// (M8, ADR-053 §5) is the run's origin (scheduled | manual). `children` (M8.1, ADR-054 §2) is the
+// recursive step subtree — empty for a leaf run.
 export interface AgentRunResponse {
   id: string;
   agent: string;
@@ -405,17 +437,24 @@ export interface AgentRunResponse {
   details: Record<string, unknown>;
   error: string | null;
   trigger: string;
+  children: RunChildItem[];
 }
 
-// --- Activity feed + ops console (03-api.md §Activity & ops, M8 / ADR-053) ---
+// --- Activity feed + ops console (03-api.md §Activity & ops, M8 / ADR-053; M8.1 ADR-054 §4) ---
 // The three feed categories, by *origin* (a hand-run job → manual_actions via agent_runs.trigger).
-export type ActivityCategory = 'agents_jobs' | 'conversations' | 'manual_actions';
+// `captures` (M8.1, was `conversations`) carries all captures regardless of source, not chat-only.
+export type ActivityCategory = 'agents_jobs' | 'captures' | 'manual_actions';
 
 // One normalized row of the merged GET /activity feed. `kind` discriminates the source entity
-// (agent_run | chat_capture | review_verdict); the specific agent name / review kind rides in
-// `title`. `ref` is the drill-down target (a run id → GET /activity/runs/{id}, a chat-session id, a
-// review id); `parent_ref` links a pipeline step child to its parent run (null otherwise). For a
-// `chat_capture` row `id` is the capture id — the key the Conversations one-tap remove targets.
+// (agent_run | capture | review_verdict — M8.1 renamed `chat_capture` → `capture`); the specific
+// agent name / review kind rides in `title` (a capture row's `title` is always null — its snippet
+// is the raw-text preview). `ref` is the drill-down target (a run id → GET /activity/runs/{id}, a
+// chat-session id, a review id); `parent_ref` is always null on the M8.1 parentless feed (kept on
+// the wire for compatibility, no longer drives rendering — step children live in the run detail's
+// `children[]`). For a `capture` row `id` IS the capture id — the key the Captures one-tap remove
+// targets and `GET /captures/{id}` expand fetches. `status`/`source` (M8.1 §4): `status` is the
+// source row's lifecycle status; `source` is a capture's origin badge
+// (`text`/`voice`/`mcp`/`chat`), null on the non-capture branches.
 export interface ActivityFeedItem {
   id: string;
   category: ActivityCategory;
@@ -425,6 +464,8 @@ export interface ActivityFeedItem {
   snippet: string | null;
   ref: string | null;
   parent_ref: string | null;
+  status: string | null;
+  source: string | null;
 }
 
 // One keyset page (GET /activity). `next_before` is the opaque cursor to pass back as `before=` for

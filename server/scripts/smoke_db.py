@@ -46,7 +46,7 @@ from app.services.agent_runs import (
     child_run_scope,
     trigger_scope,
 )
-from app.services.capture_store import INDEXED, KIND_TEXT, PgCaptureStore
+from app.services.capture_store import INDEXED, KIND_TEXT, RECEIVED, PgCaptureStore
 from app.services.reprocess import PgReprocessStore
 from app.services.review_queue import (
     KIND_DEDUP_PROPOSAL,
@@ -1494,6 +1494,86 @@ async def check_activity_feed_m81(db: Database) -> None:
             await db.pool.execute("DELETE FROM agent_runs WHERE id = ANY($1::uuid[])", opened)
 
 
+async def check_capture_node_refs(db: Database) -> None:
+    """M8.1 T4 (ADR-054 §5 replan): the real ``PgCaptureStore`` ``node_paths -> nodes.id`` LATERAL
+    join — un-fakeable (the join + jsonb_agg + array_position ordering). A capture's node_refs must
+    resolve every live path to its id/type/title, preserve `node_paths` order (not insertion/pk
+    order), and simply omit a path with no matching `nodes` row (never error/null-fill)."""
+    import uuid as _uuid
+
+    print("\n== PgCaptureStore.node_refs read-time join (M8.1 T4 — ADR-054 §5 replan) ==")
+    captures = PgCaptureStore(db)
+    cap_ids: list[str] = []
+    try:
+        # node_paths deliberately lists MEM1 AFTER ALEX so the assertion proves the refs follow
+        # `node_paths` order (array_position), not `nodes` insertion/pk order (ALEX was seeded
+        # first). A trailing unresolvable path (never indexed) must be silently omitted.
+        cap = await captures.create(
+            capture_id=str(_uuid.uuid4()),
+            kind=KIND_TEXT,
+            status=INDEXED,
+            raw_text="a capture whose organizer wrote two nodes",
+        )
+        cap_ids.append(cap.id)
+        await captures.set_node_paths(
+            cap.id,
+            ["smoke::memory/m1.md", "smoke::person/alex.md", "smoke::gone/nowhere.md"],
+        )
+
+        fetched = await captures.get(cap.id)
+        assert fetched is not None
+        check(
+            "node_refs resolves both live paths",
+            {r.id for r in fetched.node_refs} == {MEM1, ALEX},
+            str(fetched.node_refs),
+        )
+        check(
+            "node_refs follows node_paths order (MEM1 before ALEX), not nodes pk order",
+            [r.id for r in fetched.node_refs] == [MEM1, ALEX],
+            str(fetched.node_refs),
+        )
+        check(
+            "each ref carries type/title/store_path",
+            fetched.node_refs[0].type == "memory"
+            and fetched.node_refs[0].title == "Met Alex at the office"
+            and fetched.node_refs[0].store_path == "smoke::memory/m1.md",
+            str(fetched.node_refs[0]),
+        )
+        check(
+            "the unresolvable path is silently omitted (not an error, not a null entry)",
+            len(fetched.node_refs) == 2,
+            str(fetched.node_refs),
+        )
+        check(
+            "node_paths itself is untouched (still all three, refs is a pure projection)",
+            fetched.node_paths
+            == ["smoke::memory/m1.md", "smoke::person/alex.md", "smoke::gone/nowhere.md"],
+            str(fetched.node_paths),
+        )
+
+        listed = await captures.list_recent(50)
+        by_id = {r.id: r for r in listed}
+        check(
+            "list_recent resolves node_refs the same way as get",
+            cap.id in by_id and [r.id for r in by_id[cap.id].node_refs] == [MEM1, ALEX],
+            str(by_id.get(cap.id)),
+        )
+
+        empty = await captures.create(
+            capture_id=str(_uuid.uuid4()), kind=KIND_TEXT, status=RECEIVED
+        )
+        cap_ids.append(empty.id)
+        empty_fetched = await captures.get(empty.id)
+        check(
+            "a capture with no node_paths yet resolves an empty node_refs (jsonb_agg NULL -> [])",
+            empty_fetched is not None and empty_fetched.node_refs == [],
+            str(empty_fetched),
+        )
+    finally:
+        if cap_ids:
+            await db.pool.execute("DELETE FROM captures WHERE id = ANY($1::uuid[])", cap_ids)
+
+
 async def main() -> int:
     # Section headers carry non-cp1252 glyphs (→, §); force UTF-8 so the run completes on a
     # Windows console instead of dying with UnicodeEncodeError mid-way through the checks.
@@ -1897,6 +1977,7 @@ async def main() -> int:
         await check_neighbor_zones(db)
         await check_run_children_tree(db)
         await check_activity_feed_m81(db)
+        await check_capture_node_refs(db)
 
         print(f"\n==== {_passes} passed, {_fails} failed ====")
         return 0 if _fails == 0 else 1
