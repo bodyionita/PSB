@@ -125,6 +125,24 @@ async def test_embed_inputs_carry_search_document_prefix_and_title(tmp_path: Pat
         assert text.startswith("search_document: A bright idea\n\n")
 
 
+async def test_body_date_tokens_expanded_to_absolute_before_embedding(tmp_path: Path):
+    # ADR-056 §4: the indexer expands [[t:…]] tokens to stable absolute language before chunking,
+    # so the vectors (and the FTS tsvector generated off chunks.content) see prose, not token noise.
+    indexer, store, embedder, root = _make_indexer(tmp_path)
+    node = (
+        "---\nid: 018f0002-bbbb\ntype: memory\ntitle: Trip\nplane: Ideas\n---\n"
+        "We went hiking [[t:2025-06/2025-08|summer 2025]] and it was great.\n"
+    )
+    rel = _write(root, "memory/trip--018f0002.md", node)
+
+    await indexer.index_paths([rel])
+
+    embedded = "\n".join(embedder.inputs[0])
+    assert "summer 2025" in embedded and "[[t:" not in embedded
+    stored = _node(store, rel)
+    assert all("[[t:" not in c.content for c in stored.chunks)
+
+
 async def test_unchanged_node_is_skipped_on_reindex(tmp_path: Path):
     indexer, _, embedder, root = _make_indexer(tmp_path)
     rel = _write(root, "memory/idea--018f0001.md", _NODE)

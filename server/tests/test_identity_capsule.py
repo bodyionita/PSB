@@ -54,6 +54,7 @@ def _make(
     hubs=None,
     memories=None,
     insights=None,
+    internal=None,
     reply: str = "The user is a builder who works with Alex and Bob on the brain project.",
     available: bool = True,
     settings: Settings | None = None,
@@ -72,7 +73,9 @@ def _make(
     )
     routing = fake_routing(registry, chain=("conspect-p",))
     capsule = FakeCapsuleStore()
-    sources = FakeCapsuleSourceStore(hubs=hubs, memories=memories, insights=insights)
+    sources = FakeCapsuleSourceStore(
+        hubs=hubs, memories=memories, insights=insights, internal=internal
+    )
     runs = FakeAgentRunStore()
     service = IdentityCapsuleService(
         settings=settings,
@@ -123,6 +126,43 @@ async def test_refresh_distills_and_saves_blob():
     run = runs.runs[list(runs.runs)[-1]]
     assert run.agent == AGENT and run.status == SUCCEEDED
     assert run.details["generated"] is True and run.details["hubs"] == 2
+
+
+async def test_internal_slice_is_counted_and_provenanced():
+    # ADR-055 §3b: recent `internal` nodes are blended as their own slice; the outcome counts them
+    # and the blob records their provenance with kind "internal".
+    service, capsule, sources, provider, runs = _make(
+        hubs=[_hub("h1", "Alex", degree=9)],
+        internal=[_node("f1", "Felt calm after the walk", node_type="memory")],
+    )
+
+    outcome = await service.run_scheduled()
+
+    assert outcome.internal == 1
+    assert sources.limits["internal"] == 10  # identity_capsule_max_internal default
+    kinds = {r["kind"] for r in capsule.saved[0].source_refs}
+    assert "internal" in kinds
+
+
+def test_render_sources_labels_internal_slice_and_temporal_header():
+    from datetime import date, datetime
+
+    from app.identity.prompts import render_capsule_sources
+
+    internal = [
+        RecentNode(
+            node_id="f1",
+            title="Felt calm",
+            type="memory",
+            plane="Personal",
+            excerpt="a quiet afternoon",
+            occurred_start=date(2026, 7, 7),
+            created_at=datetime(2026, 7, 7, 9, 0),
+        )
+    ]
+    block = render_capsule_sources([], [], [], internal, date(2026, 7, 17))
+    assert "inner voice" in block
+    assert "recorded 7 July 2026 (10 days ago) · occurred 7 July 2026" in block
 
 
 async def test_caps_are_honored_from_settings():

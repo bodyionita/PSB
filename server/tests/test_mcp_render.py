@@ -7,6 +7,8 @@ build_context identity-capsule L0.
 
 from __future__ import annotations
 
+from datetime import date
+
 from app.graph.service import ContextNeighbor, NeighborPage, NodeContext
 from app.graph.store import NeighborEdge
 from app.mcp.render import (
@@ -24,6 +26,7 @@ from app.search.store import NodeEdgeView, SearchHit
 
 NID = "11111111-1111-1111-1111-111111111111"
 NID2 = "22222222-2222-2222-2222-222222222222"
+NOW = date(2026, 7, 17)
 
 
 def _hit(**kw) -> SearchHit:
@@ -98,7 +101,7 @@ def _node(**kw) -> NodePreview:
 
 
 def test_search_results_render_ids_and_scores():
-    md = render_search_results("pricing", [_hit()])
+    md = render_search_results("pricing", [_hit()], NOW)
     assert "`" + NID + "`" in md  # id rendered verbatim, labeled
     assert "Pricing call" in md and "score 0.032" in md
     assert "memory, Professional" in md
@@ -106,25 +109,25 @@ def test_search_results_render_ids_and_scores():
 
 
 def test_search_results_empty():
-    md = render_search_results("unicorns", [])
+    md = render_search_results("unicorns", [], NOW)
     assert "No nodes found" in md and "unicorns" in md
 
 
 def test_node_renders_edges_and_caps():
     edges = [_edge(node_id=f"{i:08d}-0000-0000-0000-000000000000") for i in range(25)]
-    md = render_node(_node(edges=edges), edge_cap=20)
+    md = render_node(_node(edges=edges), edge_cap=20, now=NOW)
     assert md.count("→ `involves`") == 20  # capped at 20
     assert "…5 more edge(s)" in md and 'traverse(id="' + NID + '")' in md
     assert "id: `" + NID + "`" in md
 
 
 def test_node_merged_redirect():
-    md = render_node(_node(merged_into=NID2), edge_cap=20)
+    md = render_node(_node(merged_into=NID2), edge_cap=20, now=NOW)
     assert "merged into" in md and NID2 in md
 
 
 def test_node_includes_profile_when_present():
-    md = render_node(_node(profile="Alex is the CFO."), edge_cap=20)
+    md = render_node(_node(profile="Alex is the CFO."), edge_cap=20, now=NOW)
     assert "## Profile" in md and "Alex is the CFO." in md
 
 
@@ -151,7 +154,7 @@ def test_build_context_includes_capsule_and_tree():
         truncated=False,
         identity_capsule="The user runs a startup.",
     )
-    md = render_build_context(ctx, edge_cap=20)
+    md = render_build_context(ctx, edge_cap=20, now=NOW)
     assert "identity capsule" in md and "The user runs a startup." in md
     assert "## Context (depth 1)" in md
     assert "`involves`" in md and NID2 in md
@@ -160,7 +163,7 @@ def test_build_context_includes_capsule_and_tree():
 
 def test_build_context_no_capsule():
     ctx = NodeContext(node=_node(), neighbors=[], depth=0, truncated=False, identity_capsule=None)
-    md = render_build_context(ctx, edge_cap=20)
+    md = render_build_context(ctx, edge_cap=20, now=NOW)
     assert "identity capsule" not in md
     assert "Pricing call" in md
 

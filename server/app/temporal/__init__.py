@@ -25,9 +25,11 @@ from .render import (
     expand_body_for_llm,
     expand_for_index,
     expand_for_llm,
+    format_occurred,
     render_absolute,
     render_body,
     render_relative,
+    temporal_header,
 )
 from .resolver import resolve, resolve_reference
 from .symbolic import (
@@ -75,4 +77,6 @@ __all__ = [
     "expand_for_llm",
     "expand_body_for_index",
     "expand_body_for_llm",
+    "format_occurred",
+    "temporal_header",
 ]

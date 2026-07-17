@@ -26,6 +26,7 @@ from app.temporal import (
     expand_for_index,
     expand_for_llm,
     find_tokens,
+    format_occurred,
     make_token,
     parse_inner,
     parse_symbolic,
@@ -34,6 +35,7 @@ from app.temporal import (
     render_relative,
     resolve,
     resolve_reference,
+    temporal_header,
 )
 
 # A fixed anchor for every anchored test: Friday, 17 July 2026 (its Mon–Sun week is 13–19 July).
@@ -459,6 +461,34 @@ def test_expand_body_for_index_and_llm():
     body = "on [[t:2026-07-07]]."
     assert expand_body_for_index(body) == "on 7 July 2026."
     assert expand_body_for_llm(body, now=date(2026, 7, 17)) == "on 7 July 2026 (10 days ago)."
+
+
+# --- LLM-bound rendering contract: temporal metadata header (ADR-056 §4, M8.2 T3)
+
+
+def test_format_occurred_point_range_and_unknown():
+    assert format_occurred(date(2026, 7, 7), None) == "7 July 2026"
+    assert format_occurred(date(2025, 6, 1), date(2025, 8, 31)) == "1 June 2025 – 31 August 2025"
+    # A degenerate range (end == start) reads as a single point, not "X – X".
+    assert format_occurred(date(2026, 7, 7), date(2026, 7, 7)) == "7 July 2026"
+    assert format_occurred(None, None) == "unknown"
+
+
+def test_temporal_header_recorded_and_occurred():
+    header = temporal_header(
+        recorded_at=datetime(2026, 7, 7, 22, 0),
+        occurred_start=date(2025, 6, 1),
+        occurred_end=date(2025, 8, 31),
+        now=date(2026, 7, 17),
+    )
+    assert header == "recorded 7 July 2026 (10 days ago) · occurred 1 June 2025 – 31 August 2025"
+
+
+def test_temporal_header_omits_missing_recorded_and_unknown_occurred():
+    header = temporal_header(
+        recorded_at=None, occurred_start=None, occurred_end=None, now=date(2026, 7, 17)
+    )
+    assert header == "occurred unknown"
 
 
 def test_body_without_tokens_is_untouched():

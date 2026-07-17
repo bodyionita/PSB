@@ -863,9 +863,17 @@ class FakeRetriever:
         self._down = down
         self.calls: list[dict] = []
 
-    async def search(self, query, *, top_k=None, planes=None, min_score=None) -> list[SearchHit]:
+    async def search(
+        self, query, *, top_k=None, planes=None, min_score=None, interiority_boost=None
+    ) -> list[SearchHit]:
         self.calls.append(
-            {"query": query, "top_k": top_k, "planes": planes, "min_score": min_score}
+            {
+                "query": query,
+                "top_k": top_k,
+                "planes": planes,
+                "min_score": min_score,
+                "interiority_boost": interiority_boost,
+            }
         )
         if self._down:
             raise ProviderUnavailable("embedder down")
@@ -1278,10 +1286,12 @@ class FakeCapsuleSourceStore:
         hubs: list[HubProfile] | None = None,
         memories: list[RecentNode] | None = None,
         insights: list[RecentNode] | None = None,
+        internal: list[RecentNode] | None = None,
     ) -> None:
         self._hubs = hubs or []
         self._memories = memories or []
         self._insights = insights or []
+        self._internal = internal or []
         self.limits: dict[str, int] = {}
 
     async def top_profile_hubs(self, limit: int) -> list[HubProfile]:
@@ -1295,3 +1305,7 @@ class FakeCapsuleSourceStore:
     async def recent_insights(self, limit: int) -> list[RecentNode]:
         self.limits["insights"] = limit
         return self._insights[:limit]
+
+    async def recent_internal(self, limit: int) -> list[RecentNode]:
+        self.limits["internal"] = limit
+        return self._internal[:limit]

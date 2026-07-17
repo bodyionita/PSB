@@ -8,8 +8,11 @@ assert which group ran and with what messages.
 
 from __future__ import annotations
 
+from datetime import date, datetime
+
 import pytest
 
+from app.chat.prompts import render_context
 from app.chat.service import ChatService, ChatSessionNotFound, _clean_title
 from app.chat.store import ROLE_ASSISTANT, ROLE_USER
 from app.config import Settings
@@ -77,6 +80,27 @@ def _make(
 # --- turn 1: raw query, retrieval, cited-only renumber, persistence -----------------------------
 
 
+def test_render_context_ships_temporal_header_and_expands_tokens():
+    # LLM-bound rendering contract (ADR-056 §4): each item carries a recorded·occurred header and
+    # any [[t:…]] token in the snippet is expanded to absolute + a fresh relative hint.
+    hit = _hit("n1", snippet="Signed on [[t:2026-07-07]] after the call.")
+    hit = SearchHit(
+        **{
+            **hit.__dict__,
+            "occurred_start": date(2026, 7, 7),
+            "created_at": datetime(2026, 7, 7, 9, 0),
+        }
+    )
+    block = render_context([hit], now=date(2026, 7, 17))
+    assert "recorded 7 July 2026 (10 days ago) · occurred 7 July 2026" in block
+    assert "Signed on 7 July 2026 (10 days ago) after the call." in block
+    assert "[[t:" not in block  # never shown raw
+
+
+def test_render_context_no_hits():
+    assert "no memories were retrieved" in render_context([], now=date(2026, 7, 17))
+
+
 async def test_turn_one_uses_raw_message_and_persists_both_turns():
     service, store, retriever, providers = _make(
         answer="You raised prices [2] after talking to Ana [1].",
@@ -90,6 +114,7 @@ async def test_turn_one_uses_raw_message_and_persists_both_turns():
     assert providers["conspect-p"].calls == 0
     assert retriever.calls[0]["query"] == "what did I decide about pricing?"
     assert retriever.calls[0]["min_score"] == 0.01  # chat_retrieval_min_score default (MINOR-1)
+    assert retriever.calls[0]["interiority_boost"] == 1.2  # ADR-055 §3a chat-only boost
 
     # Cited-only renumber: [2] first → [1] (n2), [1] second → [2] (n1).
     assert result.answer == "You raised prices [1] after talking to Ana [2]."
