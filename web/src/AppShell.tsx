@@ -6,12 +6,11 @@ import { ChatScreen } from './features/chat/ChatScreen';
 import { ReviewScreen } from './features/review/ReviewScreen';
 import { useReview } from './features/review/useReview';
 import { ActivityScreen } from './features/activity/ActivityScreen';
-import { AdminScreen } from './features/admin/AdminScreen';
 import { SettingsScreen } from './features/settings/SettingsScreen';
 import { MapScreen } from './features/map/MapScreen';
 import { MapNavContext } from './features/map/mapNav';
 
-type TabId = 'capture' | 'search' | 'chat' | 'map' | 'review' | 'activity' | 'admin' | 'settings';
+type TabId = 'capture' | 'search' | 'chat' | 'map' | 'review' | 'activity' | 'settings';
 
 // `wide` tabs opt out of the shell's 640px reading column to a full-viewport surface (ADR-051 §7 —
 // the map is a hero canvas, dead on arrival inside a 640px column).
@@ -36,7 +35,6 @@ const TABS: Tab[] = [
   },
   { id: 'review', label: 'Review', icon: '⚖', render: () => <ReviewScreen /> },
   { id: 'activity', label: 'Activity', icon: '≋', render: () => <ActivityScreen /> },
-  { id: 'admin', label: 'Admin', icon: '⛭', render: () => <AdminScreen /> },
   { id: 'settings', label: 'Settings', icon: '⚙', render: () => <SettingsScreen /> },
 ];
 

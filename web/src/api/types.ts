@@ -390,8 +390,9 @@ export interface ReviewBatchResponse {
 // --- Activity (03-api.md §Activity feed, M2 pull-forward) ---
 export type RunStatus = 'running' | 'succeeded' | 'failed' | 'skipped';
 
-// One agent_runs row (GET /activity/runs/{id}) — the Admin tab polls this for live run status +
-// `details` counts. `details` is an opaque JSON blob whose shape depends on the agent.
+// One agent_runs row (GET /activity/runs/{id}) — the ops console polls this for live run status +
+// `details` counts. `details` is an opaque JSON blob whose shape depends on the agent. `trigger`
+// (M8, ADR-053 §5) is the run's origin (scheduled | manual).
 export interface AgentRunResponse {
   id: string;
   agent: string;
@@ -403,6 +404,88 @@ export interface AgentRunResponse {
   summary: string | null;
   details: Record<string, unknown>;
   error: string | null;
+  trigger: string;
+}
+
+// --- Activity feed + ops console (03-api.md §Activity & ops, M8 / ADR-053) ---
+// The three feed categories, by *origin* (a hand-run job → manual_actions via agent_runs.trigger).
+export type ActivityCategory = 'agents_jobs' | 'conversations' | 'manual_actions';
+
+// One normalized row of the merged GET /activity feed. `kind` discriminates the source entity
+// (agent_run | chat_capture | review_verdict); the specific agent name / review kind rides in
+// `title`. `ref` is the drill-down target (a run id → GET /activity/runs/{id}, a chat-session id, a
+// review id); `parent_ref` links a pipeline step child to its parent run (null otherwise). For a
+// `chat_capture` row `id` is the capture id — the key the Conversations one-tap remove targets.
+export interface ActivityFeedItem {
+  id: string;
+  category: ActivityCategory;
+  kind: string;
+  ts: string;
+  title: string | null;
+  snippet: string | null;
+  ref: string | null;
+  parent_ref: string | null;
+}
+
+// One keyset page (GET /activity). `next_before` is the opaque cursor to pass back as `before=` for
+// the next (older) page; null at the end of the feed.
+export interface ActivityFeedResponse {
+  items: ActivityFeedItem[];
+  next_before: string | null;
+}
+
+// One captured live-log line (GET /activity/runs/{id}/logs). `seq` is the per-run cursor key.
+export interface RunLogLine {
+  seq: number;
+  ts: string | null;
+  level: string;
+  message: string;
+}
+
+// The live log tail (poll, not stream). Lines with `seq > after_seq` in order + a `running` flag.
+// `next_after_seq` is the max `seq` returned — pass it back as `after_seq` next poll (unchanged when
+// no new lines). Client must keep paging until an empty page even after running flips false (the
+// on-finish flush is async + one page is capped — ADR-053 §1/§2).
+export interface RunLogsResponse {
+  run_id: string;
+  running: boolean;
+  logs: RunLogLine[];
+  next_after_seq: number;
+}
+
+// The most recent run for a roster/pipeline entry (null when it has never run).
+export interface LastRun {
+  status: RunStatus;
+  finished_at: string | null;
+  run_id: string;
+}
+
+// One flat-roster row (GET /agents). A job's schedule is *derived* from its 0..N pipeline
+// memberships (many-to-many); `running` is live single-flight status from the JobRunner.
+export interface AgentRosterItem {
+  name: string;
+  category: string;
+  pipelines: string[];
+  running: boolean;
+  last_run: LastRun | null;
+}
+
+// One pipeline (GET /pipelines): cadence, live next-run, ordered step names, last-run. A pipeline
+// run is a parent agent_runs row, each step a child (parent_run_id).
+export interface PipelineItem {
+  name: string;
+  cron: string;
+  next_run: string | null;
+  steps: string[];
+  last_run: LastRun | null;
+}
+
+// POST /admin/reprocess preview ({confirm:false}) — the reusable reprocess-all-from-raw op's dry-run
+// counts (no writes); the confirm ({confirm:true}) returns a RunAcceptedResponse (ADR-042 / P10).
+export interface ReprocessPreview {
+  captures: number;
+  nodes: number;
+  merges: number;
 }
 
 // --- Admin (03-api.md §Agents & admin, M2 / ADR-023/024) ---
@@ -452,4 +535,41 @@ export interface TagMergeItem {
 export interface TagConsolidateProposeResponse {
   plan_id: string;
   merges: TagMergeItem[];
+}
+
+// --- Entity merge (03-api.md §Admin, POST /admin/entities/merge — ADR-030 §5) ---
+// A merge side's identity + alias set. `inbound` lists the edges that point at the loser (retargeted
+// onto the survivor on apply). Two-step: propose (apply:false) → inventory; apply (apply:true) → run.
+export interface MergeSide {
+  id: string;
+  type: string;
+  title: string | null;
+  aliases: string[];
+}
+export interface InboundEdge {
+  src_id: string;
+  src_store_path: string;
+  rel: string;
+}
+export interface EntityMergeProposeResponse {
+  plan_id: string;
+  loser: MergeSide;
+  survivor: MergeSide;
+  inbound_count: number;
+  inbound: InboundEdge[];
+}
+
+// --- Edge vocab consolidation (03-api.md §Admin, POST /admin/vocab/consolidate — ADR-036) ---
+// One edge re-typing: the edge `{rel: from_rel, to}` on node `src_id` becomes `to_rel`. Shared by the
+// propose response + the apply request. Two-step: propose (apply:false) → retypings; apply → run.
+export interface EdgeRetypeItem {
+  src_id: string;
+  to: string;
+  from_rel: string;
+  to_rel: string;
+}
+export interface VocabConsolidateProposeResponse {
+  plan_id: string;
+  rel: string;
+  retypings: EdgeRetypeItem[];
 }

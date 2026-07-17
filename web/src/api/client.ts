@@ -2,9 +2,14 @@
 // (credentials: 'include'); non-2xx becomes a typed ApiError carrying the server `detail`.
 import { API_BASE } from '../config';
 import type {
+  ActivityCategory,
+  ActivityFeedResponse,
+  AgentRosterItem,
   AgentRunResponse,
   AutoRecordedItem,
   BackupResponse,
+  EdgeRetypeItem,
+  EntityMergeProposeResponse,
   CaptureAcceptedResponse,
   CaptureView,
   ChatModelsResponse,
@@ -20,19 +25,23 @@ import type {
   NeighborPageResponse,
   NeighborZonesResponse,
   NodeDetailResponse,
+  PipelineItem,
   PlanesResponse,
   ProvidersResponse,
   RememberResponse,
+  ReprocessPreview,
   ReviewBatchResponse,
   ReviewItemResponse,
   ReviewResolveBody,
   ReviewVerdict,
   RunAcceptedResponse,
+  RunLogsResponse,
   SearchResultItem,
   SettingsResponse,
   TagConsolidateProposeResponse,
   TagMergeItem,
   TypesResponse,
+  VocabConsolidateProposeResponse,
 } from './types';
 
 export class ApiError extends Error {
@@ -185,11 +194,34 @@ export const api = {
       body: JSON.stringify({ review_id: reviewId, verdict }),
     }),
 
-  // --- Activity (03-api.md §Activity feed — run-status poll for the Admin tab) ---
+  // --- Activity feed + ops console (03-api.md §Activity & ops, M8 / ADR-053) ---
+  // The merged categorized feed — one keyset page. `category` narrows to one tab (all when omitted);
+  // `before` is the opaque `next_before` cursor from the prior page.
+  activityFeed: (category?: ActivityCategory, before?: string | null, limit = 50) =>
+    request<ActivityFeedResponse>(
+      `/activity?limit=${limit}` +
+        (category ? `&category=${encodeURIComponent(category)}` : '') +
+        (before ? `&before=${encodeURIComponent(before)}` : ''),
+    ),
   getRun: (id: string) =>
     request<AgentRunResponse>(`/activity/runs/${encodeURIComponent(id)}`),
+  // The live log tail — lines with seq > afterSeq + a `running` flag. Poll while running (and keep
+  // paging past the tail cap until an empty page — ADR-053 §2).
+  getRunLogs: (id: string, afterSeq = 0) =>
+    request<RunLogsResponse>(
+      `/activity/runs/${encodeURIComponent(id)}/logs?after_seq=${afterSeq}`,
+    ),
+  // Ops roster + pipelines (the live scheduler view).
+  listAgents: () => request<AgentRosterItem[]>('/agents'),
+  listPipelines: () => request<PipelineItem[]>('/pipelines'),
+  // Manual triggers (single-flight via the JobRunner): 202 on accept, 409 already-running, 404
+  // unknown, 503 scheduler-off. The run id is discovered via the roster's last_run.run_id.
+  runAgent: (name: string) =>
+    request<{ agent: string }>(`/agents/${encodeURIComponent(name)}/run`, { method: 'POST' }),
+  runPipeline: (name: string) =>
+    request<{ pipeline: string }>(`/pipelines/${encodeURIComponent(name)}/run`, { method: 'POST' }),
 
-  // --- Admin (03-api.md §Agents & admin) ---
+  // --- Admin (03-api.md §Admin) ---
   providers: () => request<ProvidersResponse>('/admin/providers'),
   reindex: () => request<RunAcceptedResponse>('/admin/reindex', { method: 'POST' }),
   backup: () => request<BackupResponse>('/admin/backup', { method: 'POST' }),
@@ -202,5 +234,39 @@ export const api = {
     request<RunAcceptedResponse>('/admin/tags/consolidate', {
       method: 'POST',
       body: JSON.stringify({ apply: true, plan }),
+    }),
+  // reprocess-all-from-raw (ADR-042 / vision P10). Confirm-gated: preview = dry-run counts (no
+  // writes); confirm = the destructive replay, returning the background run id.
+  reprocessPreview: () =>
+    request<ReprocessPreview>('/admin/reprocess', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: false }),
+    }),
+  reprocessConfirm: () =>
+    request<RunAcceptedResponse>('/admin/reprocess', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
+    }),
+  // entities/merge (ADR-030 §5): two-step propose (inbound-edge inventory, no writes) → apply.
+  mergeEntitiesPropose: (loser: string, survivor: string) =>
+    request<EntityMergeProposeResponse>('/admin/entities/merge', {
+      method: 'POST',
+      body: JSON.stringify({ loser, survivor, apply: false }),
+    }),
+  mergeEntitiesApply: (loser: string, survivor: string) =>
+    request<RunAcceptedResponse>('/admin/entities/merge', {
+      method: 'POST',
+      body: JSON.stringify({ loser, survivor, apply: true }),
+    }),
+  // vocab/consolidate (ADR-036): two-step edge retro-consolidation for an approved rel.
+  consolidateVocabPropose: (rel: string) =>
+    request<VocabConsolidateProposeResponse>('/admin/vocab/consolidate', {
+      method: 'POST',
+      body: JSON.stringify({ rel, apply: false }),
+    }),
+  consolidateVocabApply: (rel: string, plan: EdgeRetypeItem[]) =>
+    request<RunAcceptedResponse>('/admin/vocab/consolidate', {
+      method: 'POST',
+      body: JSON.stringify({ rel, apply: true, plan }),
     }),
 };
