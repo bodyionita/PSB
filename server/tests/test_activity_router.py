@@ -7,6 +7,7 @@ Covers the Admin-tab run-status poll: a known run returns status + details count
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -19,6 +20,13 @@ from app.dependencies import (
     require_session,
 )
 from app.routers import activity
+from app.services.activity_feed import (
+    CATEGORY_AGENTS_JOBS,
+    CATEGORY_CONVERSATIONS,
+    CATEGORY_MANUAL_ACTIONS,
+    ActivityFeedService,
+    ActivityRow,
+)
 from app.services.agent_runs import RUNNING, SUCCEEDED, AgentRun
 from app.services.run_logs import RunLogLine
 
@@ -150,4 +158,101 @@ def test_logs_negative_after_seq_422():
     resp = _client(FakeAgentRunStore()).get(
         f"{PREFIX}/activity/runs/{uuid.uuid4()}/logs", params={"after_seq": -1}
     )
+    assert resp.status_code == 422
+
+
+# --- GET /activity — the merged categorized feed (M8, ADR-053 §4/§5) ---------------------------
+
+_FEED_BASE = datetime(2026, 7, 17, 9, 0, 0, tzinfo=UTC)
+
+
+class _FakeFeedStore:
+    """Mirrors PgActivityFeedStore.read: category filter + keyset on (ts, id) + ts/id-desc + limit.
+    Wrapped by a real ActivityFeedService so the router exercises the true cursor logic (no DB)."""
+
+    def __init__(self, rows: list[ActivityRow]) -> None:
+        self._rows = list(rows)
+
+    async def read(self, *, categories, before, limit):
+        rows = [r for r in self._rows if r.category in categories]
+        rows.sort(key=lambda r: (r.ts, r.id), reverse=True)
+        if before is not None:
+            rows = [r for r in rows if (r.ts, r.id) < before]
+        return rows[:limit]
+
+
+def _feed_row(id: str, category: str, *, n: int, parent_ref: str | None = None) -> ActivityRow:
+    return ActivityRow(
+        id=id,
+        category=category,
+        kind="agent_run",
+        ts=_FEED_BASE + timedelta(seconds=n),
+        title=f"title-{id}",
+        snippet=f"snippet-{id}",
+        ref=id,
+        parent_ref=parent_ref,
+    )
+
+
+def _feed_client(rows: list[ActivityRow]) -> TestClient:
+    app = FastAPI()
+    app.include_router(activity.router, prefix=PREFIX)
+    app.dependency_overrides[activity.get_activity_feed_service] = lambda: ActivityFeedService(
+        _FakeFeedStore(rows)
+    )
+    app.dependency_overrides[require_session] = lambda: None  # bypass auth
+    return TestClient(app)
+
+
+def test_feed_returns_normalized_rows_newest_first():
+    rows = [
+        _feed_row("a", CATEGORY_AGENTS_JOBS, n=1),
+        _feed_row("c", CATEGORY_CONVERSATIONS, n=2),
+        _feed_row("m", CATEGORY_MANUAL_ACTIONS, n=3, parent_ref="parent-1"),
+    ]
+    body = _feed_client(rows).get(f"{PREFIX}/activity").json()
+    assert [i["id"] for i in body["items"]] == ["m", "c", "a"]  # ts desc
+    first = body["items"][0]
+    assert set(first) == {"id", "category", "kind", "ts", "title", "snippet", "ref", "parent_ref"}
+    assert first["category"] == CATEGORY_MANUAL_ACTIONS
+    assert first["parent_ref"] == "parent-1"
+    assert body["next_before"] is None  # whole feed fit in one page
+
+
+def test_feed_category_filter():
+    rows = [
+        _feed_row("a", CATEGORY_AGENTS_JOBS, n=1),
+        _feed_row("c", CATEGORY_CONVERSATIONS, n=2),
+        _feed_row("m", CATEGORY_MANUAL_ACTIONS, n=3),
+    ]
+    body = (
+        _feed_client(rows)
+        .get(f"{PREFIX}/activity", params={"category": CATEGORY_CONVERSATIONS})
+        .json()
+    )
+    assert [i["id"] for i in body["items"]] == ["c"]
+
+
+def test_feed_unknown_category_422():
+    resp = _feed_client([]).get(f"{PREFIX}/activity", params={"category": "bogus"})
+    assert resp.status_code == 422
+
+
+def test_feed_keyset_pagination_via_next_before():
+    rows = [_feed_row(f"r{n}", CATEGORY_AGENTS_JOBS, n=n) for n in range(4)]
+    client = _feed_client(rows)
+
+    first = client.get(f"{PREFIX}/activity", params={"limit": 2}).json()
+    assert [i["id"] for i in first["items"]] == ["r3", "r2"]
+    assert first["next_before"]
+
+    second = client.get(
+        f"{PREFIX}/activity", params={"limit": 2, "before": first["next_before"]}
+    ).json()
+    assert [i["id"] for i in second["items"]] == ["r1", "r0"]
+    assert second["next_before"] is None
+
+
+def test_feed_invalid_before_cursor_422():
+    resp = _feed_client([]).get(f"{PREFIX}/activity", params={"before": "!!!not-base64!!!"})
     assert resp.status_code == 422

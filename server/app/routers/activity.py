@@ -1,9 +1,16 @@
 """Activity router (03-api.md §Activity feed).
 
+``GET /activity`` is the **M8** merged, categorized feed (ADR-053 §4/§5): a UNION-of-views
+projection over ``agent_runs`` + ``captures`` + ``review_queue`` (no new events table), each row
+normalized to ``{id, category, kind, ts, title, snippet, ref}`` (+ ``parent_ref`` for pipeline
+parent→child nesting), newest first, **keyset-paginated on ``(ts, id)``** via the opaque ``before=``
+cursor. Category is by *origin* not table — a hand-run job lands under ``manual_actions`` via the
+M8 ``agent_runs.trigger`` column. The projection + cursor logic live in
+:mod:`app.services.activity_feed` (rule 5).
+
 ``GET /activity/runs/{id}`` returns one ``agent_runs`` row — status + ``details`` counts + the
 human-readable summary. Implemented in **M2** (pulled forward from the M4 feed) so the Admin tab
-can poll a reindex / tags-apply run to show its live counts; the merged ``GET /activity`` list
-stays M4/M8.
+can poll a reindex / tags-apply run to show its live counts.
 
 ``GET /activity/runs/{id}/logs`` is the **M8** live log tail (ADR-053 §1/§2): a cursor-paginated
 (`?after_seq=`) read over ``agent_run_logs`` + a ``running`` flag so the client polls ~1s only while
@@ -16,8 +23,10 @@ is unknown.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 
 from ..config import Settings
 from ..dependencies import (
@@ -27,10 +36,89 @@ from ..dependencies import (
     require_session,
 )
 from ..models import AgentRunResponse, RunLogLineModel, RunLogsResponse
+from ..services.activity_feed import (
+    FEED_DEFAULT_LIMIT,
+    ActivityCategory,
+    ActivityFeedService,
+    ActivityRow,
+    InvalidActivityCursor,
+    PgActivityFeedStore,
+)
 from ..services.agent_runs import RUNNING, AgentRunStore
 from ..services.run_logs import RunLogStore
 
 router = APIRouter(prefix="/activity", tags=["activity"], dependencies=[Depends(require_session)])
+
+
+# The feed response models live in the router (not `models.py`) to keep this M8-batch task's edits
+# to files it owns exclusively. They are wire contract only (no ORM), matching `models.py` style.
+class ActivityFeedItem(BaseModel):
+    """One normalized row of the merged feed (03-api §Activity). ``ref`` is the drill-down target
+    (a run id → ``GET /activity/runs/{id}``, a chat-session id → the conversation, a review id);
+    ``parent_ref`` links a pipeline step child to its parent run so the client nests them (null
+    otherwise). ``title``/``snippet`` are null where the source row has none (a running run has no
+    summary yet; a chat capture has no title until organized)."""
+
+    id: str
+    category: str
+    kind: str
+    ts: datetime
+    title: str | None = None
+    snippet: str | None = None
+    ref: str | None = None
+    parent_ref: str | None = None
+
+    @classmethod
+    def from_row(cls, row: ActivityRow) -> ActivityFeedItem:
+        return cls(
+            id=row.id,
+            category=row.category,
+            kind=row.kind,
+            ts=row.ts,
+            title=row.title,
+            snippet=row.snippet,
+            ref=row.ref,
+            parent_ref=row.parent_ref,
+        )
+
+
+class ActivityFeedResponse(BaseModel):
+    """GET /activity — one keyset page. ``next_before`` is the opaque cursor to pass back as
+    ``before=`` for the following (older) page; ``None`` at the end of the feed."""
+
+    items: list[ActivityFeedItem] = Field(default_factory=list)
+    next_before: str | None = None
+
+
+def get_activity_feed_service(request: Request) -> ActivityFeedService:
+    """Build the feed service over the shared DB pool. Constructed per request (the store is a thin
+    stateless asyncpg wrapper) rather than an ``app.state`` singleton, since this M8-batch task adds
+    no ``main.py`` lifespan wiring; the coordinator may later promote it to ``app.state``."""
+    return ActivityFeedService(PgActivityFeedStore(request.app.state.db))
+
+
+@router.get("", response_model=ActivityFeedResponse)
+async def get_activity(
+    category: ActivityCategory | None = Query(
+        default=None, description="agents_jobs | conversations | manual_actions; all when omitted"
+    ),
+    limit: int = Query(default=FEED_DEFAULT_LIMIT, ge=1),
+    before: str | None = Query(default=None, description="opaque keyset cursor from next_before"),
+    service: ActivityFeedService = Depends(get_activity_feed_service),
+) -> ActivityFeedResponse:
+    """The merged categorized activity feed (ADR-053 §4). ``category`` narrows to one tab (unknown
+    value → 422 via the Literal type); ``limit`` is clamped to the service cap; a malformed
+    ``before`` cursor → 422. Newest first, keyset-paginated on ``(ts, id)``."""
+    try:
+        page = await service.feed(category=category, before=before, limit=limit)
+    except InvalidActivityCursor:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid cursor"
+        ) from None
+    return ActivityFeedResponse(
+        items=[ActivityFeedItem.from_row(row) for row in page.items],
+        next_before=page.next_before,
+    )
 
 
 @router.get("/runs/{run_id}", response_model=AgentRunResponse)
