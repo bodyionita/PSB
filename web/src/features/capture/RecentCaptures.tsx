@@ -3,7 +3,7 @@ import { useState, type FormEvent } from 'react';
 import type { CaptureStatus, CaptureView } from '../../api/types';
 import { Surface } from '../../ui/Surface';
 import { typeIcon } from '../../ui/nodeTypes';
-import { relativeTime } from '../../ui/relativeTime';
+import { TimeAgo } from '../../ui/TimeAgo';
 import { useCaptures, useRetryCapture, useSubmitFollowUp } from './useCaptures';
 
 // Recent captures strip with live pipeline status (06 §Capture). Polling lives in useCaptures.
@@ -170,9 +170,10 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
             </span>
             <StatusPill status={capture.status} />
           </div>
-          <span style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
-            {relativeTime(capture.created_at)}
-          </span>
+          <TimeAgo
+            iso={capture.created_at}
+            style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}
+          />
         </div>
 
         <p

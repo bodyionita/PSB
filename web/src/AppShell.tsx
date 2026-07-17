@@ -9,8 +9,19 @@ import { ActivityScreen } from './features/activity/ActivityScreen';
 import { SettingsScreen } from './features/settings/SettingsScreen';
 import { MapScreen } from './features/map/MapScreen';
 import { MapNavContext } from './features/map/mapNav';
+import { ReviewNavContext } from './features/review/reviewNav';
+import { NodePreviewNavContext, type NodeHint } from './ui/nodePreviewNav';
+import { NodePreviewDrawer, type PreviewTarget } from './ui/NodePreviewDrawer';
 
 type TabId = 'capture' | 'search' | 'chat' | 'map' | 'review' | 'activity' | 'settings';
+
+// One-shot seeds carried into the tab that consumes them: `map` centers on `seed`, `review`
+// scrolls-to + highlights `reviewSeed` (ADR-054 §5). Each tab reads only what it needs.
+interface TabCtx {
+  seed: string | null;
+  clearSeed: () => void;
+  reviewSeed: string | null;
+}
 
 // `wide` tabs opt out of the shell's 640px reading column to a full-viewport surface (ADR-051 §7 —
 // the map is a hero canvas, dead on arrival inside a 640px column).
@@ -19,7 +30,7 @@ interface Tab {
   label: string;
   icon: string;
   wide?: boolean;
-  render: (ctx: { seed: string | null; clearSeed: () => void }) => ReactNode;
+  render: (ctx: TabCtx) => ReactNode;
 }
 
 const TABS: Tab[] = [
@@ -33,7 +44,12 @@ const TABS: Tab[] = [
     wide: true,
     render: ({ seed, clearSeed }) => <MapScreen seed={seed} onSeedConsumed={clearSeed} />,
   },
-  { id: 'review', label: 'Review', icon: '⚖', render: () => <ReviewScreen /> },
+  {
+    id: 'review',
+    label: 'Review',
+    icon: '⚖',
+    render: ({ reviewSeed }) => <ReviewScreen seed={reviewSeed} />,
+  },
   { id: 'activity', label: 'Activity', icon: '≋', render: () => <ActivityScreen /> },
   { id: 'settings', label: 'Settings', icon: '⚙', render: () => <SettingsScreen /> },
 ];
@@ -43,6 +59,12 @@ export function AppShell() {
   // One-shot seed for the Map tab: a Search card / NodePreview edge sets it via `openInMap`, the map
   // centers on it and clears it (ADR-051 §8).
   const [mapSeed, setMapSeed] = useState<string | null>(null);
+  // One-shot seed for the Review tab: a graph-health aging-review offender sets it via
+  // `openReviewItem`, the Review screen scrolls-to + highlights it and clears it (ADR-054 §5).
+  const [reviewSeed, setReviewSeed] = useState<string | null>(null);
+  // The single app-level NodePreview drawer's current target (ADR-054 §5): any NodeChip sets it via
+  // `openNode`; the drawer renders it. Null = closed.
+  const [previewTarget, setPreviewTarget] = useState<PreviewTarget | null>(null);
   // `tab` is always a valid TabId, so find never misses; assert to satisfy strict indexing.
   const active = TABS.find((t) => t.id === tab) ?? TABS[0]!;
   // Pending-review count → the nav badge (06 §3b "badge-counted queue"). Shares the ['review',
@@ -50,13 +72,27 @@ export function AppShell() {
   const reviewCount = useReview().data?.length ?? 0;
 
   const openInMap = useCallback((nodeId: string) => {
+    setPreviewTarget(null); // a map hop closes the preview drawer if it was the entry point
     setMapSeed(nodeId);
     setTab('map');
   }, []);
   const mapNav = useMemo(() => ({ openInMap }), [openInMap]);
 
+  const openReviewItem = useCallback((reviewItemId: string) => {
+    setReviewSeed(reviewItemId);
+    setTab('review');
+  }, []);
+  const reviewNav = useMemo(() => ({ openReviewItem }), [openReviewItem]);
+
+  const openNode = useCallback((nodeId: string, hint?: NodeHint) => {
+    setPreviewTarget({ id: nodeId, hint: hint ?? null });
+  }, []);
+  const nodePreviewNav = useMemo(() => ({ openNode }), [openNode]);
+
   return (
     <MapNavContext.Provider value={mapNav}>
+    <ReviewNavContext.Provider value={reviewNav}>
+    <NodePreviewNavContext.Provider value={nodePreviewNav}>
     <div
       style={{
         position: 'relative',
@@ -79,7 +115,11 @@ export function AppShell() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.22, ease: 'easeOut' }}
         >
-          {active.render({ seed: mapSeed, clearSeed: () => setMapSeed(null) })}
+          {active.render({
+            seed: mapSeed,
+            clearSeed: () => setMapSeed(null),
+            reviewSeed,
+          })}
         </motion.div>
       </main>
 
@@ -105,7 +145,12 @@ export function AppShell() {
           return (
             <button
               key={t.id}
-              onClick={() => setTab(t.id)}
+              // Manual navigation clears any pending review deep-link seed so opening Review directly
+              // never re-highlights a stale item (openReviewItem sets it again via its own path).
+              onClick={() => {
+                setReviewSeed(null);
+                setTab(t.id);
+              }}
               aria-current={selected ? 'page' : undefined}
               style={{
                 position: 'relative',
@@ -166,7 +211,15 @@ export function AppShell() {
           );
         })}
       </nav>
+
+      <NodePreviewDrawer
+        target={previewTarget}
+        onClose={() => setPreviewTarget(null)}
+        onExploreInMap={openInMap}
+      />
     </div>
+    </NodePreviewNavContext.Provider>
+    </ReviewNavContext.Provider>
     </MapNavContext.Provider>
   );
 }

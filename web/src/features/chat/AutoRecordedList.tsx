@@ -2,7 +2,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import type { AutoRecordedItem, Salience } from '../../api/types';
 import { Surface } from '../../ui/Surface';
 import { baseName } from '../../ui/nodeDetail';
-import { relativeTime } from '../../ui/relativeTime';
+import { TimeAgo } from '../../ui/TimeAgo';
 import { useAutoRecorded, useRemoveAutoRecorded } from './useChat';
 
 // The chat-scoped "recently auto-recorded" audit list (06 §2, ADR-048 §12): memories the nightly
@@ -67,7 +67,7 @@ function AutoRecordedRow({ item }: { item: AutoRecordedItem }) {
                 </span>
               )}
               {item.salience && <SaliencePill salience={item.salience} />}
-              <span style={{ fontSize: 11, color: 'var(--muted)' }}>{relativeTime(item.created_at)}</span>
+              <TimeAgo iso={item.created_at} style={{ fontSize: 11, color: 'var(--muted)' }} />
             </div>
             <p style={{ margin: '6px 0 0', fontSize: 13, lineHeight: 1.5, color: 'var(--muted)' }}>
               {item.snippet}

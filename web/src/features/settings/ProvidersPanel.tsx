@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 import type { ProviderCapability, ProviderStatusItem } from '../../api/types';
 import { Surface } from '../../ui/Surface';
-import { relativeTime } from '../../ui/relativeTime';
+import { TimeAgo } from '../../ui/TimeAgo';
 import { useProviders } from './useProviders';
 
 // Settings → Providers (06 §4, M4 follow-up / ADR-044): a read-only glance at each model provider's
@@ -87,15 +87,22 @@ function ProviderRow({ provider }: { provider: ProviderStatusItem }) {
           }}
         >
           {provider.last_error.message}
-          <span style={{ color: 'var(--muted)' }}> · {relativeTime(provider.last_error.at)}</span>
+          <span style={{ color: 'var(--muted)' }}>
+            {' · '}
+            <TimeAgo iso={provider.last_error.at} />
+          </span>
         </div>
       )}
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, color: 'var(--muted)' }}>
         <span>
-          {provider.last_success_at
-            ? `Last success ${relativeTime(provider.last_success_at)}`
-            : 'No successful call yet'}
+          {provider.last_success_at ? (
+            <>
+              Last success <TimeAgo iso={provider.last_success_at} />
+            </>
+          ) : (
+            'No successful call yet'
+          )}
         </span>
         {failing && (
           <span style={{ color: WARN_COLOR }}>

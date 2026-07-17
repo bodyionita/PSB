@@ -1,5 +1,5 @@
-import { AnimatePresence, motion } from 'framer-motion';
-import { useMemo, useState } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   EntityCandidate,
   ReviewItemResponse,
@@ -8,9 +8,9 @@ import type {
 } from '../../api/types';
 import { Button } from '../../ui/Button';
 import { Surface } from '../../ui/Surface';
+import { TimeAgo } from '../../ui/TimeAgo';
 import { baseName, useNode } from '../../ui/nodeDetail';
 import { typeIcon, typeLabel } from '../../ui/nodeTypes';
-import { relativeTime } from '../../ui/relativeTime';
 import { useBatchResolve, useResolveReview, useReview, useReviewMaybe } from './useReview';
 
 // Review tab (06 §3b): the queue of decisions the pipeline couldn't make on its own — an
@@ -175,10 +175,37 @@ function SalienceBadge({ salience }: { salience: Salience }) {
 // "parked Nd ago" — the aging indicator on a re-openable maybe (ADR-048 §8), so a stale pile reads
 // as stale at a glance.
 function AgingTag({ item }: { item: ReviewItemResponse }) {
-  const ago = relativeTime(item.created_at);
-  if (!ago) return null;
+  if (!item.created_at) return null;
   return (
-    <span style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>parked {ago}</span>
+    <span style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+      parked <TimeAgo iso={item.created_at} />
+    </span>
+  );
+}
+
+// Wraps a review card so a graph-health aging-review deep-link can scroll to + transiently ring it
+// (ADR-054 §5 replan). `data-review-id` is the scroll target; the ring is reduced-motion-safe.
+function HighlightWrap({
+  id,
+  highlighted,
+  children,
+}: {
+  id: string;
+  highlighted: boolean;
+  children: ReactNode;
+}) {
+  const reduce = useReducedMotion();
+  return (
+    <div
+      data-review-id={id}
+      style={{
+        borderRadius: 'var(--radius)',
+        transition: reduce ? 'none' : 'box-shadow 0.4s ease',
+        boxShadow: highlighted ? '0 0 0 2px var(--accent)' : '0 0 0 0 transparent',
+      }}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -659,15 +686,19 @@ function CountBadge({ n }: { n: number }) {
   );
 }
 
-export function ReviewScreen() {
+export function ReviewScreen({ seed = null }: { seed?: string | null } = {}) {
   const { data, isLoading, isError } = useReview();
   const maybeQuery = useReviewMaybe();
   const batch = useBatchResolve();
+  const reduce = useReducedMotion();
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [selectedKind, setSelectedKind] = useState<string | null>(null);
   const [batchNote, setBatchNote] = useState<string | null>(null);
   const [showParked, setShowParked] = useState(false);
+  // Deep-link highlight target (a graph-health aging-review offender jumped here, ADR-054 §5 replan).
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const handledSeedRef = useRef<string | null>(null);
 
   // Salience-ordered active queue (high first), stable within a rank (server order = newest-first).
   const items = useMemo(() => {
@@ -678,7 +709,36 @@ export function ReviewScreen() {
       .map(({ item }) => item);
   }, [data]);
 
-  const parked = maybeQuery.data ?? [];
+  const parked = useMemo(() => maybeQuery.data ?? [], [maybeQuery.data]);
+
+  // React to a deep-link seed once both lists have loaded: expand Parked if the item lives there,
+  // scroll it into view, and ring it transiently (ADR-054 §5 replan). A stale/resolved id (gone
+  // since the nightly graph-health snapshot) → silent land, no highlight. handledSeedRef makes it
+  // fire once per mount (React Query refetches change items/parked). The seed is NOT consumed here —
+  // consuming during the effect breaks under React 18 StrictMode's double-mount (the throwaway mount
+  // would clear it before the real mount reads it); AppShell instead clears reviewSeed on manual
+  // bottom-nav navigation, and reaching the offender chip always remounts this screen anyway.
+  useEffect(() => {
+    if (!seed) {
+      handledSeedRef.current = null;
+      return;
+    }
+    if (handledSeedRef.current === seed) return;
+    if (isLoading || maybeQuery.isLoading) return; // wait for data; effect re-runs when it lands
+    handledSeedRef.current = seed;
+
+    const inParked = parked.some((i) => i.id === seed);
+    const found = inParked || items.some((i) => i.id === seed);
+    if (!found) return; // stale — silent land on the tab
+    if (inParked) setShowParked(true);
+    setHighlightId(seed);
+    window.setTimeout(() => {
+      document
+        .querySelector(`[data-review-id="${seed}"]`)
+        ?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });
+    }, 260); // let a just-expanded Parked section lay out first
+    window.setTimeout(() => setHighlightId((cur) => (cur === seed ? null : cur)), 2800);
+  }, [seed, isLoading, maybeQuery.isLoading, items, parked, reduce]);
 
   const toggleSelect = (item: ReviewItemResponse) => {
     setBatchNote(null);
@@ -748,12 +808,13 @@ export function ReviewScreen() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <AnimatePresence initial={false}>
             {items.map((item) => (
-              <ReviewCard
-                key={item.id}
-                item={item}
-                selected={selected.has(item.id)}
-                onToggleSelect={() => toggleSelect(item)}
-              />
+              <HighlightWrap key={item.id} id={item.id} highlighted={highlightId === item.id}>
+                <ReviewCard
+                  item={item}
+                  selected={selected.has(item.id)}
+                  onToggleSelect={() => toggleSelect(item)}
+                />
+              </HighlightWrap>
             ))}
           </AnimatePresence>
         </div>
@@ -791,12 +852,13 @@ export function ReviewScreen() {
               >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   {parked.map((item) => (
-                    <ReviewCard
-                      key={item.id}
-                      item={item}
-                      selected={selected.has(item.id)}
-                      onToggleSelect={() => toggleSelect(item)}
-                    />
+                    <HighlightWrap key={item.id} id={item.id} highlighted={highlightId === item.id}>
+                      <ReviewCard
+                        item={item}
+                        selected={selected.has(item.id)}
+                        onToggleSelect={() => toggleSelect(item)}
+                      />
+                    </HighlightWrap>
                   ))}
                 </div>
               </motion.div>

@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion';
 import { Button } from '../../ui/Button';
 import { Surface } from '../../ui/Surface';
+import { TimeAgo } from '../../ui/TimeAgo';
 import { useTheme } from '../../theme/theme-context';
 import { THEME_ORDER, THEMES } from '../../theme/themes';
 import { useLogout, useMe } from '../auth/useAuth';
@@ -57,9 +58,6 @@ function ThemeSwitcher() {
 export function SettingsScreen() {
   const me = useMe();
   const logout = useLogout();
-  const created = me.data?.session_created_at
-    ? new Date(me.data.session_created_at).toLocaleString()
-    : '—';
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
@@ -82,7 +80,13 @@ export function SettingsScreen() {
       <Surface>
         <h2 style={{ margin: '0 0 6px', fontSize: 16 }}>Session</h2>
         <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--muted)' }}>
-          Signed in since {created}.
+          {me.data?.session_created_at ? (
+            <>
+              Session started <TimeAgo iso={me.data.session_created_at} />.
+            </>
+          ) : (
+            'Signed in.'
+          )}
         </p>
         <Button variant="ghost" onClick={() => logout.mutate()} disabled={logout.isPending}>
           {logout.isPending ? 'Signing out…' : 'Sign out'}

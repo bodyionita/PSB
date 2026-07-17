@@ -3,7 +3,7 @@ import { useState } from 'react';
 import type { ActivityCategory, ActivityFeedItem } from '../../api/types';
 import { Button } from '../../ui/Button';
 import { Surface } from '../../ui/Surface';
-import { relativeTime } from '../../ui/relativeTime';
+import { TimeAgo } from '../../ui/TimeAgo';
 import { StatusBadge } from './runStatus';
 import { FAIL_COLOR } from './statusColors';
 import { useActivityFeed, useRemoveConversation, useRun } from './useActivity';
@@ -123,9 +123,10 @@ function FeedRow({ item, index }: { item: ActivityFeedItem; index: number }) {
             ? `Reviewed: ${item.title ?? 'item'}`
             : item.title ?? (isConversation ? 'Recorded from a conversation' : 'Run')}
         </span>
-        <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--muted)' }}>
-          {relativeTime(item.ts)}
-        </span>
+        <TimeAgo
+          iso={item.ts}
+          style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--muted)' }}
+        />
       </div>
 
       {item.snippet && (

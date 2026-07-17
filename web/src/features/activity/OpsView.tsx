@@ -3,7 +3,7 @@ import { ApiError } from '../../api/client';
 import type { AgentRosterItem, LastRun, PipelineItem } from '../../api/types';
 import { Button } from '../../ui/Button';
 import { Surface } from '../../ui/Surface';
-import { relativeTime } from '../../ui/relativeTime';
+import { TimeAgo } from '../../ui/TimeAgo';
 import { AdminOps } from './AdminOps';
 import { GraphHealthCard } from './GraphHealthCard';
 import { RunLogTail } from './RunLogTail';
@@ -33,7 +33,7 @@ function LastRunLine({ last }: { last: LastRun | null }) {
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
       <StatusBadge status={last.status} />
       {last.finished_at && (
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>{relativeTime(last.finished_at)}</span>
+        <TimeAgo iso={last.finished_at} style={{ fontSize: 12, color: 'var(--muted)' }} />
       )}
     </span>
   );
@@ -86,7 +86,11 @@ function PipelineRow({ pipeline }: { pipeline: PipelineItem }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 15, fontWeight: 700 }}>{pipeline.name}</span>
         <Chip>{pipeline.cron}</Chip>
-        {pipeline.next_run && <Chip>next {relativeTime(pipeline.next_run)}</Chip>}
+        {pipeline.next_run && (
+          <Chip>
+            next <TimeAgo iso={pipeline.next_run} />
+          </Chip>
+        )}
         <div style={{ marginLeft: 'auto' }}>
           <Button
             variant="ghost"

@@ -1,5 +1,8 @@
+import type { CSSProperties } from 'react';
+import { NodeChip } from '../../ui/NodeChip';
 import { Surface } from '../../ui/Surface';
-import { relativeTime } from '../../ui/relativeTime';
+import { TimeAgo } from '../../ui/TimeAgo';
+import { useReviewNav } from '../review/reviewNav';
 import { useRun } from './useActivity';
 import { OK_COLOR, WARN_COLOR } from './statusColors';
 
@@ -17,6 +20,46 @@ interface HealthCheck {
   check: string;
   count: number;
   sample: HealthOffender[];
+}
+
+// The one non-node check: its offenders are review-queue ids (not nodes), so they deep-link into the
+// Review tab instead of opening a NodePreview (ADR-054 §5 replan; T1 carve-out). Every other check's
+// offenders carry a `nodes.id` → clickable NodeChip.
+const REVIEW_AGING_CHECK = 'pending-review-aging';
+
+const OFFENDER_PILL: CSSProperties = {
+  fontSize: 11,
+  color: 'var(--muted)',
+  border: '1px solid var(--surface-border)',
+  borderRadius: 999,
+  padding: '2px 8px',
+  maxWidth: '100%',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+};
+
+// A graph-health aging-review offender — a review-queue id, so it jumps into the Review tab and
+// highlights the item (not a node preview). Degrades to a static pill outside a ReviewNav provider.
+function ReviewOffenderChip({ id, label }: { id: string; label: string }) {
+  const nav = useReviewNav();
+  if (!nav) {
+    return (
+      <span title={id} style={OFFENDER_PILL}>
+        {label}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      title={id}
+      onClick={() => nav.openReviewItem(id)}
+      style={{ ...OFFENDER_PILL, cursor: 'pointer', textAlign: 'left' }}
+    >
+      {label}
+    </button>
+  );
 }
 
 // Friendly labels for the stable check keys (graph_health.py). Kept here (presentation) rather than
@@ -83,25 +126,16 @@ function CheckRow({ check }: { check: HealthCheck }) {
       </div>
       {flagged && check.sample.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-          {check.sample.map((o) => (
-            <span
-              key={o.id}
-              title={o.id}
-              style={{
-                fontSize: 11,
-                color: 'var(--muted)',
-                border: '1px solid var(--surface-border)',
-                borderRadius: 999,
-                padding: '2px 8px',
-                maxWidth: '100%',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {o.label}
-            </span>
-          ))}
+          {check.sample.map((o) =>
+            check.check === REVIEW_AGING_CHECK ? (
+              <ReviewOffenderChip key={o.id} id={o.id} label={o.label} />
+            ) : (
+              // Node-check offenders carry a `nodes.id` (uuid) — the label is the node's title (or
+              // store path); the type isn't in the health payload, so the chip falls back to the
+              // neutral glyph and the drawer fills in the real detail on open.
+              <NodeChip key={o.id} nodeId={o.id} type={null} title={o.label} />
+            ),
+          )}
         </div>
       )}
     </div>
@@ -119,7 +153,7 @@ export function GraphHealthCard({ runId }: { runId: string | null }) {
         <h2 style={{ margin: 0, fontSize: 16 }}>Graph health</h2>
         {run.data?.finished_at && (
           <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-            checked {relativeTime(run.data.finished_at)}
+            checked <TimeAgo iso={run.data.finished_at} />
           </span>
         )}
       </div>
