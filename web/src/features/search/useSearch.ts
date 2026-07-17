@@ -1,7 +1,10 @@
-// Server state for the Search tab (TanStack Query, 06 §5). Semantic search over the graph is a
-// read (no LLM): a query is issued only when the user submits one, cached by (query, planes,
-// types) so re-toggling a chip or re-expanding a node doesn't re-hit the server. Node previews
-// load lazily on expand.
+// Server state behind search (TanStack Query, 06 §5; ADR-054 §3 — folded into the Explore tab, but
+// kept here since `usePlanes` is also the canonical plane-vocabulary read reused by Chat's plane
+// chips). Semantic search over the graph is a read (no LLM): a query is issued only when the user
+// submits one, cached by (query, planes, types) so re-expanding a node doesn't re-hit the server.
+// `planes`/`types` stay in the contract for callers that still filter (the API, MCP) — Explore's own
+// search panel just never sets them (filter-chip UI removed, ADR-054 §3). Node previews load lazily
+// on expand.
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import type { SearchResultItem } from '../../api/types';

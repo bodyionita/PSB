@@ -1,13 +1,19 @@
-// The Map tab (06 §3c, ADR-051/052): a re-center neighborhood explorer. One focal node at a time
-// with its 1-hop neighbors in rel-based zones; single-click a neighbor re-centers, breadcrumbs track
-// the path, clicking the focal opens the shared NodePreview drawer, and each zone's overflow pages
-// via a "+N" node. Empty state = an embedded search to start + restore-the-last-centered node.
+// The Explore tab (06 §5, ADR-054 §3): Search + Map merged into one surface. Search-box landing with
+// full result cards (type icon, plane badge, snippet, tags, score) — expand a card for the shared
+// read-only NodePreview; picking a hit (a card's "Explore in map" or one of its edge chips) centers it
+// as a re-center neighborhood constellation, same explorer as before (breadcrumbs, canvas/list toggle,
+// per-zone "show more", restore-last-centered). A Search⇄Map toggle keeps search reachable from
+// anywhere once something's been centered — the results-list flow is first-class, never only an empty
+// state. Filter chips are dropped (the API's `types`/`planes` params stay, just unused here — UI
+// removal only, ADR-054 §3): at personal scale the query does the narrowing and type/plane stay
+// visible passively on each card.
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { api } from '../../api/client';
+import { ApiError, api } from '../../api/client';
 import type { MapNeighborItem, NeighborCenter, SearchResultItem } from '../../api/types';
 import { NodePreview, PlaneBadge } from '../../ui/NodePreview';
 import { baseName } from '../../ui/nodeDetail';
+import { Surface } from '../../ui/Surface';
 import { typeIcon, typeLabel } from '../../ui/nodeTypes';
 import { useSearch, useTypes, type Submitted } from '../search/useSearch';
 import { MapCanvas } from './MapCanvas';
@@ -16,6 +22,7 @@ import { buildGraph, type EffectiveZone, type GraphData, type MapNode } from './
 import { useNeighbors } from './useMap';
 
 type ViewMode = 'canvas' | 'list';
+type ExploreMode = 'search' | 'map';
 
 const LAST_KEY = 'braindan.map.lastCenter';
 const FAIL_COLOR = '#ff6b6b';
@@ -59,23 +66,268 @@ function useSize() {
   return { ref, size };
 }
 
-export function MapScreen({
+function ScorePill({ score }: { score: number }) {
+  return (
+    <span
+      title={`relevance ${score.toFixed(3)}`}
+      style={{ fontSize: 11, color: 'var(--muted)', fontVariantNumeric: 'tabular-nums' }}
+    >
+      {score.toFixed(2)}
+    </span>
+  );
+}
+
+function TagRow({ tags }: { tags: string[] }) {
+  if (tags.length === 0) return null;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+      {tags.map((t) => (
+        <span
+          key={t}
+          style={{
+            fontSize: 11,
+            color: 'var(--muted)',
+            border: '1px solid var(--surface-border)',
+            borderRadius: 999,
+            padding: '2px 8px',
+          }}
+        >
+          #{t}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// A full search result card: type icon, plane badge, snippet, tags, score; expands to the shared
+// read-only NodePreview. "Explore in map" and the preview's edge chips both center it as a
+// constellation via `onCenter` (a same-screen mode switch now that Search and Map are one tab).
+function NodeCard({ hit, onCenter }: { hit: SearchResultItem; onCenter: (nodeId: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const title = hit.title ?? baseName(hit.store_path);
+
+  return (
+    <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+      <Surface padding={16} style={{ borderRadius: 'var(--radius)' }}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          style={{
+            display: 'block',
+            width: '100%',
+            textAlign: 'left',
+            background: 'transparent',
+            border: 'none',
+            padding: 0,
+            color: 'inherit',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+            }}
+          >
+            <span
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                minWidth: 0,
+                fontSize: 16,
+                fontWeight: 700,
+                letterSpacing: -0.2,
+              }}
+            >
+              <span aria-hidden title={typeLabel(hit.type)} style={{ flexShrink: 0 }}>
+                {typeIcon(hit.type)}
+              </span>
+              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {title}
+              </span>
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <PlaneBadge plane={hit.plane} />
+              <ScorePill score={hit.score} />
+            </div>
+          </div>
+
+          <p
+            style={{
+              margin: '10px 0 0',
+              fontSize: 14,
+              lineHeight: 1.5,
+              color: 'var(--muted)',
+              display: '-webkit-box',
+              WebkitLineClamp: open ? 'unset' : 3,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+            }}
+          >
+            {hit.snippet}
+          </p>
+
+          <TagRow tags={hit.tags} />
+        </button>
+
+        <div style={{ marginTop: 12 }}>
+          <button
+            onClick={() => onCenter(hit.node_id)}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 12,
+              fontWeight: 600,
+              padding: '5px 12px',
+              borderRadius: 999,
+              border: '1px solid var(--surface-border)',
+              background: 'transparent',
+              color: 'var(--accent)',
+            }}
+          >
+            <span aria-hidden>✷</span> Explore in map
+          </button>
+        </div>
+
+        <AnimatePresence initial={false}>
+          {open && <NodePreview nodeId={hit.node_id} onOpenNode={onCenter} />}
+        </AnimatePresence>
+      </Surface>
+    </motion.div>
+  );
+}
+
+// The search-box landing: query box → full result cards. No filter chips (ADR-054 §3). A
+// restore-last-centered shortcut mirrors the old Map empty state so that affordance isn't lost.
+function SearchPanel({
+  onCenter,
+  last,
+}: {
+  onCenter: (nodeId: string) => void;
+  last: LastCenter | null;
+}) {
+  const [query, setQuery] = useState('');
+  const [submitted, setSubmitted] = useState<Submitted | null>(null);
+  const results = useSearch(submitted);
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const q = query.trim();
+    if (q) setSubmitted({ query: q, planes: [], types: [] });
+  };
+
+  const embedDown = results.error instanceof ApiError && results.error.status === 503;
+
+  return (
+    <div style={{ display: 'grid', gap: 16 }}>
+      {last && (
+        <button
+          onClick={() => onCenter(last.id)}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            alignSelf: 'start',
+            padding: '8px 14px',
+            borderRadius: 999,
+            border: '1px solid var(--surface-border)',
+            background: 'var(--surface)',
+            color: 'var(--text)',
+          }}
+        >
+          <span aria-hidden>↩</span>
+          <span style={{ color: 'var(--muted)', fontSize: 13 }}>Return to</span>
+          <span aria-hidden>{typeIcon(last.type)}</span>
+          <span style={{ fontWeight: 600 }}>{last.title ?? baseName(last.id)}</span>
+        </button>
+      )}
+
+      <form onSubmit={submit} style={{ display: 'flex', gap: 8 }}>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search your whole brain…"
+          aria-label="Search query"
+          style={{
+            flex: 1,
+            padding: '12px 16px',
+            borderRadius: 'var(--radius)',
+            border: '1px solid var(--surface-border)',
+            background: 'var(--surface)',
+            color: 'var(--text)',
+            fontSize: 15,
+            outline: 'none',
+          }}
+        />
+        <motion.button
+          type="submit"
+          whileTap={{ scale: 0.95 }}
+          disabled={query.trim() === ''}
+          style={{
+            padding: '0 18px',
+            borderRadius: 'var(--radius)',
+            border: 'none',
+            background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+            color: 'var(--on-accent)',
+            fontSize: 15,
+            fontWeight: 600,
+            opacity: query.trim() === '' ? 0.5 : 1,
+          }}
+        >
+          Search
+        </motion.button>
+      </form>
+
+      {submitted && (
+        <section>
+          {results.isLoading ? (
+            <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>Searching…</p>
+          ) : embedDown ? (
+            <p style={{ margin: 0, fontSize: 14, color: FAIL_COLOR }}>
+              Search is warming up (embeddings) — try again in a moment.
+            </p>
+          ) : results.isError ? (
+            <p style={{ margin: 0, fontSize: 14, color: FAIL_COLOR }}>Search failed — try again.</p>
+          ) : !results.data || results.data.length === 0 ? (
+            <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>No matches. Try different words.</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {results.data.map((hit) => (
+                <NodeCard key={hit.node_id} hit={hit} onCenter={onCenter} />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+export function ExploreScreen({
   seed,
   onSeedConsumed,
 }: {
   seed: string | null;
   onSeedConsumed: () => void;
 }) {
+  // Search-box landing by default (ADR-054 §3); a centered node switches to 'map'. The two states
+  // share this one tab now, so switching back to 'search' does not discard the map position — only
+  // the breadcrumb "start over" (home) or a fresh center does.
+  const [mode, setMode] = useState<ExploreMode>('search');
   const [focalId, setFocalId] = useState<string | null>(null);
   const [trail, setTrail] = useState<Crumb[]>([]);
   // Per-zone "show more" appends, reset whenever the focal node changes.
   const [extra, setExtra] = useState<Record<string, { neighbors: MapNeighborItem[]; cursor: string | null }>>({});
   const [drawerOpen, setDrawerOpen] = useState(false);
   // The node we're re-centering to, known from the carried neighbor data before its own neighbors
-  // fetch resolves (ADR-051 §5). Drives the caption chip + current breadcrumb during the placeholder
-  // window so they show the destination immediately (the canvas keeps the old neighborhood until the
-  // swap) instead of the old node appearing twice.
+  // fetch resolves. Drives the caption chip + current breadcrumb during the placeholder window.
   const [navTarget, setNavTarget] = useState<Crumb | null>(null);
+  // Restore-last-centered, refreshed whenever a new center is persisted (not just on mount) so
+  // returning to the search panel always offers the freshest node.
+  const [lastCenter, setLastCenter] = useState<LastCenter | null>(() => readLast());
 
   const neighbors = useNeighbors(focalId);
   const center = neighbors.data?.center ?? null;
@@ -87,22 +339,32 @@ export function MapScreen({
   );
 
   // View mode: canvas (the force sim) or the tappable list (ADR-051 §7). The list is both the
-  // `prefers-reduced-motion` fallback and a manual toggle — so the default follows the OS setting
-  // (the sim doesn't run under reduced motion) until the user explicitly overrides it, after which
-  // their choice sticks. `useReducedMotion` starts null pre-measure, so resolve it here, not in
-  // initial state.
+  // `prefers-reduced-motion` fallback and a manual toggle.
   const reducedMotion = useReducedMotion();
   const [viewOverride, setViewOverride] = useState<ViewMode | null>(null);
   const view: ViewMode = viewOverride ?? (reducedMotion ? 'list' : 'canvas');
 
-  // A new seed (from a Search card / NodePreview edge) centers the map and starts a fresh trail.
+  // A fresh center (search hit, an edge chip, or "return to last") — clears the trail and switches to
+  // map mode (ADR-054 §3 "picking a hit centers it as a constellation").
+  const centerOn = useCallback((nodeId: string) => {
+    setTrail([]);
+    setExtra({});
+    setDrawerOpen(false);
+    setNavTarget({ id: nodeId, title: null, type: null });
+    setFocalId(nodeId);
+    setMode('map');
+  }, []);
+
+  // An external seed (a NodeChip's "Explore in map", or a cross-tab jump from Chat via mapNav) always
+  // wins and forces map mode — mirrors the old Map tab's seed effect.
   useEffect(() => {
     if (seed && seed !== focalId) {
-      setFocalId(seed);
       setTrail([]);
       setExtra({});
       setDrawerOpen(false);
       setNavTarget({ id: seed, title: null, type: null });
+      setFocalId(seed);
+      setMode('map');
     }
     if (seed) onSeedConsumed();
   }, [seed, focalId, onSeedConsumed]);
@@ -112,12 +374,13 @@ export function MapScreen({
     if (center && navTarget && center.node_id === navTarget.id) setNavTarget(null);
   }, [center, navTarget]);
 
-  // Persist the last-centered node so an empty map can offer to restore it.
+  // Persist the last-centered node so the search landing can offer to restore it.
   useEffect(() => {
     if (center) {
-      const last: LastCenter = { id: center.node_id, title: center.title, type: center.type };
+      const next: LastCenter = { id: center.node_id, title: center.title, type: center.type };
+      setLastCenter(next);
       try {
-        localStorage.setItem(LAST_KEY, JSON.stringify(last));
+        localStorage.setItem(LAST_KEY, JSON.stringify(next));
       } catch {
         // storage unavailable — the restore affordance just won't appear
       }
@@ -154,9 +417,16 @@ export function MapScreen({
     setDrawerOpen(false);
   };
 
+  // Full reset — the breadcrumb strip's home icon. Distinct from the search⇄map toggle below (which
+  // only peeks at search without discarding the map position).
+  const startOver = () => {
+    setFocalId(null);
+    setTrail([]);
+    setMode('search');
+  };
+
   // In-flight guard: a fast double-click on a "+N" node/button must not fetch + append the same page
-  // twice. The ref is the synchronous guard; `busyRels` mirrors it into render state so the list's
-  // "Show N more" button can show a loading label (the canvas "+N" node ignores it).
+  // twice. The ref is the synchronous guard; `busyRels` mirrors it into render state.
   const showMoreBusy = useRef<Set<string>>(new Set());
   const [busyRels, setBusyRels] = useState<ReadonlySet<string>>(new Set());
   const showMore = useCallback(
@@ -185,7 +455,7 @@ export function MapScreen({
   );
 
   // Build the force graph, reusing prior node objects for the same focal so a "show more" append
-  // doesn't reset the neighborhood's positions (ADR-051 §5 — pages without refetching the layout).
+  // doesn't reset the neighborhood's positions.
   const prevRef = useRef<{ focalId: string | null; byId: Map<string, MapNode> }>({
     focalId: null,
     byId: new Map(),
@@ -256,18 +526,24 @@ export function MapScreen({
     ? [...trail, { id: displayCenter.node_id, title: displayCenter.title, type: displayCenter.type }]
     : trail;
 
+  // Search remains reachable everywhere in Explore (ADR-054 §3) once something's been centered — the
+  // landing itself already starts in search mode, so the toggle only needs to appear once there's a
+  // map position worth returning to.
+  const showModeToggle = focalId != null;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100dvh - 150px)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, letterSpacing: -0.4 }}>Map</h1>
-        {focalId && (
-          <Breadcrumbs crumbs={crumbs} onGo={goCrumb} onHome={() => setFocalId(null)} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, letterSpacing: -0.4 }}>Explore</h1>
+        {mode === 'map' && focalId && (
+          <Breadcrumbs crumbs={crumbs} onGo={goCrumb} onHome={startOver} />
         )}
-        {center && <ViewToggle view={view} onChange={setViewOverride} />}
+        {mode === 'map' && center && <ViewToggle view={view} onChange={setViewOverride} />}
+        {showModeToggle && <ExploreModeToggle mode={mode} onChange={setMode} />}
       </div>
 
-      {!focalId ? (
-        <EmptyState onPick={(id) => setFocalId(id)} />
+      {mode === 'search' || !focalId ? (
+        <SearchPanel onCenter={centerOn} last={lastCenter} />
       ) : neighbors.isLoading ? (
         <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>Loading neighborhood…</p>
       ) : neighbors.isError ? (
@@ -276,10 +552,10 @@ export function MapScreen({
         <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>
           This node has no neighborhood.{' '}
           <button
-            onClick={() => setFocalId(null)}
+            onClick={startOver}
             style={{ background: 'none', border: 'none', color: 'var(--accent)', padding: 0 }}
           >
-            Start over
+            Search again
           </button>
         </p>
       ) : (
@@ -380,7 +656,7 @@ function Breadcrumbs({
 }) {
   return (
     <nav
-      aria-label="Map path"
+      aria-label="Explore path"
       style={{ display: 'flex', alignItems: 'center', gap: 4, overflowX: 'auto', minWidth: 0, flex: 1 }}
     >
       <button
@@ -475,6 +751,63 @@ function ViewToggle({ view, onChange }: { view: ViewMode; onChange: (v: ViewMode
   );
 }
 
+// Search ⇄ Map toggle (ADR-054 §3) — keeps search one tap away from anywhere in Explore without
+// discarding the current map position (unlike the breadcrumb "start over" home icon).
+function ExploreModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: ExploreMode;
+  onChange: (m: ExploreMode) => void;
+}) {
+  const opts: { id: ExploreMode; icon: string; label: string }[] = [
+    { id: 'search', icon: '⌕', label: 'Search' },
+    { id: 'map', icon: '✷', label: 'Map' },
+  ];
+  return (
+    <div
+      role="group"
+      aria-label="Explore view"
+      style={{
+        display: 'flex',
+        flexShrink: 0,
+        gap: 2,
+        padding: 2,
+        borderRadius: 999,
+        border: '1px solid var(--surface-border)',
+        background: 'var(--surface)',
+      }}
+    >
+      {opts.map((o) => {
+        const active = o.id === mode;
+        return (
+          <button
+            key={o.id}
+            onClick={() => onChange(o.id)}
+            aria-pressed={active}
+            title={o.label}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              padding: '5px 10px',
+              borderRadius: 999,
+              border: 'none',
+              background: active ? 'var(--accent)' : 'transparent',
+              color: active ? 'var(--on-accent)' : 'var(--muted)',
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            <span aria-hidden>{o.icon}</span>
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // Right-side drawer reusing the shared NodePreview (rule 10). Its edge rows re-center the map.
 function MapDrawer({
   nodeId,
@@ -535,125 +868,5 @@ function MapDrawer({
         <NodePreview nodeId={nodeId} onOpenNode={onOpenNode} />
       </motion.div>
     </>
-  );
-}
-
-// Empty state: an embedded search to pick a starting node, plus a restore-last-centered shortcut.
-function EmptyState({ onPick }: { onPick: (nodeId: string) => void }) {
-  const [query, setQuery] = useState('');
-  const [submitted, setSubmitted] = useState<Submitted | null>(null);
-  const results = useSearch(submitted);
-  const last = useMemo(() => readLast(), []);
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    const q = query.trim();
-    if (q) setSubmitted({ query: q, planes: [], types: [] });
-  };
-
-  return (
-    <div style={{ display: 'grid', gap: 16, maxWidth: 640 }}>
-      <p style={{ margin: 0, fontSize: 15, color: 'var(--muted)', lineHeight: 1.5 }}>
-        Search your graph to start exploring — pick a result to drop into its constellation.
-      </p>
-
-      {last && (
-        <button
-          onClick={() => onPick(last.id)}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            alignSelf: 'start',
-            padding: '8px 14px',
-            borderRadius: 999,
-            border: '1px solid var(--surface-border)',
-            background: 'var(--surface)',
-            color: 'var(--text)',
-          }}
-        >
-          <span aria-hidden>↩</span>
-          <span style={{ color: 'var(--muted)', fontSize: 13 }}>Return to</span>
-          <span aria-hidden>{typeIcon(last.type)}</span>
-          <span style={{ fontWeight: 600 }}>{last.title ?? baseName(last.id)}</span>
-        </button>
-      )}
-
-      <form onSubmit={submit} style={{ display: 'flex', gap: 8 }}>
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search your graph…"
-          aria-label="Search to start the map"
-          style={{
-            flex: 1,
-            padding: '12px 16px',
-            borderRadius: 'var(--radius)',
-            border: '1px solid var(--surface-border)',
-            background: 'var(--surface)',
-            color: 'var(--text)',
-            fontSize: 15,
-            outline: 'none',
-          }}
-        />
-        <motion.button
-          type="submit"
-          whileTap={{ scale: 0.95 }}
-          disabled={query.trim() === ''}
-          style={{
-            padding: '0 18px',
-            borderRadius: 'var(--radius)',
-            border: 'none',
-            background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
-            color: 'var(--on-accent)',
-            fontSize: 15,
-            fontWeight: 600,
-            opacity: query.trim() === '' ? 0.5 : 1,
-          }}
-        >
-          Search
-        </motion.button>
-      </form>
-
-      {submitted && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {results.isLoading ? (
-            <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>Searching…</p>
-          ) : results.isError ? (
-            <p style={{ margin: 0, fontSize: 14, color: FAIL_COLOR }}>Search failed — try again.</p>
-          ) : !results.data || results.data.length === 0 ? (
-            <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>No matches.</p>
-          ) : (
-            results.data.map((hit: SearchResultItem) => (
-              <button
-                key={hit.node_id}
-                onClick={() => onPick(hit.node_id)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  textAlign: 'left',
-                  padding: '10px 14px',
-                  borderRadius: 'var(--radius)',
-                  border: '1px solid var(--surface-border)',
-                  background: 'var(--surface)',
-                  color: 'var(--text)',
-                }}
-              >
-                <span aria-hidden style={{ fontSize: 18 }}>
-                  {typeIcon(hit.type)}
-                </span>
-                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
-                  {hit.title ?? baseName(hit.store_path)}
-                </span>
-                <span style={{ marginLeft: 'auto', flexShrink: 0 }}>
-                  <PlaneBadge plane={hit.plane} />
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-      )}
-    </div>
   );
 }

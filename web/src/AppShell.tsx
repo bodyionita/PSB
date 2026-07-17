@@ -1,21 +1,20 @@
 import { motion } from 'framer-motion';
 import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { CaptureScreen } from './features/capture/CaptureScreen';
-import { SearchScreen } from './features/search/SearchScreen';
 import { ChatScreen } from './features/chat/ChatScreen';
 import { ReviewScreen } from './features/review/ReviewScreen';
 import { useReview } from './features/review/useReview';
 import { ActivityScreen } from './features/activity/ActivityScreen';
 import { SettingsScreen } from './features/settings/SettingsScreen';
-import { MapScreen } from './features/map/MapScreen';
+import { ExploreScreen } from './features/map/ExploreScreen';
 import { MapNavContext } from './features/map/mapNav';
 import { ReviewNavContext } from './features/review/reviewNav';
 import { NodePreviewNavContext, type NodeHint } from './ui/nodePreviewNav';
 import { NodePreviewDrawer, type PreviewTarget } from './ui/NodePreviewDrawer';
 
-type TabId = 'capture' | 'search' | 'chat' | 'map' | 'review' | 'activity' | 'settings';
+type TabId = 'capture' | 'explore' | 'chat' | 'review' | 'activity' | 'settings';
 
-// One-shot seeds carried into the tab that consumes them: `map` centers on `seed`, `review`
+// One-shot seeds carried into the tab that consumes them: `explore` centers on `seed`, `review`
 // scrolls-to + highlights `reviewSeed` (ADR-054 §5). Each tab reads only what it needs.
 interface TabCtx {
   seed: string | null;
@@ -33,17 +32,19 @@ interface Tab {
   render: (ctx: TabCtx) => ReactNode;
 }
 
+// Search + Map merged into one "Explore" tab, 7→6 (ADR-054 §3): search-box landing, full result
+// cards, picking a hit centers it as a map constellation; search stays reachable from anywhere in
+// the explorer via its own internal search⇄map toggle.
 const TABS: Tab[] = [
   { id: 'capture', label: 'Capture', icon: '◉', render: () => <CaptureScreen /> },
-  { id: 'search', label: 'Search', icon: '⌕', render: () => <SearchScreen /> },
-  { id: 'chat', label: 'Chat', icon: '✦', render: () => <ChatScreen /> },
   {
-    id: 'map',
-    label: 'Map',
+    id: 'explore',
+    label: 'Explore',
     icon: '✷',
     wide: true,
-    render: ({ seed, clearSeed }) => <MapScreen seed={seed} onSeedConsumed={clearSeed} />,
+    render: ({ seed, clearSeed }) => <ExploreScreen seed={seed} onSeedConsumed={clearSeed} />,
   },
+  { id: 'chat', label: 'Chat', icon: '✦', render: () => <ChatScreen /> },
   {
     id: 'review',
     label: 'Review',
@@ -56,8 +57,8 @@ const TABS: Tab[] = [
 
 export function AppShell() {
   const [tab, setTab] = useState<TabId>('capture');
-  // One-shot seed for the Map tab: a Search card / NodePreview edge sets it via `openInMap`, the map
-  // centers on it and clears it (ADR-051 §8).
+  // One-shot seed for the Explore tab's map mode: a NodePreview edge / drawer sets it via
+  // `openInMap`, Explore centers on it and clears it (ADR-051 §8, folded into Explore at ADR-054 §3).
   const [mapSeed, setMapSeed] = useState<string | null>(null);
   // One-shot seed for the Review tab: a graph-health aging-review offender sets it via
   // `openReviewItem`, the Review screen scrolls-to + highlights it and clears it (ADR-054 §5).
@@ -74,7 +75,7 @@ export function AppShell() {
   const openInMap = useCallback((nodeId: string) => {
     setPreviewTarget(null); // a map hop closes the preview drawer if it was the entry point
     setMapSeed(nodeId);
-    setTab('map');
+    setTab('explore');
   }, []);
   const mapNav = useMemo(() => ({ openInMap }), [openInMap]);
 
