@@ -7,10 +7,11 @@ import type {
   StanceVerdict,
 } from '../../api/types';
 import { Button } from '../../ui/Button';
+import { NodeChip } from '../../ui/NodeChip';
 import { Surface } from '../../ui/Surface';
 import { TimeAgo } from '../../ui/TimeAgo';
 import { baseName, useNode } from '../../ui/nodeDetail';
-import { typeIcon, typeLabel } from '../../ui/nodeTypes';
+import { typeIcon } from '../../ui/nodeTypes';
 import { useBatchResolve, useResolveReview, useReview, useReviewMaybe } from './useReview';
 
 // Review tab (06 §3b): the queue of decisions the pipeline couldn't make on its own — an
@@ -288,38 +289,38 @@ function EntityAmbiguityCard({ item }: { item: ReviewItemResponse }) {
       </p>
       <Excerpt text={item.excerpt} />
 
+      {/* Each candidate is a node reference (an existing entity): a NodeChip peeks at it in the
+          shared NodePreview drawer (ADR-054 §5), while an explicit "Use this" makes the pick — the
+          preview affordance never commits the decision. */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 14 }}>
         {candidates.map((c) => (
-          <button
+          <div
             key={c.id}
-            onClick={() => pick(c.id)}
-            disabled={busy}
             style={{
               display: 'flex',
-              flexDirection: 'column',
-              gap: 4,
-              textAlign: 'left',
+              alignItems: 'center',
+              gap: 10,
               padding: 12,
               borderRadius: 'var(--radius)',
               border: '1px solid var(--surface-border)',
-              background: 'transparent',
-              color: 'var(--text)',
-              cursor: busy ? 'default' : 'pointer',
               opacity: busy ? 0.6 : 1,
             }}
           >
-            <span style={{ fontSize: 14, fontWeight: 600 }}>
-              {c.name ?? c.id}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0, flex: 1 }}>
+              <NodeChip nodeId={c.id} type={mention.type} title={c.name ?? c.id} />
               {c.disambig && (
-                <span style={{ fontWeight: 400, color: 'var(--muted)' }}> — {c.disambig}</span>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>{c.disambig}</span>
               )}
-            </span>
-            {c.aliases.length > 0 && (
-              <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                also known as {c.aliases.join(', ')}
-              </span>
-            )}
-          </button>
+              {c.aliases.length > 0 && (
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                  also known as {c.aliases.join(', ')}
+                </span>
+              )}
+            </div>
+            <Button onClick={() => pick(c.id)} disabled={busy} style={{ flexShrink: 0 }}>
+              Use this
+            </Button>
+          </div>
         ))}
       </div>
 
@@ -491,14 +492,13 @@ function DedupNodeRow({
         style={{ marginTop: 3, accentColor: 'var(--accent)', flexShrink: 0 }}
       />
       <span style={{ minWidth: 0 }}>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span aria-hidden title={typeLabel(data?.type)}>{typeIcon(data?.type)}</span>
-          <span style={{ fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {title}
-          </span>
-        </span>
+        {/* The node's title is a NodeChip (ADR-054 §5) — tap it to peek at the node in the shared
+            NodePreview drawer; the radio/snippet still pick this side as the merge survivor. */}
+        <NodeChip nodeId={nodeId} type={data?.type ?? null} title={title} />
         {isLoading ? (
-          <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>Loading node…</span>
+          <span style={{ display: 'block', marginTop: 4, fontSize: 12.5, color: 'var(--muted)' }}>
+            Loading node…
+          </span>
         ) : (
           snippet && (
             <span style={{ display: 'block', marginTop: 4, fontSize: 12.5, lineHeight: 1.5, color: 'var(--muted)' }}>
