@@ -33,6 +33,7 @@ export function TimeAgo({ iso, style }: { iso: string | null; style?: CSSPropert
   }, [open]);
 
   if (!iso) return null;
+  const phrase = relativeTime(iso);
   const exact = exactTime(iso);
 
   return (
@@ -40,11 +41,17 @@ export function TimeAgo({ iso, style }: { iso: string | null; style?: CSSPropert
       <span
         role="button"
         tabIndex={0}
-        aria-label={exact}
-        // Mouse enter/leave drive the desktop hover; they don't fire on a touch tap, so mobile relies
-        // on the click toggle below (no double-fire).
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
+        aria-label={`${phrase}, ${exact}`}
+        // Hover (desktop) via pointer events GATED to a mouse pointer: on touch, the synthetic
+        // pointerenter that precedes a tap's click would otherwise open-then-close on the first tap
+        // (iOS Safari) and show nothing — the exact failure ADR-054 §1's custom tooltip must avoid.
+        // Touch/pen taps fall through to the click toggle only.
+        onPointerEnter={(e) => {
+          if (e.pointerType === 'mouse') setOpen(true);
+        }}
+        onPointerLeave={(e) => {
+          if (e.pointerType === 'mouse') setOpen(false);
+        }}
         onClick={(e) => {
           e.stopPropagation();
           setOpen((v) => !v);
@@ -58,7 +65,7 @@ export function TimeAgo({ iso, style }: { iso: string | null; style?: CSSPropert
         }}
         style={{ cursor: 'help' }}
       >
-        {relativeTime(iso)}
+        {phrase}
       </span>
       <AnimatePresence>
         {open && (

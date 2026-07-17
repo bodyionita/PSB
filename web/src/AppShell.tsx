@@ -88,6 +88,7 @@ export function AppShell() {
     setPreviewTarget({ id: nodeId, hint: hint ?? null });
   }, []);
   const nodePreviewNav = useMemo(() => ({ openNode }), [openNode]);
+  const closePreview = useCallback(() => setPreviewTarget(null), []);
 
   return (
     <MapNavContext.Provider value={mapNav}>
@@ -212,11 +213,7 @@ export function AppShell() {
         })}
       </nav>
 
-      <NodePreviewDrawer
-        target={previewTarget}
-        onClose={() => setPreviewTarget(null)}
-        onExploreInMap={openInMap}
-      />
+      <NodePreviewDrawer target={previewTarget} onClose={closePreview} onExploreInMap={openInMap} />
     </div>
     </NodePreviewNavContext.Provider>
     </ReviewNavContext.Provider>
