@@ -764,3 +764,79 @@ async def test_follow_up_guard_when_already_answered(tmp_path: Path):
     store.records["y"].follow_up_answer = "already"
     with pytest.raises(FollowUpNotPending):
         await pipeline.submit_follow_up("y", "again")
+
+
+async def test_inner_voice_extraction_links_event_to_internal_node(tmp_path: Path):
+    # ADR-055 §2 + ADR-056: a mixed capture organizes into an EXTERNAL event node + an INTERNAL
+    # feeling node, linked by an event `led_to` internal edge; the event's symbolic time_ref sets
+    # `occurred` and its phrase becomes a body token — all against the STORED anchor (2026-07-12).
+    seen_system: list[str] = []
+
+    def responder(messages):
+        system = messages[0].content
+        if "organize a person's raw capture" in system:
+            seen_system.append(system)
+            return json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "title": "Walk",
+                            "type": "memory",
+                            "plane": "Personal",
+                            "planes": ["Personal"],
+                            "tags": ["walk"],
+                            "body": "Walked with D. 10 days ago.",
+                            "interiority": "external",
+                            "time_refs": [
+                                {
+                                    "phrase": "10 days ago",
+                                    "kind": "relative",
+                                    "unit": "day",
+                                    "offset": -10,
+                                    "event": True,
+                                }
+                            ],
+                            "entities": [],
+                        },
+                        {
+                            "title": "Ease",
+                            "type": "memory",
+                            "plane": "Personal",
+                            "planes": ["Personal"],
+                            "tags": ["calm"],
+                            "body": "It felt easy, I have missed this.",
+                            "interiority": "internal",
+                            "arose_from": 0,
+                            "entities": [],
+                        },
+                    ]
+                }
+            )
+        return "What made it feel easy?"
+
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, store, _, _, root = _make_pipeline(tmp_path, chat=chat)
+    cid = await pipeline.create_text_capture("Walked with D., felt easy.", created_at=CREATED)
+    await pipeline.drain()
+
+    # The stored anchor was injected into the organizer prompt (ADR-056 §1).
+    assert "recorded on" in seen_system[0]
+
+    rec = store.records[cid]
+    metas: dict[str, object] = {}
+    raws: dict[str, str] = {}
+    for p in rec.node_paths:
+        raw = (root / p).read_text(encoding="utf-8")
+        meta = parse_node_metadata(raw, store_path=p, fallback_created=CREATED)
+        metas[meta.title] = meta
+        raws[meta.title] = raw
+
+    walk, ease = metas["Walk"], metas["Ease"]
+    # Event node: external, occurred = anchor − 10 days = 2026-07-02, phrase → token in the body.
+    assert walk.interiority == "external"
+    assert walk.occurred_start.isoformat() == "2026-07-02"
+    assert "[[t:2026-07-02]]" in raws["Walk"]
+    # Feeling node: internal.
+    assert ease.interiority == "internal"
+    # The inner-voice edge: event `led_to` the internal node, by its id (Option A — no new vocab).
+    assert ("led_to", ease.id) in [(e.rel, e.to) for e in walk.edges]

@@ -207,6 +207,7 @@ class Indexer:
                 disambig=meta.disambig,
                 occurred_start=meta.occurred_start,
                 occurred_end=meta.occurred_end,
+                interiority=meta.interiority,
                 organizer_version=meta.organizer_version,
                 merged_into=meta.merged_into,
                 source=meta.source,

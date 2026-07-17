@@ -370,3 +370,46 @@ def test_writer_merge_methods_atomic(tmp_path: Path):
         == "survivor-2"
     )
     assert not list((tmp_path / "person").glob(".*.tmp"))
+
+
+# --- interiority + occurred_end round-trip (M8.2 · ADR-055/056) --------------------------
+
+
+def test_content_node_renders_interiority_and_occurred_range_and_parses_back():
+    doc = NodeDocument(
+        id="22222222-2222-4222-8222-222222222222",
+        type="memory",
+        title="Summer ease",
+        body="It felt easy [[t:2025-06/2025-08|summer 2025]].",
+        created_local=CREATED,
+        source="text",
+        occurred="2025-06",
+        occurred_end="2025-08",
+        interiority="internal",
+    )
+    raw = render_node(doc)
+    assert "interiority: internal" in raw
+    meta = parse_node_metadata(raw, store_path="memory/x.md", fallback_created=CREATED)
+    assert meta.interiority == "internal"
+    # occurred "2025-06" + explicit occurred_end "2025-08" → the summer day-range.
+    assert meta.occurred_start == date(2025, 6, 1)
+    assert meta.occurred_end == date(2025, 8, 31)
+
+
+def test_entity_hub_node_omits_interiority_line():
+    # A hub carries interiority=None (the dimension is a property of content, not a thin hub).
+    hub = NodeDocument(
+        id="33333333-3333-4333-8333-333333333333",
+        type="person",
+        title="Alex",
+        body="(profile is derived)",
+        created_local=CREATED,
+        source="text",
+        aliases=("alex",),
+    )
+    raw = render_node(hub)
+    assert "interiority:" not in raw
+    assert (
+        parse_node_metadata(raw, store_path="person/a.md", fallback_created=CREATED).interiority
+        is None
+    )

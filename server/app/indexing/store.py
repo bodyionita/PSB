@@ -76,6 +76,7 @@ class NodeUpsert:
     disambig: str | None = None
     occurred_start: date | None = None
     occurred_end: date | None = None
+    interiority: str | None = None
     organizer_version: str | None = None
     merged_into: str | None = None
     source: str | None = None
@@ -137,10 +138,11 @@ class PgIndexStore:
                 INSERT INTO nodes (
                     id, store_path, type, title, plane, planes, tags, aliases, disambig,
                     occurred_start, occurred_end, organizer_version, merged_into,
-                    source, source_ref, content_hash, embedding, node_created_at, indexed_at
+                    source, source_ref, content_hash, embedding, node_created_at, interiority,
+                    indexed_at
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, now())
+                        $17, $18, $19, now())
                 ON CONFLICT (id) DO UPDATE SET
                     store_path = EXCLUDED.store_path,
                     type = EXCLUDED.type,
@@ -159,6 +161,7 @@ class PgIndexStore:
                     content_hash = EXCLUDED.content_hash,
                     embedding = EXCLUDED.embedding,
                     node_created_at = EXCLUDED.node_created_at,
+                    interiority = EXCLUDED.interiority,
                     indexed_at = now()
                 """,
                 node.id,
@@ -179,6 +182,7 @@ class PgIndexStore:
                 node.content_hash,
                 node.embedding,
                 node.node_created_at,
+                node.interiority,
             )
             # Replace the chunk set wholesale (a node is re-chunked on every reindex).
             await conn.execute("DELETE FROM chunks WHERE node_id = $1", node.id)

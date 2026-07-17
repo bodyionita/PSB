@@ -34,6 +34,10 @@ _ID_NAMESPACE = uuid.UUID("6f6e6f64-6500-4000-8000-000000000000")
 # The default node type when a file declares none (02 §2: "Missing type = memory").
 _DEFAULT_TYPE = "memory"
 
+# The inner-voice dimension values a content node may carry (ADR-055 §1). Anything else → None
+# (leniently ignored, like any unknown frontmatter), so the DB column only ever holds a valid value.
+_INTERIORITY_VALUES = frozenset({"internal", "external", "mixed"})
+
 
 @dataclass(frozen=True)
 class ParsedEdge:
@@ -61,6 +65,7 @@ class NodeMetadata:
     disambig: str | None
     occurred_start: date | None
     occurred_end: date | None
+    interiority: str | None
     organizer_version: str | None
     merged_into: str | None
     source: str | None
@@ -147,6 +152,7 @@ def parse_node_metadata(
     occurred_start, occurred_end = _expand_occurred(
         _as_scalar(fields.get("occurred")), _as_scalar(fields.get("occurred_end"))
     )
+    interiority = _clean_interiority(_as_scalar(fields.get("interiority")))
     title = _first_h1(body) or _stem_of(store_path)
     created = _parse_created(_as_scalar(fields.get("created"))) or fallback_created
 
@@ -161,6 +167,7 @@ def parse_node_metadata(
         disambig=_as_scalar(fields.get("disambig")),
         occurred_start=occurred_start,
         occurred_end=occurred_end,
+        interiority=interiority,
         organizer_version=_as_scalar(fields.get("organizer_version")),
         merged_into=_as_scalar(fields.get("merged_into")),
         source=_as_scalar(fields.get("source")),
@@ -234,6 +241,14 @@ def _unquote(value: str) -> str:
 def _as_scalar(value: str | list[str] | None) -> str | None:
     if isinstance(value, str):
         return value or None
+    return None
+
+
+def _clean_interiority(value: str | None) -> str | None:
+    """The node's inner-voice dimension (ADR-055 §1) if it is one of the known values, else None —
+    an unknown/absent value leaves the column NULL (leniently ignored, like other frontmatter)."""
+    if isinstance(value, str) and value.strip().lower() in _INTERIORITY_VALUES:
+        return value.strip().lower()
     return None
 
 

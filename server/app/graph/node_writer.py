@@ -30,7 +30,9 @@ from ..text import fold_diacritics
 # The generation stamp written into every pipeline node's frontmatter (02 §2). Retrofit passes
 # target "everything below vN" instead of re-walking the whole graph (ADR-031 §4). Bump on any
 # change to the node contract the organizer emits.
-ORGANIZER_VERSION = "v3"
+# v4 (M8.2): `interiority` stamp + inner-voice extraction (ADR-055); code-computed `occurred` /
+# `occurred_end` + inline `[[t:…]]` body tokens (ADR-056).
+ORGANIZER_VERSION = "v4"
 
 _SLUG_INVALID = re.compile(r"[^a-z0-9]+")
 _MAX_SLUG_LEN = 80  # keep filenames comfortably under path limits
@@ -121,6 +123,9 @@ class NodeDocument:
     tags: tuple[str, ...] = ()
     occurred: str | None = None
     occurred_end: str | None = None
+    # The inner-voice dimension on a CONTENT node (ADR-055 §1): internal | external | mixed. None on
+    # entity-hub nodes (the dimension is a property of content, not of a thin hub) — omitted then.
+    interiority: str | None = None
     organizer_version: str = ORGANIZER_VERSION
     edges: tuple[NodeEdge, ...] = ()
     aliases: tuple[str, ...] = ()
@@ -145,6 +150,8 @@ def render_frontmatter(node: NodeDocument) -> str:
         lines.append(f"occurred: {_yaml_scalar(node.occurred)}")
     if node.occurred_end:
         lines.append(f"occurred_end: {_yaml_scalar(node.occurred_end)}")
+    if node.interiority:
+        lines.append(f"interiority: {_yaml_scalar(node.interiority)}")
     lines.append(f"source: {_yaml_scalar(node.source)}")
     if node.source_ref:
         lines.append(f"source_ref: {_yaml_scalar(node.source_ref)}")

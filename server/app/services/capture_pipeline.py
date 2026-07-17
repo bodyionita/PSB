@@ -36,6 +36,7 @@ from ..capture.organizer import (
     OrganizerNode,
     inbox_fallback_node,
     parse_organizer_json,
+    render_anchor,
     render_tag_vocabulary,
     validate_organizer_output,
 )
@@ -95,6 +96,10 @@ SOURCE_CHAT = "chat"
 # candidates then failed before advancing its watermark — yields the SAME id, so the conflict-safe
 # insert collapses it instead of writing a duplicate memory (rule 6: retries are always safe).
 _CHAT_CAPTURE_NS = uuid.UUID("b1d9e5c2-4a3f-5e6d-8b7a-0c1d2e3f4a5b")
+
+# The seeded edge rel that links an event node to the inner-voice node extracted from it (ADR-055
+# §2 / M8.2 grill: reuse `led_to`, no new vocabulary — event `led_to` the feeling/insight).
+_INNER_VOICE_REL = "led_to"
 
 # Audio container extensions accepted by POST /capture/voice (03-api.md).
 ALLOWED_AUDIO_EXTS = frozenset({"m4a", "webm", "ogg", "mp3", "wav"})
@@ -354,8 +359,8 @@ class CapturePipeline:
             return ReprocessOne(capture_id=capture_id, ok=False, error="capture vanished")
         try:
             inter = _Interaction(capture_id=capture_id, kind=f"{record.kind}-reprocess")
-            organize = await self._organize(self._combined_text(record))
             created_local = self._local(record.created_at)
+            organize = await self._organize(self._combined_text(record), anchor=created_local)
             paths = await self._resolve_and_write(
                 organize,
                 capture_id=capture_id,
@@ -500,7 +505,8 @@ class CapturePipeline:
 
             await self._store.mark_status(capture_id, ORGANIZING)
             t1 = time.monotonic()
-            organize = await self._organize(transcript)
+            created_local = self._local(record.created_at)
+            organize = await self._organize(transcript, anchor=created_local)
             inter.timings_ms["organize"] = int((time.monotonic() - t1) * 1000)
             inter.organize = {
                 "model": organize.model_used or None,
@@ -511,7 +517,6 @@ class CapturePipeline:
             inter.model_used = organize.model_used or inter.model_used
             inter.fallback_used = inter.fallback_used or organize.provider_fallback_used
 
-            created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
                 organize,
                 capture_id=capture_id,
@@ -617,7 +622,8 @@ class CapturePipeline:
 
             await self._store.mark_status(capture_id, ORGANIZING)
             t0 = time.monotonic()
-            organize = await self._organize(text_of(record))
+            created_local = self._local(record.created_at)
+            organize = await self._organize(text_of(record), anchor=created_local)
             inter.timings_ms["organize"] = int((time.monotonic() - t0) * 1000)
             inter.organize = {
                 "model": organize.model_used or None,
@@ -640,7 +646,6 @@ class CapturePipeline:
             await asyncio.to_thread(
                 self._writer.remove_nodes, list(record.node_paths), keep_types=keep
             )
-            created_local = self._local(record.created_at)
             paths = await self._resolve_and_write(
                 organize,
                 capture_id=capture_id,
@@ -677,18 +682,25 @@ class CapturePipeline:
             logger.exception("indexing failed for capture nodes %s (ignored)", paths)
             return {"error": f"{type(exc).__name__}: {exc}"}
 
-    async def _organize(self, text: str) -> OrganizeResult:
+    async def _organize(self, text: str, *, anchor: datetime) -> OrganizeResult:
         """Run the organize chain and validate; unusable output → single ``inbox/`` node.
 
         The capture text is placed behind hard delimiters in a user message and the system prompt
-        declares it DATA, never instructions (injection hygiene, ADR-031 (b)).
+        declares it DATA, never instructions (injection hygiene, ADR-031 (b)). ``anchor`` is the
+        capture's **stored** recorded time (``created_local``) — injected into the prompt so the
+        model classifies relative dates against it, and passed to validation so the deterministic
+        resolver computes ``occurred`` + ``[[t:…]]`` body tokens against it (ADR-056 §1/§2, rule 12;
+        reprocess-deterministic — never wall-clock).
         """
         # Token replacement (not str.format): the prompt embeds literal JSON braces.
         vocabulary = render_tag_vocabulary(await self._fetch_tag_vocabulary())
         # Effective vocabulary (seeds ∪ approved additions) so an approved type is forward-live.
         vocab = await effective_vocabulary(self._vocab, self._settings)
         system = (
-            ORGANIZER_SYSTEM_PROMPT.replace("{planes}", ", ".join(self._settings.planes))
+            ORGANIZER_SYSTEM_PROMPT.replace(
+                "{anchor}", render_anchor(anchor, self._settings.scheduler_tz)
+            )
+            .replace("{planes}", ", ".join(self._settings.planes))
             .replace("{node_types}", ", ".join(vocab.node_types))
             .replace("{edge_rels}", ", ".join(vocab.edge_rels))
             .replace("{entity_types}", ", ".join(vocab.entity_like_types))
@@ -712,6 +724,7 @@ class CapturePipeline:
             node_types=list(vocab.node_types),
             edge_rels=list(vocab.edge_rels),
             entity_types=list(vocab.entity_like_types),
+            anchor=anchor,
             max_nodes=self._settings.organizer_max_nodes,
             max_tags=self._settings.organizer_max_tags,
             max_edges=self._settings.organizer_max_edges,
@@ -921,10 +934,13 @@ class CapturePipeline:
     ) -> list[NodeDocument]:
         """Turn organizer nodes + the resolution into writable :class:`NodeDocument`s. Each content
         node keeps its pre-assigned id; its entity edges point at resolved ids (pending mentions are
-        skipped — their review item is already filed). Minted entity nodes are appended."""
-        documents: list[NodeDocument] = []
-        for node_id, node in zip(node_ids, nodes, strict=True):
-            since = node.occurred or created_local.date().isoformat()
+        skipped — their review item is already filed). Inner-voice extraction (ADR-055 §2): an
+        ``internal`` node's ``arose_from`` draws an event ``led_to`` internal edge on the event node
+        (existing seeded rel, sibling referenced by result index — no new vocabulary). Minted entity
+        nodes are appended."""
+        since_of = [node.occurred or created_local.date().isoformat() for node in nodes]
+        edges_by_index: list[list[NodeEdge]] = []
+        for since, node in zip(since_of, nodes, strict=True):
             edges: list[NodeEdge] = []
             for e in node.entities:
                 link = resolution.links.get(mention_key(e.name, e.type))
@@ -932,6 +948,20 @@ class CapturePipeline:
                     edges.append(
                         NodeEdge(rel=e.rel, to=link.entity_id, conf=link.conf, since=since)
                     )
+            edges_by_index.append(edges)
+
+        # Inner-voice extraction: link the feeling to the event it arose from (ADR-055 §2). The edge
+        # sits on the EVENT node → the internal node using `led_to`; `arose_from` is a validated,
+        # bounds-checked, non-self result index (organizer.validate_organizer_output).
+        for i, node in enumerate(nodes):
+            j = node.arose_from
+            if j is not None and 0 <= j < len(nodes) and j != i:
+                edges_by_index[j].append(
+                    NodeEdge(rel=_INNER_VOICE_REL, to=node_ids[i], since=since_of[j])
+                )
+
+        documents: list[NodeDocument] = []
+        for node_id, node, edges in zip(node_ids, nodes, edges_by_index, strict=True):
             documents.append(
                 NodeDocument(
                     id=node_id,
@@ -945,6 +975,8 @@ class CapturePipeline:
                     planes=node.planes,
                     tags=node.tags,
                     occurred=node.occurred,
+                    occurred_end=node.occurred_end,
+                    interiority=node.interiority,
                     edges=tuple(edges),
                     in_inbox=node.in_inbox,
                 )

@@ -132,3 +132,16 @@ def test_metadata_merged_into_tombstone():
     node = "---\nid: loser-1\ntype: person\nmerged_into: survivor-9\n---\n# Alex\n"
     meta = parse_node_metadata(node, store_path="person/alex.md", fallback_created=FALLBACK)
     assert meta.merged_into == "survivor-9"
+
+
+def test_metadata_interiority_valid_kept_invalid_dropped():
+    valid = "---\nid: n1\ntype: memory\ninteriority: internal\n---\n# T\n\nbody"
+    meta = parse_node_metadata(valid, store_path="memory/n1.md", fallback_created=FALLBACK)
+    assert meta.interiority == "internal"
+    bad = "---\nid: n2\ntype: memory\ninteriority: deep\n---\n# T\n\nbody"
+    meta2 = parse_node_metadata(bad, store_path="memory/n2.md", fallback_created=FALLBACK)
+    assert meta2.interiority is None  # unknown value → NULL column
+    absent = parse_node_metadata(
+        "# T\n\nbody", store_path="memory/n3.md", fallback_created=FALLBACK
+    )
+    assert absent.interiority is None
