@@ -17,6 +17,7 @@ from app.entities.resolver import EntityResolver
 from app.entities.store import EntityCandidate
 from app.graph.node_writer import NodeDocument, NodeWriter
 from app.indexing.frontmatter import parse_node_metadata
+from app.providers.base import ProviderUnavailable
 from app.providers.registry import ProviderRegistry
 from app.services.capture_pipeline import (
     CaptureNotFound,
@@ -24,8 +25,11 @@ from app.services.capture_pipeline import (
     FollowUpNotPending,
     NotRetryable,
     UnsupportedAudio,
+    UnsupportedImage,
 )
-from app.services.capture_store import FAILED, INDEXED, ORGANIZING, RECEIVED
+from app.services.capture_store import DERIVING, FAILED, INDEXED, KIND_IMAGE, ORGANIZING, RECEIVED
+from app.services.media_derivation import MediaDerivationService, placeholder
+from app.services.media_store import DERIVED, UNAVAILABLE, MediaFiles
 
 from .fakes import (
     FakeAgentRunStore,
@@ -33,6 +37,7 @@ from .fakes import (
     FakeCaptureStore,
     FakeChatProvider,
     FakeIndexer,
+    FakeMediaStore,
     FakeReviewQueue,
     FakeStoreBackup,
     FakeSTTProvider,
@@ -840,3 +845,244 @@ async def test_inner_voice_extraction_links_event_to_internal_node(tmp_path: Pat
     assert ease.interiority == "internal"
     # The inner-voice edge: event `led_to` the internal node, by its id (Option A — no new vocab).
     assert ("led_to", ease.id) in [(e.rel, e.to) for e in walk.edges]
+
+
+# --- M9 T3: ad-hoc image capture (POST /capture/image → describe → organize (fenced)) -----------
+#
+# The image leg mirrors voice: the raw image is kept under the media substrate, its vision
+# description is derived (driven to a terminal state), then organized as fenced `<photo: …>` text —
+# the derived description playing the role a transcript plays for voice (ADR-057 §3/§5/§6).
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n fake image bytes"
+_PHOTO_DESCRIPTION = "A whiteboard with a system diagram: API, DB, Cache."
+
+
+def _image_responder(description: str = _PHOTO_DESCRIPTION, *, vision_down: bool = False):
+    """One provider serving BOTH legs of an image capture: the `vision` describe call and the
+    `conspect` organize call, distinguished by system prompt. `vision_down` raises on the describe
+    leg only (organize still succeeds), isolating a derivation failure from the organize step. The
+    organize branch ECHOES the captured text into the node body so a test can assert what was
+    organized (a real organizer would clean it; the fake just needs to be faithful to its input)."""
+
+    def responder(messages):
+        system = messages[0].content
+        if "You describe an image" in system:
+            if vision_down:
+                raise ProviderUnavailable("vlm down")
+            return description
+        if "organize a person's raw capture" in system:
+            captured = messages[1].content  # "CAPTURE (data…):\n<<<\n<photo: …>\n>>>"
+            node = {
+                "title": "A saved photo",
+                "type": "memory",
+                "plane": "Ideas",
+                "planes": ["Ideas"],
+                "tags": ["photo"],
+                "body": captured,
+                "entities": [],
+            }
+            return json.dumps({"nodes": [node]})
+        return "What made you save this?"
+
+    return responder
+
+
+def _make_image_pipeline(tmp_path: Path, *, vlm: FakeChatProvider | None = None, max_attempts=3):
+    settings = Settings(
+        graph_store_path=str(tmp_path / "store"),
+        data_path=str(tmp_path / "data"),
+        planes=["Professional", "Personal", "Ideas"],
+        scheduler_tz="UTC",
+        media_derive_max_attempts=max_attempts,
+    )
+    vlm = vlm or FakeChatProvider("fake-vlm", responder=_image_responder())
+    stt = FakeSTTProvider(transcript="unused for image tests")
+    registry = ProviderRegistry(
+        {"fake-vlm": vlm, "fake-stt": stt},
+        chat_chain=["fake-vlm"],
+        distill_chain=["fake-vlm"],
+        embedding_provider_id="none",
+        stt_chain=["fake-stt"],
+    )
+    routing = fake_routing(registry, chain=("fake-vlm",))
+    store = FakeCaptureStore()
+    runs = FakeAgentRunStore()
+    review = FakeReviewQueue()
+    media_store = FakeMediaStore()
+    media_files = MediaFiles(settings)
+    media_derivation = MediaDerivationService(
+        store=media_store,
+        files=media_files,
+        routing=routing,
+        registry=registry,
+        run_store=runs,
+        max_attempts=max_attempts,
+        rederive_max_per_run=50,
+    )
+    pipeline = CapturePipeline(
+        settings=settings,
+        store=store,
+        routing=routing,
+        registry=registry,
+        node_writer=NodeWriter(str(tmp_path / "store")),
+        store_backup=FakeStoreBackup(),
+        run_store=runs,
+        indexer=FakeIndexer(),
+        entity_resolver=EntityResolver(
+            settings=settings, alias_store=FakeAliasStore(), review_queue=review, routing=routing
+        ),
+        review_queue=review,
+        media_store=media_store,
+        media_files=media_files,
+        media_derivation=media_derivation,
+    )
+    return pipeline, store, media_store, runs, vlm, tmp_path / "store"
+
+
+async def test_image_capture_happy_path(tmp_path: Path):
+    pipeline, store, media_store, _runs, vlm, root = _make_image_pipeline(tmp_path)
+    cid = await pipeline.create_image_capture(PNG_BYTES, filename="shot.png")
+    await pipeline.drain()
+
+    rec = store.records[cid]
+    assert rec.kind == KIND_IMAGE
+    assert rec.status == INDEXED
+    # The derived description is fenced and stored as the capture's raw text (organize/reprocess
+    # replay source) — the voice-transcript analogue for images.
+    assert rec.raw_text == f"<photo: {_PHOTO_DESCRIPTION}>"
+    assert rec.node_paths and (root / rec.node_paths[0]).exists()
+    # The node's source is the capture kind (`image`), like text→text / voice→voice.
+    assert "source: image" in (root / rec.node_paths[0]).read_text(encoding="utf-8")
+    # No trailing nudge for an image (the "raw" is a derived description, not the person's words).
+    assert rec.follow_up_question is None
+
+    # Media derived: real description + the VLM model recorded, image kept + linked to the capture.
+    media = await media_store.get_by_capture_id(cid)
+    assert media.status == DERIVED
+    assert media.derived_text == _PHOTO_DESCRIPTION
+    assert media.kind == "photo" and media.source == "capture"
+    assert media.file_path == f"capture/{cid}.png" and media.mime_type == "image/png"
+    # The vision leg actually received the image (data URI) and the organize leg got the fence.
+    assert any(imgs for imgs in vlm.images_seen if imgs)
+    assert "<photo:" in vlm.last_messages[1].content  # last call = organize, over the fenced text
+
+
+async def test_image_screenshot_description_is_fenced_into_organize(tmp_path: Path):
+    # ADR-057 §5: a chat-screenshot description reaches organize wrapped as `<photo: …>` so the
+    # organizer treats the contained messages as shared material, not the person's own words. We
+    # assert the wiring (fence + the binding rule in the organizer prompt); LLM behaviour is not
+    # under test.
+    desc = 'Screenshot of a chat. Alex (left): "Friday?" Sam (right): "Yes, 7pm."'
+    vlm = FakeChatProvider("fake-vlm", responder=_image_responder(desc))
+    pipeline, store, _media, _runs, _vlm, _root = _make_image_pipeline(tmp_path, vlm=vlm)
+
+    cid = await pipeline.create_image_capture(b"jpg", filename="s.jpg")
+    await pipeline.drain()
+
+    assert store.records[cid].raw_text == f"<photo: {desc}>"
+    organize_user = vlm.last_messages[1].content
+    assert desc in organize_user and "<photo:" in organize_user
+    # The organizer system prompt carries the screenshot-attribution rule (ADR-057 §5 org layer).
+    from app.capture.organizer import ORGANIZER_SYSTEM_PROMPT
+
+    assert '"<photo: ...>"' in ORGANIZER_SYSTEM_PROMPT
+    assert "never to" in ORGANIZER_SYSTEM_PROMPT.lower()
+
+
+async def test_image_derivation_failure_walks_to_placeholder(tmp_path: Path):
+    # A forced, persistent VLM failure on the describe leg walks retry → `unavailable` → the
+    # explicit placeholder WITHOUT a human, and the pipeline is NOT blocked: the capture still
+    # organizes (from the placeholder) and lands `indexed` (ADR-057 §3 acceptance).
+    vlm = FakeChatProvider("fake-vlm", responder=_image_responder(vision_down=True))
+    pipeline, store, media_store, _runs, _vlm, _root = _make_image_pipeline(
+        tmp_path, vlm=vlm, max_attempts=3
+    )
+
+    cid = await pipeline.create_image_capture(b"png", filename="s.png")
+    await pipeline.drain()
+
+    media = await media_store.get_by_capture_id(cid)
+    assert media.status == UNAVAILABLE
+    assert media.attempts == 3  # bounded retries exhausted within the one capture run
+    rec = store.records[cid]
+    assert rec.raw_text == placeholder("photo")  # "<photo — description unavailable>"
+    assert rec.status == INDEXED  # organize still ran (vision-down only fails the describe leg)
+    assert rec.node_paths and not rec.node_paths[0].startswith("inbox/")
+
+
+async def test_image_redescribe_recovers_node_after_failure(tmp_path: Path):
+    # The acceptance drill (08 §M9): a forced failure files a placeholder node; once the VLM is
+    # back, `redescribe_image_capture` re-derives the photo AND rebuilds the node from the recovered
+    # description — the recovery reaches the GRAPH, not just the media viewer (ADR-057 §3/§6).
+    vlm = FakeChatProvider("fake-vlm", responder=_image_responder(vision_down=True))
+    pipeline, store, media_store, _runs, _vlm, root = _make_image_pipeline(
+        tmp_path, vlm=vlm, max_attempts=2
+    )
+    cid = await pipeline.create_image_capture(b"png", filename="s.png")
+    await pipeline.drain()
+    assert (await media_store.get_by_capture_id(cid)).status == UNAVAILABLE
+    assert store.records[cid].raw_text == placeholder("photo")
+    stale_node = store.records[cid].node_paths[0]
+    assert placeholder("photo") in (root / stale_node).read_text(encoding="utf-8")
+
+    # VLM recovers; the capture-layer re-describe seam recovers the media AND rebuilds the node.
+    vlm._responder = _image_responder("A recovered whiteboard photo.")
+    await pipeline.redescribe_image_capture(cid)
+    await pipeline.drain()
+
+    media = await media_store.get_by_capture_id(cid)
+    assert media.status == DERIVED and media.derived_text == "A recovered whiteboard photo."
+    rec = store.records[cid]
+    assert rec.status == INDEXED
+    assert rec.raw_text == "<photo: A recovered whiteboard photo.>"
+    # The node was rebuilt from the recovered description — the placeholder is gone from the graph.
+    body = (root / rec.node_paths[0]).read_text(encoding="utf-8")
+    assert "recovered whiteboard photo" in body
+    assert placeholder("photo") not in body
+
+
+async def test_image_reprocess_reorganizes_stored_fence_without_revision(tmp_path: Path):
+    # Reprocess-all replays an image capture from its stored fenced `raw_text` (organize-layer
+    # replay) and does NOT re-run the VLM description — exactly as voice reprocess skips STT.
+    pipeline, store, _media, _runs, vlm, root = _make_image_pipeline(tmp_path)
+    cid = await pipeline.create_image_capture(PNG_BYTES, filename="shot.png")
+    await pipeline.drain()
+    describe_calls = sum(1 for imgs in vlm.images_seen if imgs)  # vision calls carry an image
+    assert describe_calls == 1
+
+    outcome = await pipeline.reprocess_capture(cid)
+
+    assert outcome.ok and outcome.node_count >= 1
+    # No new vision (describe) call — reprocess only re-organized the stored `<photo: …>` text.
+    assert sum(1 for imgs in vlm.images_seen if imgs) == describe_calls
+    assert store.records[cid].node_paths and (root / store.records[cid].node_paths[0]).exists()
+
+
+async def test_image_capture_marks_deriving_status(tmp_path: Path):
+    # The capture passes through `deriving` (the image sibling of `transcribing`) — observability.
+    seen: list[str] = []
+    pipeline, store, _media, _runs, _vlm, _root = _make_image_pipeline(tmp_path)
+    orig = store.mark_status
+
+    async def _record_status(capture_id, status):
+        seen.append(status)
+        await orig(capture_id, status)
+
+    store.mark_status = _record_status
+    await pipeline.create_image_capture(PNG_BYTES, filename="s.png")
+    await pipeline.drain()
+    assert DERIVING in seen
+    assert seen.index(DERIVING) < seen.index(ORGANIZING)
+
+
+async def test_image_capture_rejects_unsupported_type(tmp_path: Path):
+    pipeline, *_ = _make_image_pipeline(tmp_path)
+    with pytest.raises(UnsupportedImage):
+        await pipeline.create_image_capture(b"x", filename="note.txt")
+
+
+async def test_image_capture_rejects_oversize(tmp_path: Path):
+    pipeline, *_ = _make_image_pipeline(tmp_path)
+    # image_max_bytes defaults to 20 MB; a buffer one byte over is rejected before persistence.
+    with pytest.raises(UnsupportedImage):
+        await pipeline.create_image_capture(b"x" * (20 * 1024 * 1024 + 1), filename="huge.jpg")

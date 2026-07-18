@@ -12,7 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from .services.agent_runs import RunChild
-from .services.capture_store import CaptureNodeRef, CaptureRecord
+from .services.capture_store import CaptureMediaRef, CaptureNodeRef, CaptureRecord
 
 
 # --- Auth ---
@@ -72,6 +72,21 @@ class CaptureNodeRefModel(BaseModel):
         return cls(id=ref.id, store_path=ref.store_path, type=ref.type, title=ref.title)
 
 
+class CaptureMediaView(BaseModel):
+    """The media item backing an image capture (M9 T3, ADR-057 §6): the web renders the photo via
+    ``GET /media/{id}`` and shows a derivation-status badge, straight off the capture. ``None`` for
+    text/voice/mcp/chat captures. ``status`` is the derivation lifecycle
+    (``pending``/``derived``/``unavailable``)."""
+
+    id: str
+    kind: str
+    status: str
+
+    @classmethod
+    def from_ref(cls, ref: CaptureMediaRef) -> CaptureMediaView:
+        return cls(id=ref.id, kind=ref.kind, status=ref.status)
+
+
 class CaptureView(BaseModel):
     """Pipeline state for the capture-screen strip / detail poll (03-api.md)."""
 
@@ -93,6 +108,9 @@ class CaptureView(BaseModel):
     # falls back to `kind` for the source badge). Carried so the Captures expand
     # (GET /captures/{id}) renders the badge without re-reading the feed row.
     source: str | None = None
+    # The backing media item for an image capture (M9 T3) — the photo + its derivation status; None
+    # for non-image captures. The web renders `GET /media/{media.id}` + a status badge.
+    media: CaptureMediaView | None = None
 
     @classmethod
     def from_record(cls, record: CaptureRecord) -> CaptureView:
@@ -109,6 +127,11 @@ class CaptureView(BaseModel):
             created_at=record.created_at,
             updated_at=record.updated_at,
             source=record.source,
+            media=(
+                CaptureMediaView.from_ref(record.media_ref)
+                if record.media_ref is not None
+                else None
+            ),
         )
 
 

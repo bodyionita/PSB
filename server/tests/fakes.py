@@ -1372,6 +1372,13 @@ class FakeMediaStore:
     async def get(self, media_id: str) -> MediaRecord | None:
         return self.rows.get(media_id)
 
+    async def get_by_capture_id(self, capture_id: str) -> MediaRecord | None:
+        matches = sorted(
+            (r for r in self.rows.values() if r.capture_id == capture_id),
+            key=lambda r: r.created_at or datetime.now(UTC),
+        )
+        return matches[0] if matches else None
+
     async def get_many(self, media_ids: list[str]) -> list[MediaRecord]:
         return [self.rows[m] for m in media_ids if m in self.rows]
 

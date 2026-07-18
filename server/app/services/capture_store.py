@@ -18,6 +18,9 @@ from ..db import Database
 # --- Capture lifecycle statuses (02-data-model §3). ---
 RECEIVED = "received"
 TRANSCRIBING = "transcribing"
+# Image captures derive their text (photo → vision description, M9 T3 / ADR-057 §3) between
+# `received` and `organizing` — the sibling of `transcribing` for the voice leg.
+DERIVING = "deriving"
 ORGANIZING = "organizing"
 WRITTEN = "written"
 INDEXED = "indexed"
@@ -29,6 +32,9 @@ TERMINAL_STATUSES = frozenset({INDEXED, FAILED})
 
 KIND_TEXT = "text"
 KIND_VOICE = "voice"
+# Ad-hoc PWA photo capture (M9 T3, ADR-057 §6): raw image kept under the media substrate, its
+# vision description derived, then organized (fenced) exactly like a voice transcript.
+KIND_IMAGE = "image"
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,18 @@ class CaptureNodeRef:
     title: str | None
 
 
+@dataclass(frozen=True)
+class CaptureMediaRef:
+    """The media item backing an ad-hoc image capture (M9 T3, ADR-057 §6), resolved at read time
+    from ``media.capture_id`` so the web can render the photo (``GET /media/{id}``) + a derivation-
+    status badge straight off the capture. ``None`` for text/voice/mcp/chat captures (no media
+    row). ``status`` is the derivation lifecycle (``pending``/``derived``/``unavailable``)."""
+
+    id: str
+    kind: str
+    status: str
+
+
 @dataclass
 class CaptureRecord:
     id: str
@@ -61,6 +79,9 @@ class CaptureRecord:
     # Populated by `get`/`list_recent`'s read-time join; empty on a freshly-created record (no
     # nodes yet) and never written back to `captures` (derived, not stored).
     node_refs: list[CaptureNodeRef] = field(default_factory=list)
+    # The backing media item for an image capture (M9 T3) — resolved by `get`/`list_recent`'s
+    # read-time `media.capture_id` join; None for non-image captures. Derived, not stored here.
+    media_ref: CaptureMediaRef | None = None
     follow_up_question: str | None = None
     follow_up_answer: str | None = None
     error: str | None = None
@@ -164,6 +185,31 @@ _NODE_REFS_JOIN = """
     ) node_refs ON true
 """
 
+# The M9 T3 read-time `media.capture_id -> media` join: the one media item backing an ad-hoc image
+# capture (1:1; LIMIT 1 is a defensive cap), as a jsonb object so the web renders the photo +
+# derivation-status badge off the capture without a second round-trip. NULL for a capture with no
+# media (text/voice/mcp/chat) — decoded to None by `_media_ref`.
+_MEDIA_REF_JOIN = """
+    LEFT JOIN LATERAL (
+        SELECT jsonb_build_object('id', m.id, 'kind', m.kind, 'status', m.status) AS media
+          FROM media m
+         WHERE m.capture_id = c.id
+         ORDER BY m.created_at ASC
+         LIMIT 1
+    ) media_ref ON true
+"""
+
+
+def _media_ref(raw: object) -> CaptureMediaRef | None:
+    # asyncpg returns jsonb as text by default; tolerate both (mirrors `_node_refs`). No media row
+    # for this capture ⇒ the LEFT JOIN yields SQL NULL ⇒ None.
+    if raw is None:
+        return None
+    item = json.loads(raw) if isinstance(raw, str) else raw
+    if not item:
+        return None
+    return CaptureMediaRef(id=str(item["id"]), kind=item["kind"], status=item["status"])
+
 
 def _node_refs(raw: object) -> list[CaptureNodeRef]:
     # asyncpg returns jsonb as text by default; tolerate both text and an already-decoded list
@@ -182,7 +228,12 @@ def _node_refs(raw: object) -> list[CaptureNodeRef]:
     ]
 
 
-def _record(row, *, node_refs: list[CaptureNodeRef] | None = None) -> CaptureRecord:
+def _record(
+    row,
+    *,
+    node_refs: list[CaptureNodeRef] | None = None,
+    media_ref: CaptureMediaRef | None = None,
+) -> CaptureRecord:
     return CaptureRecord(
         id=str(row["id"]),
         kind=row["kind"],
@@ -191,6 +242,7 @@ def _record(row, *, node_refs: list[CaptureNodeRef] | None = None) -> CaptureRec
         audio_path=row["audio_path"],
         node_paths=list(row["node_paths"] or []),
         node_refs=node_refs or [],
+        media_ref=media_ref,
         follow_up_question=row["follow_up_question"],
         follow_up_answer=row["follow_up_answer"],
         error=row["error"],
@@ -243,28 +295,37 @@ class PgCaptureStore:
         async with self._db.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {_COLUMNS}, node_refs.refs AS node_refs
+                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_ref
                   FROM captures c
                 {_NODE_REFS_JOIN}
+                {_MEDIA_REF_JOIN}
                  WHERE c.id = $1
                 """,
                 capture_id,
             )
-        return _record(row, node_refs=_node_refs(row["node_refs"])) if row is not None else None
+        if row is None:
+            return None
+        return _record(
+            row, node_refs=_node_refs(row["node_refs"]), media_ref=_media_ref(row["media_ref"])
+        )
 
     async def list_recent(self, limit: int) -> list[CaptureRecord]:
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {_COLUMNS}, node_refs.refs AS node_refs
+                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_ref
                   FROM captures c
                 {_NODE_REFS_JOIN}
+                {_MEDIA_REF_JOIN}
                  ORDER BY c.created_at DESC
                  LIMIT $1
                 """,
                 limit,
             )
-        return [_record(r, node_refs=_node_refs(r["node_refs"])) for r in rows]
+        return [
+            _record(r, node_refs=_node_refs(r["node_refs"]), media_ref=_media_ref(r["media_ref"]))
+            for r in rows
+        ]
 
     async def list_inbox_materialized(self, *, folder: str, limit: int) -> list[CaptureRecord]:
         # `EXISTS (unnest … LIKE folder/%)`: any node_path under the inbox folder marks an

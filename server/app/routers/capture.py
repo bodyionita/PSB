@@ -27,6 +27,7 @@ from ..services.capture_pipeline import (
     FollowUpNotPending,
     NotRetryable,
     UnsupportedAudio,
+    UnsupportedImage,
 )
 
 router = APIRouter(tags=["capture"], dependencies=[Depends(require_session)])
@@ -58,6 +59,26 @@ async def capture_voice(
     try:
         capture_id = await pipeline.create_voice_capture(audio, filename=file.filename or "audio")
     except UnsupportedAudio as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    return CaptureAcceptedResponse(capture_id=capture_id)
+
+
+@router.post(
+    "/capture/image",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=CaptureAcceptedResponse,
+)
+async def capture_image(
+    file: UploadFile = File(...),
+    pipeline: CapturePipeline = Depends(get_capture_pipeline),
+) -> CaptureAcceptedResponse:
+    """Ad-hoc PWA photo capture (M9 T3, ADR-057 §6): the raw image is kept under the media
+    substrate, its vision description derived (resumable), then organized (fenced). ``202`` — the
+    pipeline continues in the background; ``400`` on an unsupported type or an oversized upload."""
+    image = await file.read()
+    try:
+        capture_id = await pipeline.create_image_capture(image, filename=file.filename or "image")
+    except UnsupportedImage as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
     return CaptureAcceptedResponse(capture_id=capture_id)
 

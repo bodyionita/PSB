@@ -126,6 +126,34 @@ async def test_failed_attempt_stays_pending_then_goes_unavailable(tmp_path):
     assert row.error  # the failure reason is recorded (rule 7)
 
 
+async def test_derive_until_settled_exhausts_retries_in_one_call(tmp_path):
+    # M9 T3: the ad-hoc image-capture trigger drives a persistent failure straight to `unavailable`
+    # in a single call (per-invocation retries, back-to-back — no human, no scheduler).
+    down = FakeChatProvider(VLM, available=False)
+    service, store, files, _runs, _vlm, _stt = _service(tmp_path, vlm=down, max_attempts=3)
+    media = await _photo(store, files)
+
+    outcome = await service.derive_until_settled(media.id)
+
+    assert outcome.status == UNAVAILABLE
+    row = await store.get(media.id)
+    assert row.status == UNAVAILABLE
+    assert row.attempts == 3  # all bounded attempts spent in the one call
+    assert down.calls == 3
+
+
+async def test_derive_until_settled_returns_on_first_success(tmp_path):
+    # A working VLM settles on the first attempt — no needless extra calls.
+    service, store, files, _runs, vlm, _stt = _service(tmp_path)
+    media = await _photo(store, files)
+
+    outcome = await service.derive_until_settled(media.id)
+
+    assert outcome.status == DERIVED
+    assert vlm.calls == 1
+    assert (await store.get(media.id)).status == DERIVED
+
+
 async def test_empty_derivation_is_treated_as_failure(tmp_path):
     blank = FakeChatProvider(VLM, reply="   ")
     service, store, files, _runs, _vlm, _stt = _service(tmp_path, vlm=blank, max_attempts=1)

@@ -36,6 +36,7 @@ from .media_store import (
     KIND_PHOTO,
     KIND_VIDEO,
     KIND_VOICE,
+    PENDING,
     UNAVAILABLE,
     MediaFiles,
     MediaStore,
@@ -164,6 +165,26 @@ class MediaDerivationService:
         )
         return DeriveOutcome(media_id=media_id, kind=record.kind, status=DERIVED, model_used=model)
 
+    async def derive_until_settled(self, media_id: str) -> DeriveOutcome:
+        """Drive one item to a **terminal** derivation state within a single call — the ad-hoc
+        image-capture trigger (M9 T3, ADR-057 §3/§6).
+
+        :meth:`derive_one` does one bounded attempt; a retryable failure leaves the item
+        ``pending``. The connector path (M9.5) re-invokes derive on a schedule (with backoff), but
+        an interactive photo capture wants a prompt resolution, so here the per-invocation retries
+        run back-to-back: loop while the outcome is ``pending``, so a persistent failure walks retry
+        → ``unavailable`` (→ explicit placeholder downstream) **without a human**, and a transient
+        one recovers. Each attempt bumps ``attempts``, so at most ``max_attempts`` calls land on
+        ``derived`` / ``unavailable`` / ``skipped``; the loop guard bounds it even if a store
+        miscounts. ADR-057 §3 retry *backoff* is deferred (recorded in 08 §M9). Never raises —
+        inherits ``derive_one``'s best-effort contract (rule 7)."""
+        outcome = await self.derive_one(media_id)
+        attempts_left = self._max_attempts
+        while outcome.status == PENDING and attempts_left > 0:
+            attempts_left -= 1
+            outcome = await self.derive_one(media_id)
+        return outcome
+
     async def _derive_text(self, record) -> tuple[str, str | None]:
         """Route by kind to the right understanding path; return ``(text, model_used)``."""
         if record.kind == KIND_PHOTO:
@@ -206,7 +227,7 @@ class MediaDerivationService:
             await self._store.mark_unavailable(media_id, error=error, attempts=attempt)
             return DeriveOutcome(media_id=media_id, kind=kind, status=UNAVAILABLE, error=error)
         await self._store.mark_retry(media_id, error=error, attempts=attempt)
-        return DeriveOutcome(media_id=media_id, kind=kind, status="pending", error=error)
+        return DeriveOutcome(media_id=media_id, kind=kind, status=PENDING, error=error)
 
     async def rederive(self, *, media_ids: list[str] | None = None) -> RederiveOutcome:
         """Targeted re-derivation (ADR-057 §3): reset the selected items to ``pending`` (a fresh

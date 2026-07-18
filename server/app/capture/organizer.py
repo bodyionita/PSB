@@ -27,9 +27,11 @@ from ..text import fold_diacritics
 
 # --- Versioned prompt constants (ADR-019 §4). Bump the suffix on any wording change. ---
 
-# v6 (M8.2): symbolic time-references + code-computed occurred/tokens (ADR-056) and the
-# `interiority` stamp + inner-voice extraction (ADR-055).
-ORGANIZER_PROMPT_VERSION = "organizer-v6"
+# v7 (M9 T3): the `<photo: …>` screenshot-attribution rule (ADR-057 §5 organizer layer) — a derived
+# photo description is shared material, its contained messages attributed to the people inside the
+# image, never the person who saved it. v6 (M8.2): symbolic time-references + code-computed
+# occurred/tokens (ADR-056) and the `interiority` stamp + inner-voice extraction (ADR-055).
+ORGANIZER_PROMPT_VERSION = "organizer-v7"
 NUDGE_PROMPT_VERSION = "nudge-v2"  # v2: sourced from the raw capture; explicit language match
 
 # The inner-voice dimension every content node carries (ADR-055 §1). Orthogonal to `type`.
@@ -97,6 +99,14 @@ Rules:
   from the existing vocabulary below when one genuinely fits.
 - "body" is the cleaned, lightly-structured node content in Markdown (do not invent facts). Keep
   every time expression as natural language — do not write dates as tokens or ISO strings yourself.
+- A capture may contain a photo the person saved, shown as a "<photo: ...>" placeholder holding a
+  vision description of that image (or "<photo — description unavailable>" if it could not be
+  derived — then just note that a photo was saved). Treat the description as SHARED MATERIAL — a
+  record of an image, not the person's own words. If it describes a screenshot of a conversation,
+  attribute the messages to the people named INSIDE the description (by name / bubble side), NEVER
+  to the person who saved the image and NEVER to "you"; the same holds for forwarded or quoted
+  content. Organize what the image shows into the fitting node(s); never copy the literal "<photo:"
+  wrapper into a title or body.
 - Write EVERY title, body, tag, and entity name in English. If the capture is in another language,
   translate its meaning into natural English — do not leave phrases in the original language.
 {tag_vocabulary}

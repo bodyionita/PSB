@@ -329,9 +329,27 @@ async def lifespan(app: FastAPI):
     )
     app.state.backfill_service = backfill_service
 
+    # Media substrate (M9, ADR-057): the `media` table rows + the raw files under
+    # `<DATA_PATH>/media/…` (R2-synced via ADR-014), plus the resumable derivation stage (photo →
+    # `vision` group, voice → the STT chain) with bounded retries → `unavailable` → targeted
+    # re-derive. Serves ad-hoc captures now (T3/T4) and connector media at M9.5; `GET /media/{id}`
+    # streams a file behind the session gate. Built BEFORE the capture pipeline — the M9 T3 image
+    # path (`create_image_capture` → describe → organize) drives derivation through these.
+    app.state.media_store = PgMediaStore(db)
+    app.state.media_files = MediaFiles(settings)
+    app.state.media_derivation_service = build_media_derivation_service(
+        settings=settings,
+        store=app.state.media_store,
+        files=app.state.media_files,
+        routing=app.state.model_routing,
+        registry=app.state.registry,
+        run_store=run_store,
+    )
+
     # Capture pipeline (ADR-019/026/030): in-process, nodes-to-store, backed by the real store
     # backup. The tag store feeds the organizer prompt the live vocabulary (ADR-024 §1). One shared
-    # capture store (reused by the one-tap-remove op's node_paths lookup, M6 task 4).
+    # capture store (reused by the one-tap-remove op's node_paths lookup, M6 task 4). The media
+    # substrate (above) wires the M9 T3 image-capture leg.
     capture_store = PgCaptureStore(db)
     pipeline = CapturePipeline(
         settings=settings,
@@ -346,24 +364,11 @@ async def lifespan(app: FastAPI):
         review_queue=review_queue,
         tag_vocabulary=tag_store,
         vocab=vocabulary_service,
+        media_store=app.state.media_store,
+        media_files=app.state.media_files,
+        media_derivation=app.state.media_derivation_service,
     )
     app.state.capture_pipeline = pipeline
-
-    # Media substrate (M9, ADR-057): the `media` table rows + the raw files under
-    # `<DATA_PATH>/media/…` (R2-synced via ADR-014), plus the resumable derivation stage (photo →
-    # `vision` group, voice → the STT chain) with bounded retries → `unavailable` → targeted
-    # re-derive. Serves ad-hoc captures now (T3/T4) and connector media at M9.5; `GET /media/{id}`
-    # streams a file behind the session gate.
-    app.state.media_store = PgMediaStore(db)
-    app.state.media_files = MediaFiles(settings)
-    app.state.media_derivation_service = build_media_derivation_service(
-        settings=settings,
-        store=app.state.media_store,
-        files=app.state.media_files,
-        routing=app.state.model_routing,
-        registry=app.state.registry,
-        run_store=run_store,
-    )
 
     # Review read/resolve surface (ADR-030 §3, M3 task 4 + M6 task 2): lists decidable items and
     # resolves them — materializing a pending entity edge onto the store (write + reindex + commit),

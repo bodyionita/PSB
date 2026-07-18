@@ -167,6 +167,10 @@ class Settings(BaseSettings):
     # existing raw-inputs volume (nightly R2 sync, ADR-014) — never in the git store, never a DB
     # blob. Prod DATA_PATH = /srv/data, so the layout is /srv/data/media/<source>/… (ADR-057 §3).
     media_folder: str = "media"
+    # Upload cap for `POST /capture/image` (M9 T3, ADR-057 §6): a larger image is rejected before
+    # persistence (never-lose only guards what we accept). Base64 in the VLM `image_url` data-URI
+    # inflates ~33%, so this stays well under typical provider limits; phone photos are far smaller.
+    image_max_bytes: int = 20 * 1024 * 1024
     # Bounded derivation retries (ADR-057 §3): after this many failed attempts a media item is
     # marked `unavailable` (downstream renders an explicit placeholder) rather than blocking the
     # pipeline; targeted re-derive resets it to `pending` for a fresh chance (raw is kept).

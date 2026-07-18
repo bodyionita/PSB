@@ -21,8 +21,15 @@ from app.services.capture_pipeline import (
     FollowUpNotPending,
     NotRetryable,
     UnsupportedAudio,
+    UnsupportedImage,
 )
-from app.services.capture_store import KIND_TEXT, RECEIVED, CaptureNodeRef, CaptureRecord
+from app.services.capture_store import (
+    KIND_TEXT,
+    RECEIVED,
+    CaptureMediaRef,
+    CaptureNodeRef,
+    CaptureRecord,
+)
 
 PREFIX = "/api/v1"
 
@@ -34,11 +41,13 @@ class FakeCapturePipeline:
         self.records: dict[str, CaptureRecord] = {}
         self.text_calls: list[tuple[str, datetime | None]] = []
         self.voice_calls: list[tuple[bytes, str]] = []
+        self.image_calls: list[tuple[bytes, str]] = []
         self.retried: list[str] = []
         self.follow_ups: list[tuple[str, str]] = []
         self.anchor_edits: list[tuple[str, datetime]] = []
         self.anchor_error: Exception | None = None
         self.voice_error: Exception | None = None
+        self.image_error: Exception | None = None
         self.retry_error: Exception | None = None
         self.follow_up_error: Exception | None = None
 
@@ -51,6 +60,12 @@ class FakeCapturePipeline:
             raise self.voice_error
         self.voice_calls.append((audio, filename))
         return "cid-voice"
+
+    async def create_image_capture(self, image: bytes, *, filename: str) -> str:
+        if self.image_error is not None:
+            raise self.image_error
+        self.image_calls.append((image, filename))
+        return "cid-image"
 
     async def list_recent(self, limit: int) -> list[CaptureRecord]:
         return list(self.records.values())[:limit]
@@ -145,6 +160,50 @@ def test_capture_voice_unsupported_maps_to_400(client_and_pipeline):
     )
     assert resp.status_code == 400
     assert "unsupported audio" in resp.json()["detail"]
+
+
+def test_capture_image_returns_202(client_and_pipeline):
+    # M9 T3 (ADR-057 §6): multipart image → 202, delegates the bytes + filename.
+    client, fake = client_and_pipeline
+    resp = client.post(
+        f"{PREFIX}/capture/image",
+        files={"file": ("shot.png", b"\x89PNG-bytes", "image/png")},
+    )
+    assert resp.status_code == 202
+    assert resp.json()["capture_id"] == "cid-image"
+    assert fake.image_calls == [(b"\x89PNG-bytes", "shot.png")]
+
+
+def test_capture_image_unsupported_maps_to_400(client_and_pipeline):
+    client, fake = client_and_pipeline
+    fake.image_error = UnsupportedImage("unsupported image type: .txt")
+    resp = client.post(
+        f"{PREFIX}/capture/image",
+        files={"file": ("note.txt", b"x", "text/plain")},
+    )
+    assert resp.status_code == 400
+    assert "unsupported image" in resp.json()["detail"]
+
+
+def test_capture_view_carries_media(client_and_pipeline):
+    # M9 T3: an image capture's CaptureView carries the backing media item (id/kind/status) so the
+    # web renders the photo (GET /media/{id}) + a derivation-status badge off the capture.
+    client, fake = client_and_pipeline
+    fake.records["img"] = _record(
+        "img",
+        kind="image",
+        raw_text="<photo: a whiteboard sketch>",
+        media_ref=CaptureMediaRef(id="media-1", kind="photo", status="derived"),
+    )
+    body = client.get(f"{PREFIX}/captures/img").json()
+    assert body["media"] == {"id": "media-1", "kind": "photo", "status": "derived"}
+
+
+def test_capture_view_media_default_null(client_and_pipeline):
+    # A non-image capture has no media item — the field is null, never an error.
+    client, fake = client_and_pipeline
+    fake.records["a"] = _record("a")
+    assert client.get(f"{PREFIX}/captures/a").json()["media"] is None
 
 
 def test_list_captures_defaults_and_shape(client_and_pipeline):

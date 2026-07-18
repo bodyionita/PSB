@@ -70,8 +70,10 @@ from .agent_runs import (
     AgentRunStore,
 )
 from .capture_store import (
+    DERIVING,
     FAILED,
     INDEXED,
+    KIND_IMAGE,
     KIND_TEXT,
     KIND_VOICE,
     ORGANIZING,
@@ -81,6 +83,9 @@ from .capture_store import (
     CaptureRecord,
     CaptureStore,
 )
+from .media_derivation import MediaDerivationService, placeholder
+from .media_store import DERIVED as MEDIA_DERIVED
+from .media_store import KIND_PHOTO, SOURCE_CAPTURE, MediaFiles, MediaStore
 from .store_backup import StoreBackup
 
 logger = logging.getLogger(__name__)
@@ -103,6 +108,28 @@ _INNER_VOICE_REL = "led_to"
 
 # Audio container extensions accepted by POST /capture/voice (03-api.md).
 ALLOWED_AUDIO_EXTS = frozenset({"m4a", "webm", "ogg", "mp3", "wav"})
+
+# Image types accepted by POST /capture/image (03-api.md / ADR-057 §6), mapped to the content type
+# stored on the media row (so GET /media/{id} serves the right header and the VLM data-URI carries
+# the right mime). HEIC/HEIF are accepted per the contract; whether the current VLMs decode HEIC is
+# the provider's concern — a rejected format simply degrades to `unavailable` → placeholder (the
+# designed derivation-failure path). Client-side HEIC→JPEG conversion is a T4/T5 follow-up (08 §M9).
+_IMAGE_MIME = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "heic": "image/heic",
+    "heif": "image/heif",
+}
+ALLOWED_IMAGE_EXTS = frozenset(_IMAGE_MIME)
+
+# The organizer-facing fence for a derived photo description (ADR-057 §5 second bullet / §6): the
+# description enters organize wrapped as `<photo: …>` so the organizer treats it as shared material
+# (a record of an image the person saved), never the person's own words — the binding
+# screenshot-attribution rule. An `unavailable` photo uses the self-describing placeholder as-is.
+_PHOTO_FENCE = "<photo: {description}>"
+
 _ORPHAN_ERROR = "interrupted by restart"
 _MAX_NUDGE_CHARS = 300  # a one-line question; guards against a runaway model reply
 
@@ -120,6 +147,9 @@ class _Interaction:
         self.capture_id = capture_id
         self.kind = kind
         self.stt: dict[str, Any] | None = None
+        # Photo-derivation detail for an image capture (M9 T3): media id, terminal status, VLM
+        # model, attempts, error. Mirrors `stt` for the voice leg — a logging concern only (rule 7).
+        self.derive: dict[str, Any] | None = None
         self.organize: dict[str, Any] | None = None
         self.entities: dict[str, Any] | None = None
         self.nudge: dict[str, Any] | None = None
@@ -138,6 +168,7 @@ class _Interaction:
             "capture_id": self.capture_id,
             "kind": self.kind,
             "stt": self.stt,
+            "derive": self.derive,
             "organize": self.organize,
             "entities": self.entities,
             "nudge": self.nudge,
@@ -168,6 +199,10 @@ class UnsupportedAudio(CaptureError):
     """The uploaded audio is too large or an unsupported container."""
 
 
+class UnsupportedImage(CaptureError):
+    """The uploaded image is too large or an unsupported type (03-api / ADR-057 §6)."""
+
+
 class CaptureNotFound(CaptureError):
     """No capture with the given id."""
 
@@ -196,9 +231,19 @@ class CapturePipeline:
         review_queue: ReviewQueue,
         tag_vocabulary: TagVocabulary | None = None,
         vocab: VocabularyProvider | None = None,
+        media_store: MediaStore | None = None,
+        media_files: MediaFiles | None = None,
+        media_derivation: MediaDerivationService | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
+        # Media substrate (M9 T3, ADR-057) for ad-hoc image capture: the `media` row + raw file +
+        # the resumable vision derivation. Optional — a pipeline wired for text/voice/chat only
+        # (unit tests, the reprocess/chat-distiller CLI builder) leaves these None; `create_image_
+        # capture` / the `_process` image branch require them and fail clearly if unset.
+        self._media_store = media_store
+        self._media_files = media_files
+        self._media_derivation = media_derivation
         # Organize + nudge distillation route through the `conspect` group (ADR-025); the registry
         # is kept for the STT leg (transcribe), which is a separate provider chain (ADR-020).
         self._routing = routing
@@ -308,7 +353,7 @@ class CapturePipeline:
             raise UnsupportedAudio(
                 f"audio exceeds {self._settings.audio_max_bytes} bytes (Whisper limit)"
             )
-        ext = _audio_ext(filename)
+        ext = _file_ext(filename)
         if ext not in ALLOWED_AUDIO_EXTS:
             raise UnsupportedAudio(f"unsupported audio type: .{ext}")
 
@@ -321,6 +366,45 @@ class CapturePipeline:
             kind=KIND_VOICE,
             status=RECEIVED,
             audio_path=stored_name,
+        )
+        self._spawn(self._process(capture_id))
+        return capture_id
+
+    async def create_image_capture(self, image: bytes, *, filename: str) -> str:
+        """Ad-hoc PWA photo capture (M9 T3, ADR-057 §6): persist the raw image, mint the capture +
+        media rows, then spawn the background describe→organize.
+
+        Never-lose ordering (rule 2): the raw image lands on disk **first**, then the ``captures``
+        row (kind ``image``), then the ``media`` row (its ``capture_id`` fk needs the capture to
+        exist). The `_process` image branch drives the vision derivation and organizes the fenced
+        description. Returns the capture id immediately (202); the client polls ``GET /captures``.
+
+        The type is validated + the mime derived from the **filename extension** (the one dimension
+        we check) — never the client-supplied content type, which could disagree (e.g. an
+        ``image/svg+xml`` header on a ``.png``) and is served back verbatim by ``GET /media/{id}``.
+        """
+        if self._media_store is None or self._media_files is None:
+            raise CaptureError("image capture requires the media substrate to be wired")
+        if len(image) > self._settings.image_max_bytes:
+            raise UnsupportedImage(f"image exceeds {self._settings.image_max_bytes} bytes")
+        ext = _file_ext(filename)
+        if ext not in ALLOWED_IMAGE_EXTS:
+            raise UnsupportedImage(f"unsupported image type: .{ext}")
+        mime = _IMAGE_MIME[ext]
+
+        capture_id = str(uuid.uuid4())
+        rel_path = self._media_files.relative_path(SOURCE_CAPTURE, f"{capture_id}.{ext}")
+        # Raw image to disk BEFORE any row — never-lose (mirrors the voice audio write).
+        await self._media_files.write_async(rel_path, image)
+        # Capture row first (the media fk points at it), then the media row that the derivation
+        # stage advances (status `pending` → `derived` | `unavailable`).
+        await self._store.create(capture_id=capture_id, kind=KIND_IMAGE, status=RECEIVED)
+        await self._media_store.create(
+            kind=KIND_PHOTO,
+            source=SOURCE_CAPTURE,
+            capture_id=capture_id,
+            file_path=rel_path,
+            mime_type=mime,
         )
         self._spawn(self._process(capture_id))
         return capture_id
@@ -426,6 +510,34 @@ class CapturePipeline:
         deterministically. Idempotent (rule 6); never raises past the shared core's own guard."""
         await self._reorganize(capture_id)
 
+    async def redescribe_image_capture(self, capture_id: str) -> None:
+        """Recover an image capture's node after a targeted photo re-derive (M9 T3, ADR-057 §3/§6).
+
+        The forward path files a placeholder node when derivation is ``unavailable`` (raw kept), and
+        the media re-derive core (T2) can later recover ``media.derived_text`` — but that recovery
+        is invisible to the graph until the node is rebuilt from it. This is the capture-layer seam
+        that closes that loop: **re-derive** the photo (reset→pending→derive, recovering the media
+        item), **refresh** the capture's fenced ``raw_text`` from the fresh description, then
+        **reorganize** the node so the recovered text reaches the graph. AWAITED (like
+        :meth:`reorganize_capture_now`) so a drill / the ad-hoc re-derive trigger can report the
+        outcome; the HTTP trigger lands with the connector re-derive surface (M9.5). Idempotent — a
+        still-``unavailable`` re-derive just re-fences the placeholder (a no-op node). ``404`` when
+        unknown; ``CaptureError`` if the capture is not an image or its media row is missing."""
+        if self._media_store is None or self._media_derivation is None:
+            raise CaptureError("image capture requires the media substrate to be wired")
+        record = await self._store.get(capture_id)
+        if record is None:
+            raise CaptureNotFound(capture_id)
+        if record.kind != KIND_IMAGE:
+            raise CaptureError(f"capture {capture_id} is not an image capture")
+        media = await self._media_store.get_by_capture_id(capture_id)
+        if media is None:
+            raise CaptureError(f"image capture {capture_id} has no media row")
+        await self._media_derivation.rederive(media_ids=[media.id])
+        media = await self._media_store.get(media.id) or media
+        await self._store.set_raw_text(capture_id, _fence_photo(media))
+        await self._reorganize(capture_id)
+
     async def retry_capture(self, capture_id: str) -> None:
         """Re-run a ``failed`` capture from its first incomplete step (03-api; 409 otherwise).
 
@@ -516,6 +628,12 @@ class CapturePipeline:
                 inter.fallback_used = inter.fallback_used or stt.fallback_used
                 transcript = stt.text
                 await self._store.set_raw_text(capture_id, transcript)
+            elif record.kind == KIND_IMAGE:
+                # Derive the photo's vision description (driving retries → placeholder without a
+                # human), fence it as `<photo: …>`, and persist it as the capture's raw text — the
+                # organize/reprocess replay source, exactly as a voice transcript is (ADR-057 §6).
+                transcript = await self._derive_image(capture_id, inter)
+                await self._store.set_raw_text(capture_id, transcript)
 
             await self._store.mark_status(capture_id, ORGANIZING)
             t1 = time.monotonic()
@@ -551,8 +669,10 @@ class CapturePipeline:
 
             # Trailing, non-blocking nudge — nodes have already landed. Skipped on the inbox
             # fallback path (there is no understanding to dig into — ADR-019 §1). Sourced from
-            # the raw capture (not the nodes) so it matches the person's language.
-            if not organize.used_fallback:
+            # the raw capture (not the nodes) so it matches the person's language. Also skipped for
+            # an image capture (M9 T3): the "raw" here is a derived, fenced photo description, not
+            # the person's own words, so a nudge sourced from it would misfire (ADR-019 §1 intent).
+            if not organize.used_fallback and record.kind != KIND_IMAGE:
                 nudge_model = await self._generate_nudge(capture_id, transcript)
                 inter.nudge = {"model": nudge_model}
 
@@ -1040,6 +1160,41 @@ class CapturePipeline:
             logger.exception("nudge generation failed for capture %s (ignored)", capture_id)
             return None
 
+    async def _derive_image(self, capture_id: str, inter: _Interaction) -> str:
+        """Derive an image capture's organizer text (M9 T3, ADR-057 §3/§5/§6).
+
+        The raw image + ``media`` row were written at capture time; here we drive the vision
+        derivation to a terminal state (``derive_until_settled`` — a persistent VLM failure walks
+        retry → ``unavailable`` without a human, so the pipeline is never blocked and the kept
+        image stays re-derivable). The organizer text is built by :func:`_fence_photo`: a
+        description fenced as ``<photo: …>`` (shared material, never the person's words — the
+        binding screenshot-attribution rule), or the ``unavailable`` placeholder. The derivation
+        detail rides ``inter`` (agent_runs, rule 7).
+
+        Raises only when the media substrate is unwired or the row is missing (a rare capture-time
+        partial write) — the outer ``_process`` guard then fails the capture retryably; the image
+        is still on disk (never-lose)."""
+        if self._media_store is None or self._media_derivation is None:
+            raise CaptureError("image capture requires the media substrate to be wired")
+        await self._store.mark_status(capture_id, DERIVING)
+        media = await self._media_store.get_by_capture_id(capture_id)
+        if media is None:
+            raise CaptureError(f"image capture {capture_id} has no media row")
+        t0 = time.monotonic()
+        await self._media_derivation.derive_until_settled(media.id)
+        # Re-read the settled row — the returned outcome is a snapshot; the row carries the
+        # authoritative status / derived text / model after the (possibly looped) attempts.
+        media = await self._media_store.get(media.id) or media
+        inter.timings_ms["derive"] = int((time.monotonic() - t0) * 1000)
+        inter.derive = {
+            "media_id": media.id,
+            "status": media.status,
+            "model": media.model_used,
+            "attempts": media.attempts,
+            "error": media.error,
+        }
+        return _fence_photo(media)
+
     async def _transcribe(self, audio_path: str | None) -> TranscriptResult:
         if not audio_path:
             raise ProviderUnavailable("voice capture has no stored audio")
@@ -1123,8 +1278,19 @@ class CapturePipeline:
         task.add_done_callback(self._tasks.discard)
 
 
-def _audio_ext(filename: str) -> str:
+def _file_ext(filename: str) -> str:
+    """Lower-cased extension of an uploaded filename, or "" when it has none (voice + M9 T3)."""
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def _fence_photo(media) -> str:
+    """The organizer-facing text for a photo media item (M9 T3, ADR-057 §5/§6): its derived
+    description fenced as ``<photo: …>`` (shared material — the organizer treats it as a record of
+    an image, never the person's words), or the self-describing ``unavailable`` placeholder when no
+    description could be derived. Both are ``<photo …>`` forms the organizer prompt recognizes."""
+    if media.status == MEDIA_DERIVED and (media.derived_text or "").strip():
+        return _PHOTO_FENCE.format(description=media.derived_text.strip())
+    return placeholder(media.kind)
 
 
 def _chat_capture_id(session_id: str, text: str) -> str:

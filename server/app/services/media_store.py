@@ -33,6 +33,13 @@ KIND_PHOTO = "photo"
 KIND_VOICE = "voice"
 KIND_VIDEO = "video"
 
+# --- Media sources (the producing surface + the top of the `/srv/data/media/<source>/…` layout,
+# ADR-057 §3 / 02-data-model). `capture` is ad-hoc PWA capture (M9); the Instagram-DM connector
+# adds `instagram` at M9.5. (ADR-057 §3 sketched the folder as `captures/`; the data-model
+# reconciles the layout top to `<source>`, so folder == source == `capture` — the same singular/
+# plural reconciliation T2 applied to the `connector_media` → `media` table name.)
+SOURCE_CAPTURE = "capture"
+
 # --- Derivation lifecycle statuses (ADR-057 §3). ---
 PENDING = "pending"
 DERIVED = "derived"
@@ -75,6 +82,12 @@ class MediaStore(Protocol):
     ) -> MediaRecord: ...
 
     async def get(self, media_id: str) -> MediaRecord | None: ...
+
+    async def get_by_capture_id(self, capture_id: str) -> MediaRecord | None:
+        """The media item backing an ad-hoc image capture (M9 T3): its ``media.capture_id`` fk row,
+        oldest-first if somehow >1 (ad-hoc capture is 1:1). None when the capture has no media — the
+        image-capture pipeline treats that as an anomaly (the row is written at capture time)."""
+        ...
 
     async def get_many(self, media_ids: list[str]) -> list[MediaRecord]:
         """The given ids that exist, in ``created_at`` order (an unknown id is simply absent)."""
@@ -173,6 +186,19 @@ class PgMediaStore:
     async def get(self, media_id: str) -> MediaRecord | None:
         async with self._db.acquire() as conn:
             row = await conn.fetchrow(f"SELECT {_COLUMNS} FROM media WHERE id = $1", media_id)
+        return _record(row) if row is not None else None
+
+    async def get_by_capture_id(self, capture_id: str) -> MediaRecord | None:
+        async with self._db.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_COLUMNS} FROM media
+                 WHERE capture_id = $1
+                 ORDER BY created_at ASC
+                 LIMIT 1
+                """,
+                capture_id,
+            )
         return _record(row) if row is not None else None
 
     async def get_many(self, media_ids: list[str]) -> list[MediaRecord]:
