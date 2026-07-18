@@ -63,6 +63,13 @@ REPROCESS = "reprocess-all"
 # The legacy-voice → media backfill (ADR-060 §5): relocate pre-substrate voice audio into the media
 # layout, mint `voice` media rows, link node_media. Idempotent + degrading; T6 runs it at deploy.
 VOICE_MEDIA_BACKFILL = "voice-media-backfill"
+# Targeted media re-derive → node recovery (ADR-060 §5), taking one `<capture_id>` argument. The
+# operator/drill trigger for `CapturePipeline.rederive_capture`: re-run the VLM/STT on an
+# `unavailable` image/voice capture, refresh its `raw_text`, reorganize so the recovered text
+# reaches the NODE (not just `GET /media/{id}`). The M9 T6 failure→placeholder→re-derive drill's
+# live path (no HTTP trigger exists yet — the connector re-derive endpoint lands at M9.5); parallels
+# `reindex`/`reprocess-all` having a CLI verb for the recovery drill without the authenticated API.
+REDERIVE_CAPTURE = "rederive-capture"
 # Every valid CLI job name (backup jobs + reindex + entity jobs + capsule + distill + reprocess).
 JOBS: tuple[str, ...] = (
     *BACKUP_JOBS.keys(),
@@ -232,6 +239,42 @@ async def run_job(name: str) -> None:
         await db.disconnect()
 
 
+async def run_rederive_capture(capture_id: str) -> int:
+    """Re-derive one media capture and recover its node (ADR-060 §5) — the T6 recovery drill.
+
+    Builds a capture pipeline **with derivation wired** (``wire_media_derivation=True`` — unlike
+    reprocess, this must re-run the VLM/STT to recover an ``unavailable`` item), awaits
+    :meth:`CapturePipeline.rederive_capture` (re-derive media → refresh ``raw_text`` → reorganize),
+    then drains + flushes the store backup so this one-shot process commits the recovered node
+    before exiting (the inbox-drain / reprocess CLI pattern; the in-app path relies on its
+    long-lived debounce). Idempotent (rule 6) — a still-``unavailable`` re-derive just re-writes
+    the placeholder. Returns 1 with a message on an unknown / non-media capture, not a traceback."""
+    from .services.capture_pipeline import CaptureError, build_capture_pipeline
+
+    settings = get_settings()
+    db = Database(settings)
+    await db.connect()
+    try:
+        store_backup = StoreBackupService(settings=settings, git=GitRepo(settings.graph_store_path))
+        await store_backup.ensure_ready()
+        pipeline = build_capture_pipeline(settings, db, store_backup, wire_media_derivation=True)
+        try:
+            await pipeline.rederive_capture(capture_id)
+        except CaptureError as exc:
+            sys.stderr.write(f"rederive-capture: {exc}\n")
+            return 1
+        await pipeline.drain()
+        # Reorganize wrote the (re)organized node to the store; commit it before this process exits.
+        await store_backup.backup_now("rederive-capture")
+        # "complete", not "recovered": a still-`unavailable` re-derive is a valid no-op re-filing
+        # the placeholder. The resulting media status is in the derivation/reorganize agent_runs
+        # (rule 7) + SQL smoke block 2 — the drill verifies actual recovery there, not by exit code.
+        logger.info("rederive-capture: re-derive complete for capture %s", capture_id)
+        return 0
+    finally:
+        await db.disconnect()
+
+
 # The two schedulable pipelines (ADR-047) — run a whole roster once with `python -m app.cli
 # pipeline <name>`. The names must match the config `pipeline_defs()`.
 PIPELINES: tuple[str, ...] = ("nightly", "weekly")
@@ -247,10 +290,15 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"usage: python -m app.cli pipeline {{{'|'.join(PIPELINES)}}}\n")
             return 2
         return asyncio.run(run_pipeline(args[1]))
+    # `rederive-capture <capture_id>` — a 2-arg verb (like `pipeline`), the arg being an arbitrary
+    # capture id, so it's validated by arity + name here, not the exactly-1-arg JOBS check below.
+    if len(args) == 2 and args[0] == REDERIVE_CAPTURE:
+        return asyncio.run(run_rederive_capture(args[1]))
     if len(args) != 1 or args[0] not in JOBS:
         sys.stderr.write(
             f"usage: python -m app.cli {{{'|'.join(JOBS)}}}\n"
             f"       python -m app.cli pipeline {{{'|'.join(PIPELINES)}}}\n"
+            f"       python -m app.cli {REDERIVE_CAPTURE} <capture_id>\n"
         )
         return 2
     asyncio.run(run_job(args[0]))

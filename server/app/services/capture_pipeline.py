@@ -1356,12 +1356,22 @@ def _chat_capture_id(session_id: str, text: str) -> str:
     return str(uuid.uuid5(_CHAT_CAPTURE_NS, f"{session_id}\n{normalized}"))
 
 
-def build_capture_pipeline(settings: Settings, db, store_backup: StoreBackup) -> CapturePipeline:
+def build_capture_pipeline(
+    settings: Settings, db, store_backup: StoreBackup, *, wire_media_derivation: bool = False
+) -> CapturePipeline:
     """Construct a standalone :class:`CapturePipeline` (full organizer wiring) for the CLI-driven
     jobs that must go through the single writer (rule 2b) without the HTTP app — ``reprocess-all``
     replay and the chat-distiller's endorsed-candidate ingest (ADR-042 / ADR-048). Mirrors the
     ``main.py`` wiring but assembles only what an organize needs. Lazy imports keep the CLI's
-    minimal-context startup from pulling the whole app graph."""
+    minimal-context startup from pulling the whole app graph.
+
+    ``wire_media_derivation`` additionally wires the **derivation** engine (`media_files` +
+    :class:`MediaDerivationService`) so :meth:`CapturePipeline.rederive_capture` — which *re-runs*
+    the VLM/STT to recover an ``unavailable`` item (ADR-060 §5) — has what it needs. It defaults
+    **off**: ``reprocess-all`` replay must NOT re-run the VLM/STT (it replays the stored
+    fenced/transcript ``raw_text``, parity with existing reprocess behaviour), so its pipeline keeps
+    derivation unwired. The ``rederive-capture`` CLI verb (the T6 recovery drill's live trigger,
+    ADR-060 §5) opts in."""
     from ..entities.resolver import EntityResolver
     from ..entities.store import PgAliasStore
     from ..indexing.indexer import Indexer
@@ -1373,7 +1383,8 @@ def build_capture_pipeline(settings: Settings, db, store_backup: StoreBackup) ->
     from ..vocab.store import PgVocabularyStore
     from .agent_runs import PgAgentRunStore
     from .capture_store import PgCaptureStore
-    from .media_store import PgMediaStore
+    from .media_derivation import build_media_derivation_service
+    from .media_store import MediaFiles, PgMediaStore
     from .model_routing import build_model_routing
     from .node_media_store import PgNodeMediaStore
     from .review_queue import PgReviewQueue
@@ -1396,6 +1407,25 @@ def build_capture_pipeline(settings: Settings, db, store_backup: StoreBackup) ->
         routing=routing,
         vocab=vocabulary_service,
     )
+    # Media substrate for the derived-tier `node_media` rebuild on reprocess-all replay (ADR-060
+    # §3): the CLI pipeline re-links image/voice captures' media to their replayed content nodes.
+    media_store = PgMediaStore(db)
+    media_files = MediaFiles(settings) if wire_media_derivation else None
+    # Derivation is unwired by default — reprocess replays the stored fenced/transcript `raw_text`,
+    # never re-running the VLM/STT (parity with existing reprocess). `wire_media_derivation` opts in
+    # for `rederive-capture`, which must re-run the VLM/STT to recover an `unavailable` item.
+    media_derivation = (
+        build_media_derivation_service(
+            settings=settings,
+            store=media_store,
+            files=media_files,
+            routing=routing,
+            registry=registry,
+            run_store=run_store,
+        )
+        if wire_media_derivation
+        else None
+    )
     return CapturePipeline(
         settings=settings,
         store=PgCaptureStore(db),
@@ -1409,10 +1439,8 @@ def build_capture_pipeline(settings: Settings, db, store_backup: StoreBackup) ->
         review_queue=review_queue,
         tag_vocabulary=PgTagStore(db),
         vocab=vocabulary_service,
-        # Media substrate for the derived-tier `node_media` rebuild on reprocess-all replay
-        # (ADR-060 §3): the CLI pipeline re-links image/voice captures' media to their replayed
-        # content nodes. Derivation is NOT wired — reprocess replays the stored fenced/transcript
-        # `raw_text`, never re-running the VLM/STT (parity with the existing reprocess behaviour).
-        media_store=PgMediaStore(db),
+        media_store=media_store,
+        media_files=media_files,
+        media_derivation=media_derivation,
         node_media_store=PgNodeMediaStore(db),
     )
