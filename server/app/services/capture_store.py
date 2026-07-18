@@ -103,8 +103,8 @@ class CaptureRecord:
     # text/mcp/chat captures. Derived, not stored here.
     media_refs: list[CaptureMediaRef] = field(default_factory=list)
     # The capture's most recent processing `agent_runs` id (M9.6 T4, ADR-061 §10 — the Activity-tab
-    # deep-link), resolved read-time from `agent_runs.details->>'capture_id'`; None until a run
-    # exists. Derived, not stored on the row.
+    # deep-link), a stored `captures.run_id` column the pipeline stamps at run-start (so the link is
+    # live *during* processing, not only after finish). None until the first run starts.
     run_id: str | None = None
     follow_up_question: str | None = None
     follow_up_answer: str | None = None
@@ -174,6 +174,11 @@ class CaptureStore(Protocol):
         """Edit a composite draft's typed text body (M9.6 T1, ADR-061 §3/§5)."""
         ...
 
+    async def set_run_id(self, capture_id: str, run_id: str) -> None:
+        """Stamp the capture's current processing ``agent_runs`` id (M9.6 T4, ADR-061 §10 — the
+        Activity deep-link). Called at run-start so the link is live during processing."""
+        ...
+
     async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None: ...
 
     async def set_follow_up_question(self, capture_id: str, question: str) -> None: ...
@@ -207,7 +212,7 @@ class CaptureStore(Protocol):
 
 
 _COLUMNS = (
-    "id, kind, status, raw_text, text_body, audio_path, node_paths, "
+    "id, kind, status, raw_text, text_body, run_id, audio_path, node_paths, "
     "follow_up_question, follow_up_answer, error, created_at, updated_at, source, source_ref, "
     "removed_at"
 )
@@ -245,20 +250,6 @@ _MEDIA_REF_JOIN = """
           FROM media m
          WHERE m.capture_id = c.id
     ) media_ref ON true
-"""
-
-# The M9.6 T4 read-time capture → Activity-run deep-link (ADR-061 §10): the capture's most recent
-# processing `agent_runs` id, found via the `capture_id` the pipeline stamps into `details` (every
-# `_process`/reorganize/reprocess interaction). NULL (→ None) until a run exists. Newest run wins so
-# the link always points at the latest processing pass.
-_RUN_REF_JOIN = """
-    LEFT JOIN LATERAL (
-        SELECT r.id AS run_id
-          FROM agent_runs r
-         WHERE r.agent = 'capture' AND r.details->>'capture_id' = c.id::text
-         ORDER BY r.started_at DESC
-         LIMIT 1
-    ) run_ref ON true
 """
 
 
@@ -301,7 +292,6 @@ def _record(
     *,
     node_refs: list[CaptureNodeRef] | None = None,
     media_refs: list[CaptureMediaRef] | None = None,
-    run_id: str | None = None,
 ) -> CaptureRecord:
     return CaptureRecord(
         id=str(row["id"]),
@@ -309,11 +299,11 @@ def _record(
         status=row["status"],
         raw_text=row["raw_text"],
         text_body=row["text_body"],
+        run_id=str(row["run_id"]) if row["run_id"] is not None else None,
         audio_path=row["audio_path"],
         node_paths=list(row["node_paths"] or []),
         node_refs=node_refs or [],
         media_refs=media_refs or [],
-        run_id=run_id,
         follow_up_question=row["follow_up_question"],
         follow_up_answer=row["follow_up_answer"],
         error=row["error"],
@@ -378,12 +368,10 @@ class PgCaptureStore:
         async with self._db.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_refs,
-                       run_ref.run_id AS run_id
+                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_refs
                   FROM captures c
                 {_NODE_REFS_JOIN}
                 {_MEDIA_REF_JOIN}
-                {_RUN_REF_JOIN}
                  WHERE c.id = $1
                 """,
                 capture_id,
@@ -391,22 +379,17 @@ class PgCaptureStore:
         if row is None:
             return None
         return _record(
-            row,
-            node_refs=_node_refs(row["node_refs"]),
-            media_refs=_media_refs(row["media_refs"]),
-            run_id=str(row["run_id"]) if row["run_id"] is not None else None,
+            row, node_refs=_node_refs(row["node_refs"]), media_refs=_media_refs(row["media_refs"])
         )
 
     async def list_recent(self, limit: int) -> list[CaptureRecord]:
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_refs,
-                       run_ref.run_id AS run_id
+                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_refs
                   FROM captures c
                 {_NODE_REFS_JOIN}
                 {_MEDIA_REF_JOIN}
-                {_RUN_REF_JOIN}
                  ORDER BY c.created_at DESC
                  LIMIT $1
                 """,
@@ -414,10 +397,7 @@ class PgCaptureStore:
             )
         return [
             _record(
-                r,
-                node_refs=_node_refs(r["node_refs"]),
-                media_refs=_media_refs(r["media_refs"]),
-                run_id=str(r["run_id"]) if r["run_id"] is not None else None,
+                r, node_refs=_node_refs(r["node_refs"]), media_refs=_media_refs(r["media_refs"])
             )
             for r in rows
         ]
@@ -462,6 +442,9 @@ class PgCaptureStore:
 
     async def set_text_body(self, capture_id: str, text_body: str) -> None:
         await self._set(capture_id, "text_body = $2", text_body)
+
+    async def set_run_id(self, capture_id: str, run_id: str) -> None:
+        await self._set(capture_id, "run_id = $2", run_id)
 
     async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None:
         await self._set(capture_id, "node_paths = $2", node_paths)

@@ -134,7 +134,8 @@ async def edit_draft_text(
             status_code=status.HTTP_409_CONFLICT, detail="capture is not an open draft"
         ) from None
     record = await pipeline.get(capture_id)
-    assert record is not None  # just edited it
+    if record is None:  # concurrently discarded between the edit and the re-read (rare race)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="capture not found")
     parts = await pipeline.draft_parts(capture_id)
     return DraftView.from_record(record, parts)
 

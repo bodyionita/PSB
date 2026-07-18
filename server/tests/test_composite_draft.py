@@ -363,3 +363,14 @@ async def test_total_attribution_failure_falls_back_all_to_all(tmp_path: Path):
     # Both media link to both nodes (2 nodes × 2 media = 4 links).
     assert len(m0_nodes) == 2 and m0_nodes == m1_nodes
     assert len(nm.links) == 4
+
+
+async def test_run_id_stamped_for_activity_deep_link(tmp_path: Path):
+    # M9.6 T4 (ADR-061 §10): the capture's processing run is stamped on the row so the Activity
+    # deep-link resolves (here: after processing; stamping happens at run-start in _process).
+    pipeline, store, _b, _r, _root = _make_pipeline(tmp_path)
+    draft = await pipeline.open_or_resume_draft()
+    await pipeline.set_draft_text(draft.id, "a note")
+    await pipeline.submit_draft(draft.id)
+    await pipeline.drain()
+    assert store.records[draft.id].run_id is not None

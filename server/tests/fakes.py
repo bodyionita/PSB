@@ -1109,6 +1109,9 @@ class FakeCaptureStore:
     async def set_text_body(self, capture_id: str, text_body: str) -> None:
         self.records[capture_id].text_body = text_body
 
+    async def set_run_id(self, capture_id: str, run_id: str) -> None:
+        self.records[capture_id].run_id = run_id
+
     async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None:
         self.records[capture_id].node_paths = list(node_paths)
 

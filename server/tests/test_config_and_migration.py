@@ -116,10 +116,10 @@ def test_production_rejects_insecure_default_secrets():
     Settings(environment="development")
 
 
-def test_compute_head_is_migration_019():
-    # M9.6 T1 adds revision 019 (composite capture: captures.text_body, media.part_ordinal, the
-    # one-active-draft partial unique index — ADR-061); head advances to it from 018.
-    assert compute_head() == "019"
+def test_compute_head_is_migration_020():
+    # M9.6 adds 019 (composite capture: captures.text_body, media.part_ordinal, one-active-draft
+    # index) then 020 (captures.run_id, the Activity deep-link — ADR-061); head advances to 020.
+    assert compute_head() == "020"
 
 
 def test_media_config_defaults():

@@ -484,12 +484,20 @@ class CapturePipeline:
         if existing is not None:
             return existing
         capture_id = str(uuid.uuid4())
-        return await self._store.create(
-            capture_id=capture_id,
-            kind=KIND_COMPOSITE,
-            status=DRAFT,
-            source=SOURCE_WEB,
-        )
+        try:
+            return await self._store.create(
+                capture_id=capture_id,
+                kind=KIND_COMPOSITE,
+                status=DRAFT,
+                source=SOURCE_WEB,
+            )
+        except Exception:  # noqa: BLE001 — the one-active-draft unique index may reject a racing
+            # concurrent open (double-tap / two tabs). Resolve to the draft that won the race rather
+            # than surfacing a 500; if it genuinely vanished, re-raise.
+            racing = await self._store.get_active_draft()
+            if racing is not None:
+                return racing
+            raise
 
     async def add_draft_part(
         self, capture_id: str, data: bytes, *, filename: str, kind: str
@@ -859,6 +867,9 @@ class CapturePipeline:
         # One agent_runs row per capture run (ADR-021) — the queryable interaction log. Opening
         # it must never break the pipeline (rule 7), so a store failure just yields run_id=None.
         run_id = await self._start_run()
+        # Stamp the run onto the capture at START (ADR-061 §10) so the Activity deep-link resolves
+        # while processing is still in flight (multi-photo composites are the slowest).
+        await self._stamp_run_id(capture_id, run_id)
         inter = _Interaction(capture_id=capture_id, kind="")
         try:
             record = await self._store.get(capture_id)
@@ -994,6 +1005,7 @@ class CapturePipeline:
         existing nodes are KEPT and the capture fails retryably — a good set is never degraded to
         an inbox dump. Its own ``agent_runs`` row keeps the interaction visible (ADR-021)."""
         run_id = await self._start_run()
+        await self._stamp_run_id(capture_id, run_id)  # live Activity deep-link (ADR-061 §10)
         inter = _Interaction(capture_id=capture_id, kind="")
         label = kind_suffix.lstrip("-")
         try:
@@ -1606,6 +1618,17 @@ class CapturePipeline:
         except Exception:  # noqa: BLE001 — a logging-store failure must not break the pipeline
             logger.exception("could not open agent_runs row for a capture (logging degraded)")
             return None
+
+    async def _stamp_run_id(self, capture_id: str, run_id: str | None) -> None:
+        """Record the current processing run on the capture (ADR-061 §10 — the Activity deep-link).
+        Best-effort (rule 7): the deep-link is a UI convenience, so a failed stamp (or a None run
+        when the run-store was down) never breaks the pipeline — the chip is just absent."""
+        if run_id is None:
+            return
+        try:
+            await self._store.set_run_id(capture_id, run_id)
+        except Exception:  # noqa: BLE001 — the deep-link is a nicety; never fail the capture
+            logger.exception("could not stamp run_id on capture %s (deep-link off)", capture_id)
 
     async def _finish_run(
         self,
