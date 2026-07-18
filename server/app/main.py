@@ -51,6 +51,7 @@ from .routers import (
     capture,
     chat,
     health,
+    media,
     meta,
     oauth,
     pipelines,
@@ -69,6 +70,8 @@ from .services.git_repo import GitRepo
 from .services.graph_health import build_graph_health_service
 from .services.job_runner import JobRunner
 from .services.maybe_digest import MaybeDigestService
+from .services.media_derivation import build_media_derivation_service
+from .services.media_store import MediaFiles, PgMediaStore
 from .services.model_routing import build_model_routing
 from .services.nl_time import NlTimeClassifier
 from .services.node_time_edit import NodeTimeEditService
@@ -346,6 +349,22 @@ async def lifespan(app: FastAPI):
     )
     app.state.capture_pipeline = pipeline
 
+    # Media substrate (M9, ADR-057): the `media` table rows + the raw files under
+    # `<DATA_PATH>/media/…` (R2-synced via ADR-014), plus the resumable derivation stage (photo →
+    # `vision` group, voice → the STT chain) with bounded retries → `unavailable` → targeted
+    # re-derive. Serves ad-hoc captures now (T3/T4) and connector media at M9.5; `GET /media/{id}`
+    # streams a file behind the session gate.
+    app.state.media_store = PgMediaStore(db)
+    app.state.media_files = MediaFiles(settings)
+    app.state.media_derivation_service = build_media_derivation_service(
+        settings=settings,
+        store=app.state.media_store,
+        files=app.state.media_files,
+        routing=app.state.model_routing,
+        registry=app.state.registry,
+        run_store=run_store,
+    )
+
     # Review read/resolve surface (ADR-030 §3, M3 task 4 + M6 task 2): lists decidable items and
     # resolves them — materializing a pending entity edge onto the store (write + reindex + commit),
     # the vocab-proposal branch is delegated to the Vocabulary service (task 7 — mutate live vocab +
@@ -547,6 +566,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router, prefix=settings.api_prefix)
     app.include_router(auth.router, prefix=settings.api_prefix)
     app.include_router(capture.router, prefix=settings.api_prefix)
+    app.include_router(media.router, prefix=settings.api_prefix)
     app.include_router(search.router, prefix=settings.api_prefix)
     app.include_router(chat.router, prefix=settings.api_prefix)
     app.include_router(meta.router, prefix=settings.api_prefix)

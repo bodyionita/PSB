@@ -161,6 +161,19 @@ class Settings(BaseSettings):
     data_path: str = "../data"
     # Whisper hard limit; larger uploads are rejected before persistence.
     audio_max_bytes: int = 25 * 1024 * 1024
+
+    # --- Media substrate (M9, ADR-057 §3) ---
+    # Raw media (photos/voice notes) live under `<DATA_PATH>/<MEDIA_FOLDER>/<source>/…` on the
+    # existing raw-inputs volume (nightly R2 sync, ADR-014) — never in the git store, never a DB
+    # blob. Prod DATA_PATH = /srv/data, so the layout is /srv/data/media/<source>/… (ADR-057 §3).
+    media_folder: str = "media"
+    # Bounded derivation retries (ADR-057 §3): after this many failed attempts a media item is
+    # marked `unavailable` (downstream renders an explicit placeholder) rather than blocking the
+    # pipeline; targeted re-derive resets it to `pending` for a fresh chance (raw is kept).
+    media_derive_max_attempts: int = 3
+    # Bound on how many `unavailable` items one targeted re-derive pass revisits (a run's budget;
+    # the rest wait for the next pass — the scan is idempotent, ADR-057 §3).
+    media_rederive_max_per_run: int = 200
     # Bounds on a single organize result, enforced by validate_organizer_output.
     organizer_max_nodes: int = 8
     organizer_max_tags: int = 12

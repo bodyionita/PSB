@@ -40,6 +40,7 @@ from app.services.agent_runs import (
 )
 from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
 from app.services.git_repo import PushOutcome
+from app.services.media_store import DERIVED, PENDING, UNAVAILABLE, MediaRecord
 from app.services.model_routing import GroupRouting, ModelRoutingService
 from app.services.review_queue import ReviewItem, ReviewRecord
 from app.vocab.store import VocabularyAdditions
@@ -1325,3 +1326,87 @@ class FakeCapsuleSourceStore:
     async def recent_internal(self, limit: int) -> list[RecentNode]:
         self.limits["internal"] = limit
         return self._internal[:limit]
+
+
+class FakeMediaStore:
+    """In-memory MediaStore (ADR-057 §3) — the derivation stage + serving endpoint test double.
+
+    Rows are minted with a deterministic incrementing uuid so a test can reference them; the
+    lifecycle methods mutate the stored :class:`MediaRecord` in place, mirroring PgMediaStore."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, MediaRecord] = {}
+        self._n = 0
+
+    async def create(
+        self,
+        *,
+        kind: str,
+        source: str,
+        capture_id: str | None = None,
+        file_path: str | None = None,
+        thumb_path: str | None = None,
+        mime_type: str | None = None,
+        status: str = PENDING,
+        derived_text: str | None = None,
+        model_used: str | None = None,
+    ) -> MediaRecord:
+        self._n += 1
+        media_id = str(uuid.UUID(int=self._n))
+        record = MediaRecord(
+            id=media_id,
+            kind=kind,
+            source=source,
+            status=status,
+            capture_id=capture_id,
+            file_path=file_path,
+            thumb_path=thumb_path,
+            mime_type=mime_type,
+            derived_text=derived_text,
+            model_used=model_used,
+            created_at=datetime.now(UTC),
+        )
+        self.rows[media_id] = record
+        return record
+
+    async def get(self, media_id: str) -> MediaRecord | None:
+        return self.rows.get(media_id)
+
+    async def get_many(self, media_ids: list[str]) -> list[MediaRecord]:
+        return [self.rows[m] for m in media_ids if m in self.rows]
+
+    async def list_by_status(self, status: str, *, limit: int) -> list[MediaRecord]:
+        return [r for r in self.rows.values() if r.status == status][:limit]
+
+    async def mark_derived(
+        self, media_id: str, *, derived_text: str, model_used: str | None, attempts: int
+    ) -> None:
+        r = self.rows[media_id]
+        r.status = DERIVED
+        r.derived_text = derived_text
+        r.model_used = model_used
+        r.attempts = attempts
+        r.error = None
+
+    async def mark_unavailable(self, media_id: str, *, error: str, attempts: int) -> None:
+        r = self.rows[media_id]
+        r.status = UNAVAILABLE
+        r.attempts = attempts
+        r.error = error
+
+    async def mark_retry(self, media_id: str, *, error: str, attempts: int) -> None:
+        r = self.rows[media_id]
+        r.status = PENDING
+        r.attempts = attempts
+        r.error = error
+
+    async def reset_to_pending(self, media_ids: list[str]) -> int:
+        count = 0
+        for media_id in media_ids:
+            r = self.rows.get(media_id)
+            if r is not None:
+                r.status = PENDING
+                r.attempts = 0
+                r.error = None
+                count += 1
+        return count

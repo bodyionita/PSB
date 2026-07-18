@@ -116,7 +116,15 @@ def test_production_rejects_insecure_default_secrets():
     Settings(environment="development")
 
 
-def test_compute_head_is_migration_016():
-    # M8.2 task 2 adds revision 016 (nodes.interiority, ADR-055 §1); head advances to it from 015
-    # (agent_run_logs + agent_runs.trigger, ADR-053 §1/§2/§5).
-    assert compute_head() == "016"
+def test_compute_head_is_migration_017():
+    # M9 T2 adds revision 017 (the `media` table, ADR-057 §3); head advances to it from 016
+    # (nodes.interiority, ADR-055 §1).
+    assert compute_head() == "017"
+
+
+def test_media_config_defaults():
+    # M9 T2 (ADR-057 §3): media raw files live under `<DATA_PATH>/media/…`; derivation is bounded.
+    s = Settings()
+    assert s.media_folder == "media"
+    assert s.media_derive_max_attempts == 3
+    assert s.media_rederive_max_per_run == 200
