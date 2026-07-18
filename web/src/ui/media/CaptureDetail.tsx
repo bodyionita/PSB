@@ -6,6 +6,7 @@
 // expanded row (FeedView composes it with the anchor editor), so the two surfaces never diverge.
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import type { CaptureView } from '../../api/types';
@@ -93,7 +94,9 @@ export function CaptureDetailSheet({
     return () => document.removeEventListener('keydown', onKey);
   }, [captureId, onClose]);
 
-  return (
+  // Portal to <body>: `position: fixed` sheet mounted inside transformed (framer-motion) capture
+  // rows would otherwise be trapped in the row's containing block instead of the viewport.
+  return createPortal(
     <AnimatePresence>
       {captureId && (
         <motion.div
@@ -169,6 +172,7 @@ export function CaptureDetailSheet({
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }

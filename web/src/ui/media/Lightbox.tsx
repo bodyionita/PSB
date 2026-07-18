@@ -4,6 +4,7 @@
 // ui/ primitive so both the NodePreview media strip and the capture surfaces open the same viewer.
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { mediaUrl } from '../../api/client';
 
 export interface LightboxTarget {
@@ -73,7 +74,11 @@ export function Lightbox({
 
   const id = target?.ids[i];
 
-  return (
+  // Portal to <body>: this overlay is `position: fixed`, but it is mounted inside animated capture
+  // rows whose framer-motion `transform` establishes a containing block — which would trap the
+  // "fixed" overlay inside that row instead of the viewport (off-centre, not full-screen). Portaling
+  // out of the transformed subtree makes `fixed` resolve against the viewport at every call site.
+  return createPortal(
     <AnimatePresence>
       {target && id && (
         <motion.div
@@ -187,6 +192,7 @@ export function Lightbox({
           )}
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }
