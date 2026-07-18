@@ -98,8 +98,16 @@ class ClaudeProvider(ChatProvider):
         return result.returncode == 0
 
     async def complete(
-        self, messages: list[ChatMessage], *, model: str | None = None, effort: str | None = None
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        images: list[str] | None = None,
     ) -> str:
+        # ``images`` are ignored here by design: the `vision` routing group (M9, ADR-057 §4) routes
+        # to the OpenAI-compatible VLM providers, never the Claude CLI (file-path-through-tools
+        # hackery was the rejected alternative). Accepted only for interface parity.
         cli = self._resolve_cli()
         if cli is None:
             raise ProviderUnavailable("claude: CLI not found on PATH")

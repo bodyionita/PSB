@@ -93,7 +93,7 @@ class _FakeChat(ChatProvider):
     async def health(self) -> bool:
         return self._healthy
 
-    async def complete(self, messages, *, model=None, effort=None) -> str:
+    async def complete(self, messages, *, model=None, effort=None, images=None) -> str:
         if self.fail:
             raise ProviderUnavailable(f"{self.id}: boom")
         return "ok"
@@ -270,10 +270,11 @@ async def test_build_registry_reports_every_configured_provider():
     labels = {r.id: r.label for r in report}
     # FIVE providers now — `claude` collapsed to one row (ADR-045 §6), no fake `-max`/`-sonnet`.
     assert set(caps) == {"openai", "nebius", "groq", "claude", "ollama"}
-    assert caps["nebius"] == ["chat"]
+    assert caps["nebius"] == ["chat"]  # serves the text chat model + the vision VLM (ADR-057 §4)
     assert caps["claude"] == ["chat"]  # one row serving both Opus + Sonnet
     assert caps["openai"] == ["stt"]
-    assert caps["groq"] == ["stt"]
+    # Groq is chat-capable too: it serves the `vision` primary VLM alongside STT (M9, ADR-057 §4).
+    assert caps["groq"] == ["chat", "stt"]
     assert caps["ollama"] == ["embedding"]
     # Provider-name labels, not raw ids or model names (ADR-045 §6).
     assert labels["claude"] == "Claude"

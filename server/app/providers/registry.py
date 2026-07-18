@@ -167,6 +167,7 @@ class ProviderRegistry:
         messages: list[ChatMessage],
         chain: list[str],
         effort_by_model: dict[str, str] | None = None,
+        images: list[str] | None = None,
     ) -> ChatResult:
         efforts = effort_by_model or {}
         errors: list[str] = []
@@ -178,9 +179,10 @@ class ProviderRegistry:
             try:
                 # Per-model effort (ADR-025 §4): only models whose provider supports one get a
                 # value; the rest receive None and use the provider default. The resolved model id
-                # is passed so the one provider serves the right model (ADR-045).
+                # is passed so the one provider serves the right model (ADR-045). ``images`` (M9,
+                # ADR-057 §4) ride the same chain — a `vision` VLM sees them, a text model ignores.
                 text = await provider.complete(
-                    messages, model=model_id, effort=efforts.get(model_id)
+                    messages, model=model_id, effort=efforts.get(model_id), images=images
                 )
             except ProviderUnavailable as exc:
                 logger.warning("chat model %s (%s) unavailable: %s", model_id, provider.id, exc)
@@ -204,13 +206,15 @@ class ProviderRegistry:
         chain: list[str],
         effort_by_model: dict[str, str] | None = None,
         requested_model: str | None = None,
+        images: list[str] | None = None,
     ) -> ChatResult:
         """Mechanics for the ModelRoutingService (ADR-025 §3): walk an explicit ``chain`` of model
         ids (a requested model tried first), threading each model's ``effort``, recording
-        ``model_used``/``fallback_used``. The routing *brain* (which chain, what effort) lives in
-        the service; the registry stays pure provider mechanics."""
+        ``model_used``/``fallback_used``. ``images`` (M9, ADR-057 §4) are attached to the last user
+        message for a `vision`-group VLM call and ignored by text models. The routing *brain* (which
+        chain, what effort) lives in the service; the registry stays pure provider mechanics."""
         resolved = self._resolve_chain(requested_model, chain)
-        return await self._chat_over_chain(messages, resolved, effort_by_model)
+        return await self._chat_over_chain(messages, resolved, effort_by_model, images)
 
     async def chat(
         self, messages: list[ChatMessage], *, requested_model: str | None = None
@@ -312,18 +316,25 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         stt_model=settings.stt_model,
         provider_label="OpenAI",
     )
+    # Nebius serves its text chat model AND the `vision` group's fallback VLM over one endpoint
+    # (ADR-045 N-models-per-provider; M9/ADR-057 §4) — both reachable via the registry's per-call
+    # `model=`.
     nebius = OpenAICompatibleProvider(
         id="nebius",
         base_url=settings.nebius_base_url,
         api_key=settings.nebius_api_key,
         default_chat_model=settings.nebius_chat_model,
+        extra_chat_models=(settings.nebius_vision_model,),
         provider_label="Nebius",
     )
-    # Groq — STT primary (ADR-020). Same OpenAI-compatible class, different endpoint/key/model.
+    # Groq — STT primary (ADR-020) AND the `vision` group's primary VLM (M9, ADR-057 §4): the same
+    # OpenAI-compatible endpoint/key now also serves chat/vision via the VLM as its chat model, so
+    # it enters the chat-model catalog and gains the `chat` capability alongside `stt`.
     groq = OpenAICompatibleProvider(
         id="groq",
         base_url=settings.groq_base_url,
         api_key=settings.groq_api_key,
+        default_chat_model=settings.groq_vision_model,
         stt_model=settings.groq_stt_model,
         provider_label="Groq",
     )

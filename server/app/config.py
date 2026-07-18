@@ -246,11 +246,21 @@ class Settings(BaseSettings):
     nebius_api_key: str = ""
     nebius_base_url: str = "https://api.studio.nebius.ai/v1"
     nebius_chat_model: str = "meta-llama/Llama-3.3-70B-Instruct"
+    # Nebius VLM — the `vision` routing group's FALLBACK model (M9, ADR-057 §4). Served by the same
+    # Nebius endpoint/key as the chat model over the OpenAI-compatible `image_url` shape; a config
+    # scalar verified against Nebius Studio's live catalog at build (grilled 2026-07-18).
+    nebius_vision_model: str = "Qwen/Qwen2.5-VL-72B-Instruct"
     # Groq — STT primary (ADR-020). OpenAI-compatible /audio/transcriptions endpoint, so it
     # reuses OpenAICompatibleProvider; generous free tier + whisper-large-v3 quality.
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_stt_model: str = "whisper-large-v3"
+    # Groq VLM — the `vision` routing group's PRIMARY model (M9, ADR-057 §4 — Groq-first, user
+    # call). Llama 4 Scout is natively multimodal + fast/cheap, well-suited to compact photo
+    # descriptions and transcribing legible text off chat screenshots (the §5 contract). Served by
+    # the same Groq endpoint/key as STT over the OpenAI-compatible `image_url` shape; a config
+    # scalar verified against Groq's live catalog at build (grilled 2026-07-18).
+    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     # --- Embeddings: self-hosted nomic via Ollama (ADR-022) ---
     # Single provider, no hot fallback: one index = one vector space. `nomic-embed-text-v1.5`
@@ -278,6 +288,17 @@ class Settings(BaseSettings):
     # session titling). The cheaper Sonnet model (served by the same `claude` provider) is primary;
     # the Nebius model is the fallback.
     quick_chain: CsvList = Field(default=["claude-sonnet-4-6", "meta-llama/Llama-3.3-70B-Instruct"])
+    # `vision` routing-group seed (M9, ADR-057 §4, ADR-045): the VLM chain for media understanding
+    # (photo/screenshot description). Groq VLM primary, Nebius VLM fallback (user call — Groq
+    # first); by MODEL ID like the other chains. Effort is N/A (neither VLM provider honors
+    # `--effort`), so a resolved vision group carries an empty `effort_by_model`. The
+    # ModelRoutingService overlays any saved `app_settings.model_routing["vision"]`, else this seed.
+    vision_chain: CsvList = Field(
+        default=[
+            "meta-llama/llama-4-scout-17b-16e-instruct",
+            "Qwen/Qwen2.5-VL-72B-Instruct",
+        ]
+    )
     # STT fallback chain (ADR-020): Groq (whisper-large-v3) primary, OpenAI (whisper-1) fallback.
     stt_chain: CsvList = Field(default=["groq", "openai"])
     # The two models the single `claude` provider serves through the Agent SDK / CLI via per-call
@@ -589,6 +610,7 @@ class Settings(BaseSettings):
         "chat_chain",
         "distill_chain",
         "quick_chain",
+        "vision_chain",
         "stt_chain",
         "cors_origins",
         mode="before",

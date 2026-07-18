@@ -98,14 +98,22 @@ class ChatProvider(Provider):
 
     @abstractmethod
     async def complete(
-        self, messages: list[ChatMessage], *, model: str | None = None, effort: str | None = None
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        images: list[str] | None = None,
     ) -> str:
         """Return the assistant text, or raise ProviderUnavailable to trigger fallback.
 
         ``model`` is the vendor model string to serve this call (ADR-045 — the registry passes the
         resolved model id, so one provider can serve N models); ``None`` ⇒ the provider's default.
         ``effort`` is the per-call reasoning effort (ADR-025 §4); providers that don't support one
-        (``supports_effort`` False) ignore it and fall back to their construction default."""
+        (``supports_effort`` False) ignore it and fall back to their construction default.
+        ``images`` are image references (``data:`` URIs or URLs) attached to the LAST user message
+        for a vision call (M9, ADR-057 §4 — the ``vision`` routing group); providers that can't do
+        vision (the Claude CLI path, ADR-057 §4) ignore them. ``None``/empty ⇒ a plain text call."""
 
 
 class EmbeddingProvider(Provider):

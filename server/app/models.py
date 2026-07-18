@@ -422,17 +422,18 @@ class GroupRoutingModel(BaseModel):
 
 
 class SettingsResponse(BaseModel):
-    """Model routing for all 3 groups (GET /settings, ADR-025 + ADR-043)."""
+    """Model routing for all groups (GET /settings, ADR-025 + ADR-043 + ADR-057 §4 — the 4th
+    `vision` group). Groups are returned in the service's ``GROUPS`` order."""
 
     groups: list[GroupRoutingModel] = Field(default_factory=list)
 
 
 class ModelRoutingUpdate(BaseModel):
-    """Save one group's routing (PUT /settings/models). ``group`` is constrained to the 3 known
+    """Save one group's routing (PUT /settings/models). ``group`` is constrained to the 4 known
     groups (422 otherwise); ``active``/``fallback``/``effort_by_model`` keys are model ids (ADR-045)
     — unknown model ids / bad effort levels are a 422 from the service."""
 
-    group: Literal["chat", "conspect", "quick"]
+    group: Literal["chat", "conspect", "quick", "vision"]
     active: str = Field(min_length=1)
     fallback: str = ""
     effort_by_model: dict[str, str] = Field(default_factory=dict)

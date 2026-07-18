@@ -35,8 +35,8 @@ from ..providers.registry import ChatModelOption, ProviderRegistry
 
 logger = logging.getLogger(__name__)
 
-# The routing groups this service governs (ADR-025 two → ADR-043 three).
-GROUPS = ("chat", "conspect", "quick")
+# The routing groups this service governs (ADR-025 two → ADR-043 three → ADR-057 four: `vision`).
+GROUPS = ("chat", "conspect", "quick", "vision")
 
 # The single ``app_settings`` key holding the saved per-group routing overrides.
 MODEL_ROUTING_KEY = "model_routing"
@@ -47,6 +47,11 @@ _GROUP_SEED: dict[str, tuple[str, str]] = {
     "chat": ("chat_chain", "claude_effort"),
     "conspect": ("distill_chain", "claude_effort"),
     "quick": ("quick_chain", "claude_effort"),
+    # `vision` (M9, ADR-057 §4): seeded from `vision_chain` (Groq VLM primary, Nebius VLM fallback).
+    # Effort is N/A — VLM providers don't honor `--effort` — so `_seed` yields an empty
+    # `effort_by_model` (only effort-capable models get an entry). The effort attr is unused but
+    # kept uniform with the other groups.
+    "vision": ("vision_chain", "claude_effort"),
 }
 
 
@@ -269,19 +274,28 @@ class ModelRoutingService:
         ]
 
     async def complete(
-        self, group: str, messages: list[ChatMessage], *, requested_model: str | None = None
+        self,
+        group: str,
+        messages: list[ChatMessage],
+        *,
+        requested_model: str | None = None,
+        images: list[str] | None = None,
     ) -> ChatResult:
         """Route ``messages`` through ``group``'s resolved chain + effort (ADR-025).
 
         ``requested_model`` (the chat composer's per-conversation picker, ADR-025 §5) is tried
-        first, the group's fallback + effort still applying underneath. Raises ``RegistryExhausted``
-        when every provider in the resolved chain is unavailable (callers degrade as today)."""
+        first, the group's fallback + effort still applying underneath. ``images`` (M9, ADR-057 §4)
+        are attached to the last user message for a `vision`-group VLM call — this is the seam the
+        media-derivation stage calls (``complete("vision", …, images=[data_uri])``). Raises
+        ``RegistryExhausted`` when every provider in the resolved chain is unavailable (callers
+        degrade as today)."""
         decision = await self.resolve(group)
         return await self._registry.run_chain(
             messages,
             chain=decision.chain,
             effort_by_model=decision.effort_by_model,
             requested_model=requested_model,
+            images=images,
         )
 
     async def save(self, group: str, routing: GroupRouting) -> None:

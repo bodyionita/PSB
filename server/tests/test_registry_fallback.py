@@ -148,7 +148,7 @@ async def test_build_registry_claude_routes_per_call_model(monkeypatch):
 
     calls: list[str] = []
 
-    async def _fake_complete(messages, *, model=None, effort=None):
+    async def _fake_complete(messages, *, model=None, effort=None, images=None):
         calls.append(model)
         if model == settings.claude_opus_model:
             raise ProviderUnavailable("opus down")

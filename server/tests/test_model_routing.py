@@ -218,6 +218,51 @@ async def test_unknown_saved_model_degrades_to_seed():
     assert decision.chain == ["claude-opus-4-8", "nebius"]
 
 
+# --- vision routing group (M9, ADR-057 §4) ------------------------------------------------------
+
+
+def _vision_service() -> tuple[ModelRoutingService, dict[str, FakeChatProvider]]:
+    """A service whose registry serves two VLMs and whose `vision_chain` seeds Groq→Nebius."""
+    providers = {
+        "scout": FakeChatProvider("scout", reply="a cat photo"),
+        "qwen": FakeChatProvider("qwen", reply="qwen desc"),
+    }
+    reg = ProviderRegistry(
+        providers,
+        chat_chain=["scout"],
+        distill_chain=["scout"],
+        embedding_provider_id="none",
+        stt_chain=[],
+    )
+    settings = Settings(vision_chain=["scout", "qwen"])
+    service = ModelRoutingService(settings=settings, store=FakeModelRoutingStore(), registry=reg)
+    return service, providers
+
+
+async def test_vision_seed_groq_primary_no_effort():
+    service, _ = _vision_service()
+    decision = await service.resolve("vision")
+    assert decision.chain == ["scout", "qwen"]
+    # VLM providers don't support reasoning effort, so the group carries none (ADR-057 §4).
+    assert decision.effort_by_model == {}
+
+
+async def test_vision_complete_threads_images_to_the_vlm():
+    service, providers = _vision_service()
+    result = await service.complete("vision", MESSAGES, images=["data:image/png;base64,ZZZ"])
+    assert result.text == "a cat photo"
+    assert result.model_used == "scout"
+    # The data URI reached the primary VLM (the media-derivation seam, ADR-057 §3).
+    assert providers["scout"].images_seen == [["data:image/png;base64,ZZZ"]]
+
+
+async def test_non_vision_group_passes_no_images():
+    reg, providers = _registry()
+    service, _ = _service(reg)
+    await service.complete("conspect", MESSAGES)
+    assert providers["claude-opus-4-8"].images_seen == [None]
+
+
 # --- cache busting on save ----------------------------------------------------------------------
 
 

@@ -1,10 +1,12 @@
 """Settings router (03-api.md §Settings). Session-gated, no LLM.
 
-``GET /settings`` + ``PUT /settings/models`` (model routing, ADR-025 / ADR-043, M4 task 5) expose
-the 3 routing groups (chat/conspect/quick) for the Settings → Models panel: the effective routing
-per group (saved-over-seed) plus the registry's pickable models and their effort capability/levels
-(registry-sourced — no hardcoded lists in the web). ``PUT`` saves one group and busts the routing
-cache (forward-live); an unknown model id / bad effort level is a ``422``.
+``GET /settings`` + ``PUT /settings/models`` (model routing, ADR-025 / ADR-043 / ADR-057 §4, M4
+task 5) expose the routing groups (chat/conspect/quick + the M9 `vision` group) for the Settings →
+Models panel: the effective routing per group (saved-over-seed) plus the registry's pickable models
+and their effort capability/levels (registry-sourced — no hardcoded lists in the web). ``PUT`` saves
+one group and busts the routing cache (forward-live); an unknown model id / bad effort level is a
+``422``. The router is group-agnostic (it iterates the service's ``GROUPS``), so the `vision` group
+surfaces with no router change.
 
 ``PUT /settings/vocabulary`` (M3 task 7, ADR-027 / ADR-035) approves or rejects a pending node/edge
 type proposal from the Settings → Vocabulary panel. It is a thin peer of ``POST /review/{id}`` over

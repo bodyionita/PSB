@@ -13,9 +13,9 @@ import sys
 import pytest
 
 from app.config import Settings
-from app.providers.base import ChatMessage, EmbeddingProvider, ProviderUnavailable
+from app.providers.base import ChatMessage, ChatProvider, EmbeddingProvider, ProviderUnavailable
 from app.providers.claude import ClaudeProvider
-from app.providers.openai_compatible import OpenAICompatibleProvider
+from app.providers.openai_compatible import OpenAICompatibleProvider, _render_messages
 from app.providers.registry import build_registry
 
 
@@ -62,6 +62,93 @@ def test_build_registry_wires_ollama_as_the_embedding_provider():
     assert isinstance(ollama, EmbeddingProvider)
     # Embeddings left OpenAI entirely (ADR-022): OpenAI stays only as an STT provider.
     assert reg._embedding_provider_id != "openai"
+
+
+# --- vision: image_url content parts + N-models-per-provider (M9, ADR-057 §4) -------------------
+def test_render_messages_without_images_keeps_plain_string_content():
+    msgs = [ChatMessage(role="system", content="sys"), ChatMessage(role="user", content="hi")]
+    rendered = _render_messages(msgs, None)
+    assert rendered == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+    ]
+
+
+def test_render_messages_attaches_image_url_parts_to_last_user_message():
+    msgs = [ChatMessage(role="system", content="describe"), ChatMessage(role="user", content="go")]
+    rendered = _render_messages(msgs, ["data:image/png;base64,AAA", "data:image/jpeg;base64,BBB"])
+    # System message untouched; the user message becomes a multimodal parts list (text first).
+    assert rendered[0] == {"role": "system", "content": "describe"}
+    assert rendered[1]["role"] == "user"
+    assert rendered[1]["content"] == [
+        {"type": "text", "text": "go"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBB"}},
+    ]
+
+
+async def test_complete_sends_image_parts_in_the_payload(monkeypatch):
+    """A vision call builds the OpenAI `image_url` payload — captured at the HTTP boundary so a
+    regression that dropped the image parts would show here."""
+    provider = OpenAICompatibleProvider(
+        id="groq", base_url="https://api.groq.com/openai/v1", api_key="k", default_chat_model="vlm"
+    )
+    captured: dict = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "a cat"}}]}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, *, headers, json):
+            captured["json"] = json
+            return _Resp()
+
+    monkeypatch.setattr("app.providers.openai_compatible.httpx.AsyncClient", _Client)
+    out = await provider.complete(
+        [ChatMessage(role="user", content="describe")],
+        model="vlm",
+        images=["data:image/png;base64,ZZZ"],
+    )
+    assert out == "a cat"
+    content = captured["json"]["messages"][0]["content"]
+    assert {"type": "image_url", "image_url": {"url": "data:image/png;base64,ZZZ"}} in content
+
+
+def test_openai_compatible_serves_extra_chat_models():
+    # One endpoint may serve N chat models (ADR-045 / ADR-057 §4 — a text model + a VLM).
+    provider = OpenAICompatibleProvider(
+        id="nebius",
+        base_url="x",
+        api_key="k",
+        default_chat_model="llama",
+        extra_chat_models=("qwen-vl",),
+    )
+    assert provider.can_chat is True
+    assert provider.chat_model_ids() == ("llama", "qwen-vl")
+
+
+def test_build_registry_wires_the_vision_vlms_into_the_catalog():
+    reg = build_registry(Settings())
+    catalog = {m.id: m for m in reg.chat_models()}
+    settings = Settings()
+    # Groq's VLM is now a chat model served by `groq`; Nebius serves its text model AND the VLM.
+    assert catalog[settings.groq_vision_model].provider == "groq"
+    assert catalog[settings.nebius_vision_model].provider == "nebius"
+    groq = reg._providers["groq"]
+    assert isinstance(groq, ChatProvider) and groq.can_chat is True
 
 
 # --- claude CLI stdio (ADR-004 provider boundary + ADR-041 diacritics) --------------------

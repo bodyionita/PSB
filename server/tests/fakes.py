@@ -91,6 +91,9 @@ class FakeChatProvider(ChatProvider):
         self.models_seen: list[str | None] = []
         # The messages of the most recent call (lets a test assert prompt/fencing content).
         self.last_messages: list[ChatMessage] = []
+        # The per-call ``images`` this provider was asked to attach, in order (M9, ADR-057 §4) —
+        # lets a `vision`-group test assert the media data URIs reached the VLM.
+        self.images_seen: list[list[str] | None] = []
 
     def chat_model_ids(self) -> tuple[str, ...]:
         if not self.can_chat:
@@ -101,11 +104,17 @@ class FakeChatProvider(ChatProvider):
         return self._available
 
     async def complete(
-        self, messages: list[ChatMessage], *, model: str | None = None, effort: str | None = None
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        images: list[str] | None = None,
     ) -> str:
         self.calls += 1
         self.efforts.append(effort)
         self.models_seen.append(model)
+        self.images_seen.append(list(images) if images is not None else None)
         self.last_messages = list(messages)
         if not self._available:
             raise ProviderUnavailable(f"{self.id} is down")
@@ -136,11 +145,18 @@ def fake_routing(
     chain: tuple[str, ...] = ("fake-chat",),
     store: FakeModelRoutingStore | None = None,
 ) -> ModelRoutingService:
-    """A ModelRoutingService whose three groups all seed to ``chain`` (the test's fake ids).
+    """A ModelRoutingService whose groups all seed to ``chain`` (the test's fake ids) — including
+    the M9 `vision` group (ADR-057 §4), so a media-derivation test's ``complete("vision", …)`` lands
+    on the same fakes.
 
     Service tests build a registry over fake providers; this wraps it so ``routing.complete`` lands
     on those same providers, standing in for the production ``build_model_routing`` wiring."""
-    settings = Settings(chat_chain=list(chain), distill_chain=list(chain), quick_chain=list(chain))
+    settings = Settings(
+        chat_chain=list(chain),
+        distill_chain=list(chain),
+        quick_chain=list(chain),
+        vision_chain=list(chain),
+    )
     return ModelRoutingService(
         settings=settings, store=store or FakeModelRoutingStore(), registry=registry
     )

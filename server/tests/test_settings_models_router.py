@@ -22,6 +22,8 @@ PREFIX = "/api/v1"
 OPUS = "claude-opus-4-8"
 SONNET = "claude-sonnet-4-6"
 LLAMA = "meta-llama/Llama-3.3-70B-Instruct"
+SCOUT = "meta-llama/llama-4-scout-17b-16e-instruct"  # Groq VLM — vision primary (M9, ADR-057 §4)
+QWEN = "Qwen/Qwen2.5-VL-72B-Instruct"  # Nebius VLM — vision fallback
 
 
 def _routing() -> ModelRoutingService:
@@ -30,8 +32,11 @@ def _routing() -> ModelRoutingService:
         "claude": FakeChatProvider(
             "claude", supports_effort=True, provider_label="Claude", models=[OPUS, SONNET]
         ),
-        # Nebius serves one chat model, no reasoning effort.
-        "nebius": FakeChatProvider("nebius", provider_label="Nebius", models=[LLAMA]),
+        # Nebius serves its text chat model AND the vision fallback VLM (ADR-045 N-models,
+        # ADR-057 §4), no reasoning effort.
+        "nebius": FakeChatProvider("nebius", provider_label="Nebius", models=[LLAMA, QWEN]),
+        # Groq serves the vision primary VLM (M9, ADR-057 §4) — chat-capable now, no effort.
+        "groq": FakeChatProvider("groq", provider_label="Groq", models=[SCOUT]),
         # STT/embedding-only: a ChatProvider by class but can_chat False → excluded from the picker.
         "stt-only": OpenAICompatibleProvider(id="stt-only", base_url="x", api_key="k"),
     }
@@ -43,7 +48,10 @@ def _routing() -> ModelRoutingService:
         stt_chain=[],
     )
     settings = Settings(
-        chat_chain=[OPUS, LLAMA], distill_chain=[OPUS, LLAMA], quick_chain=[SONNET, LLAMA]
+        chat_chain=[OPUS, LLAMA],
+        distill_chain=[OPUS, LLAMA],
+        quick_chain=[SONNET, LLAMA],
+        vision_chain=[SCOUT, QWEN],
     )
     return ModelRoutingService(settings=settings, store=FakeModelRoutingStore(), registry=registry)
 
@@ -59,11 +67,12 @@ def _client(routing: ModelRoutingService) -> TestClient:
 # --- GET /settings --------------------------------------------------------------------------------
 
 
-def test_get_settings_returns_all_three_groups_from_seed():
+def test_get_settings_returns_all_groups_from_seed():
     resp = _client(_routing()).get(f"{PREFIX}/settings")
     assert resp.status_code == 200
     groups = {g["group"]: g for g in resp.json()["groups"]}
-    assert set(groups) == {"chat", "conspect", "quick"}
+    # The 4th `vision` group (M9, ADR-057 §4) surfaces alongside the ADR-025/043 three.
+    assert set(groups) == {"chat", "conspect", "quick", "vision"}
     chat = groups["chat"]
     assert chat["active"] == OPUS
     assert chat["fallback"] == LLAMA
@@ -73,10 +82,20 @@ def test_get_settings_returns_all_three_groups_from_seed():
     assert groups["quick"]["effort_by_model"] == {SONNET: "medium"}
 
 
+def test_get_settings_vision_group_seeds_groq_primary_no_effort():
+    # The `vision` group seeds Groq VLM primary → Nebius VLM fallback (ADR-057 §4); effort is N/A
+    # (VLM providers don't honor `--effort`), so it carries an empty effort_by_model.
+    groups = {g["group"]: g for g in _client(_routing()).get(f"{PREFIX}/settings").json()["groups"]}
+    vision = groups["vision"]
+    assert (vision["active"], vision["fallback"]) == (SCOUT, QWEN)
+    assert vision["effort_by_model"] == {}
+
+
 def test_get_settings_models_carry_effort_capability_and_exclude_non_chat():
     resp = _client(_routing()).get(f"{PREFIX}/settings")
     models = {m["id"]: m for m in resp.json()["groups"][0]["models"]}
-    assert set(models) == {OPUS, SONNET, LLAMA}  # stt-only excluded
+    # The VLM models join the shared catalog (stt-only excluded — can_chat False).
+    assert set(models) == {OPUS, SONNET, LLAMA, SCOUT, QWEN}
     assert models[OPUS]["supports_effort"] is True
     assert models[OPUS]["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
     assert models[OPUS]["label"] == "Claude Opus 4.8"  # model-derived friendly label (labels.py)
@@ -115,11 +134,11 @@ def test_put_models_saves_and_is_forward_live():
     assert chat["active"] == LLAMA
     assert chat["effort_by_model"] == {OPUS: "high"}
     # The PUT echoes the group's full editable state, incl. the pickable models list.
-    assert {m["id"] for m in body["models"]} == {OPUS, SONNET, LLAMA}
+    assert {m["id"] for m in body["models"]} == {OPUS, SONNET, LLAMA, SCOUT, QWEN}
 
 
 def test_put_models_saves_a_non_chat_group():
-    # Any of the 3 groups is savable, not just `chat` (conspect/quick share the machinery).
+    # Any group is savable, not just `chat` (conspect/quick share the machinery).
     routing = _routing()
     client = _client(routing)
     resp = client.put(f"{PREFIX}/settings/models", json={"group": "quick", "active": LLAMA})
@@ -127,6 +146,19 @@ def test_put_models_saves_a_non_chat_group():
     assert resp.json()["group"] == "quick"
     quick = {g["group"]: g for g in client.get(f"{PREFIX}/settings").json()["groups"]}["quick"]
     assert quick["active"] == LLAMA
+
+
+def test_put_models_saves_the_vision_group_forward_live():
+    # The `vision` group (M9, ADR-057 §4) is savable through the same choke point and forward-live.
+    routing = _routing()
+    client = _client(routing)
+    resp = client.put(
+        f"{PREFIX}/settings/models", json={"group": "vision", "active": QWEN, "fallback": SCOUT}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["group"] == "vision"
+    vision = {g["group"]: g for g in client.get(f"{PREFIX}/settings").json()["groups"]}["vision"]
+    assert (vision["active"], vision["fallback"]) == (QWEN, SCOUT)
 
 
 def test_put_models_unknown_active_is_422():
