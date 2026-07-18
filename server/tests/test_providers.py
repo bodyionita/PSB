@@ -87,6 +87,17 @@ def test_render_messages_attaches_image_url_parts_to_last_user_message():
     ]
 
 
+def test_render_messages_drops_blank_image_urls():
+    # `images` is untrusted at the provider boundary: a blank url must not become an empty part.
+    msgs = [ChatMessage(role="user", content="go")]
+    assert _render_messages(msgs, ["", None]) == [{"role": "user", "content": "go"}]  # type: ignore[list-item]
+    rendered = _render_messages(msgs, ["", "data:image/png;base64,AAA"])
+    assert rendered[0]["content"] == [
+        {"type": "text", "text": "go"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+    ]
+
+
 async def test_complete_sends_image_parts_in_the_payload(monkeypatch):
     """A vision call builds the OpenAI `image_url` payload — captured at the HTTP boundary so a
     regression that dropped the image parts would show here."""

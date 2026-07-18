@@ -40,7 +40,10 @@ def _render_messages(
     content becomes the multimodal parts list ``[{text}, {image_url}, …]`` an OpenAI-compatible VLM
     expects. If there is no user message (defensive), the parts attach to the last message."""
     rendered: list[dict[str, object]] = [{"role": m.role, "content": m.content} for m in messages]
-    if not images or not rendered:
+    # ``images`` is untrusted at this boundary — drop any blank url rather than emit an empty
+    # ``image_url`` part (mirrors the ``_dedup`` rigor applied to model ids).
+    urls = [u for u in images if u] if images else []
+    if not urls or not rendered:
         return rendered
     target = next(
         (i for i in range(len(rendered) - 1, -1, -1) if rendered[i]["role"] == "user"),
@@ -49,7 +52,7 @@ def _render_messages(
     text = rendered[target]["content"]
     rendered[target]["content"] = [
         {"type": "text", "text": text},
-        *({"type": "image_url", "image_url": {"url": url}} for url in images),
+        *({"type": "image_url", "image_url": {"url": url}} for url in urls),
     ]
     return rendered
 

@@ -33,9 +33,9 @@ async def get_media(
     record = await store.get(str(media_id))
     if record is None or not record.file_path:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="media not found")
-    path = files.absolute(record.file_path)
-    if not path.is_file():
+    if not await files.exists_async(record.file_path):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="media file missing")
+    path = files.absolute(record.file_path)
     return FileResponse(
         path,
         media_type=record.mime_type or "application/octet-stream",

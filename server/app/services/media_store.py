@@ -275,6 +275,10 @@ class MediaFiles:
     async def read_async(self, relative_path: str) -> bytes:
         return await asyncio.to_thread(self.read, relative_path)
 
+    async def exists_async(self, relative_path: str) -> bool:
+        """Whether the file is present — the blocking ``stat`` runs off the event loop (rule 8)."""
+        return await asyncio.to_thread(self.absolute(relative_path).is_file)
+
     async def write_async(self, relative_path: str, data: bytes) -> None:
         await asyncio.to_thread(self.write, relative_path, data)
 
