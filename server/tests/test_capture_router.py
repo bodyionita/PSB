@@ -22,7 +22,6 @@ from app.services.capture_pipeline import (
     EmptyDraft,
     FollowUpNotPending,
     NotRetryable,
-    UnsupportedAudio,
     UnsupportedImage,
     VoicePartLimit,
 )
@@ -171,96 +170,38 @@ def client_and_pipeline():
     return TestClient(app), fake
 
 
-def test_capture_text_returns_202(client_and_pipeline):
-    client, fake = client_and_pipeline
-    resp = client.post(f"{PREFIX}/capture/text", json={"text": "a calm thought"})
-    assert resp.status_code == 202
-    assert resp.json() == {"capture_id": "cid-text", "status": "received"}
-    assert fake.text_calls == [("a calm thought", None)]
+# The three one-shot `POST /capture/{text,voice,image}` endpoints are removed in M9.6 (ADR-061 §8);
+# every web capture goes through the composite draft flow (covered below + in test_composite_draft).
 
 
-def test_capture_text_forwards_created_at(client_and_pipeline):
+def test_capture_view_carries_media_list(client_and_pipeline):
+    # M9.6 T4 (ADR-061 §11): CaptureView carries media as an ordered LIST + text_body
+    # + the Activity-run deep-link, so the web renders each part (GET /media/{id}) + a status badge.
     client, fake = client_and_pipeline
-    resp = client.post(
-        f"{PREFIX}/capture/text",
-        json={"text": "a synced note", "created_at": "2026-07-10T09:30:00+00:00"},
+    fake.records["cmp"] = _record(
+        "cmp",
+        kind="composite",
+        text_body="my caption",
+        media_refs=[
+            CaptureMediaRef(id="media-1", kind="photo", status="derived", part_ordinal=0),
+            CaptureMediaRef(id="media-2", kind="voice", status="pending", part_ordinal=1),
+        ],
+        run_id="run-9",
     )
-    assert resp.status_code == 202
-    text, created_at = fake.text_calls[0]
-    assert text == "a synced note"
-    assert created_at == datetime(2026, 7, 10, 9, 30, 0, tzinfo=UTC)
+    body = client.get(f"{PREFIX}/captures/cmp").json()
+    assert body["text_body"] == "my caption"
+    assert body["run_id"] == "run-9"
+    assert body["media"] == [
+        {"id": "media-1", "kind": "photo", "status": "derived", "part_ordinal": 0},
+        {"id": "media-2", "kind": "voice", "status": "pending", "part_ordinal": 1},
+    ]
 
 
-def test_capture_text_rejects_empty(client_and_pipeline):
-    client, _ = client_and_pipeline
-    resp = client.post(f"{PREFIX}/capture/text", json={"text": ""})
-    assert resp.status_code == 422  # min_length=1
-
-
-def test_capture_voice_returns_202(client_and_pipeline):
-    client, fake = client_and_pipeline
-    resp = client.post(
-        f"{PREFIX}/capture/voice",
-        files={"file": ("memo.m4a", b"audio-bytes", "audio/m4a")},
-    )
-    assert resp.status_code == 202
-    assert resp.json()["capture_id"] == "cid-voice"
-    assert fake.voice_calls == [(b"audio-bytes", "memo.m4a")]
-
-
-def test_capture_voice_unsupported_maps_to_400(client_and_pipeline):
-    client, fake = client_and_pipeline
-    fake.voice_error = UnsupportedAudio("unsupported audio type: .txt")
-    resp = client.post(
-        f"{PREFIX}/capture/voice",
-        files={"file": ("memo.txt", b"x", "text/plain")},
-    )
-    assert resp.status_code == 400
-    assert "unsupported audio" in resp.json()["detail"]
-
-
-def test_capture_image_returns_202(client_and_pipeline):
-    # M9 T3 (ADR-057 §6): multipart image → 202, delegates the bytes + filename.
-    client, fake = client_and_pipeline
-    resp = client.post(
-        f"{PREFIX}/capture/image",
-        files={"file": ("shot.png", b"\x89PNG-bytes", "image/png")},
-    )
-    assert resp.status_code == 202
-    assert resp.json()["capture_id"] == "cid-image"
-    assert fake.image_calls == [(b"\x89PNG-bytes", "shot.png")]
-
-
-def test_capture_image_unsupported_maps_to_400(client_and_pipeline):
-    client, fake = client_and_pipeline
-    fake.image_error = UnsupportedImage("unsupported image type: .txt")
-    resp = client.post(
-        f"{PREFIX}/capture/image",
-        files={"file": ("note.txt", b"x", "text/plain")},
-    )
-    assert resp.status_code == 400
-    assert "unsupported image" in resp.json()["detail"]
-
-
-def test_capture_view_carries_media(client_and_pipeline):
-    # M9 T3: an image capture's CaptureView carries the backing media item (id/kind/status) so the
-    # web renders the photo (GET /media/{id}) + a derivation-status badge off the capture.
-    client, fake = client_and_pipeline
-    fake.records["img"] = _record(
-        "img",
-        kind="image",
-        raw_text="<photo: a whiteboard sketch>",
-        media_ref=CaptureMediaRef(id="media-1", kind="photo", status="derived"),
-    )
-    body = client.get(f"{PREFIX}/captures/img").json()
-    assert body["media"] == {"id": "media-1", "kind": "photo", "status": "derived"}
-
-
-def test_capture_view_media_default_null(client_and_pipeline):
-    # A non-image capture has no media item — the field is null, never an error.
+def test_capture_view_media_default_empty(client_and_pipeline):
+    # A text capture has no media parts — the field is an empty list, never an error.
     client, fake = client_and_pipeline
     fake.records["a"] = _record("a")
-    assert client.get(f"{PREFIX}/captures/a").json()["media"] is None
+    assert client.get(f"{PREFIX}/captures/a").json()["media"] == []
 
 
 def test_list_captures_defaults_and_shape(client_and_pipeline):
@@ -394,7 +335,7 @@ def test_capture_endpoints_require_session():
     app.include_router(capture.router, prefix=PREFIX)
     client = TestClient(app)
     assert client.get(f"{PREFIX}/captures").status_code == 401
-    assert client.post(f"{PREFIX}/capture/text", json={"text": "hi"}).status_code == 401
+    assert client.post(f"{PREFIX}/capture/draft").status_code == 401
 
 
 # --- Composite draft lifecycle (M9.6 T1, ADR-061 §3) ---

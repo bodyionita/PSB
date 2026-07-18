@@ -69,15 +69,17 @@ class CaptureNodeRef:
 
 @dataclass(frozen=True)
 class CaptureMediaRef:
-    """The media item backing an ad-hoc image OR voice capture (M9 T3/T4, ADR-057 §6 / ADR-060 §5),
+    """One media item on a capture (M9 T3/T4 → M9.6 T4, ADR-057 §6 / ADR-060 §5 / ADR-061 §11),
     resolved at read time from ``media.capture_id`` so the web can render the photo / voice player
-    (``GET /media/{id}``) + a derivation-status badge straight off the capture. ``None`` for
-    text/mcp/chat captures (no media row). ``kind`` is ``photo``/``voice``; ``status`` is the
-    derivation lifecycle (``pending``/``derived``/``unavailable``)."""
+    (``GET /media/{id}``) + a derivation-status badge straight off the capture. A capture carries a
+    **list** of these (M9.6: 0..N photos + <=1 voice), ordered by ``part_ordinal``; empty for
+    text/mcp/chat captures. ``kind`` is ``photo``/``voice``; ``status`` is the derivation lifecycle
+    (``pending``/``derived``/``unavailable``)."""
 
     id: str
     kind: str
     status: str
+    part_ordinal: int | None = None
 
 
 @dataclass
@@ -96,10 +98,14 @@ class CaptureRecord:
     # Populated by `get`/`list_recent`'s read-time join; empty on a freshly-created record (no
     # nodes yet) and never written back to `captures` (derived, not stored).
     node_refs: list[CaptureNodeRef] = field(default_factory=list)
-    # The backing media item for an image OR voice capture (M9 T3/T4) — resolved by `get`/
-    # `list_recent`'s read-time `media.capture_id` join; None for text/mcp/chat captures. Derived,
-    # not stored here.
-    media_ref: CaptureMediaRef | None = None
+    # The capture's media parts (M9.6 T4, ADR-061 §11 — singular → list) — resolved by `get`/
+    # `list_recent`'s read-time `media.capture_id` join, ordered by `part_ordinal`; empty for
+    # text/mcp/chat captures. Derived, not stored here.
+    media_refs: list[CaptureMediaRef] = field(default_factory=list)
+    # The capture's most recent processing `agent_runs` id (M9.6 T4, ADR-061 §10 — the Activity-tab
+    # deep-link), resolved read-time from `agent_runs.details->>'capture_id'`; None until a run
+    # exists. Derived, not stored on the row.
+    run_id: str | None = None
     follow_up_question: str | None = None
     follow_up_answer: str | None = None
     error: str | None = None
@@ -224,30 +230,53 @@ _NODE_REFS_JOIN = """
     ) node_refs ON true
 """
 
-# The M9 T3/T4 read-time `media.capture_id -> media` join: the one media item backing an ad-hoc
-# image or voice capture (1:1; LIMIT 1 is a defensive cap), as a jsonb object so the web renders the
-# photo / voice player + derivation-status badge off the capture without a second round-trip. NULL
-# for a capture with no media (text/mcp/chat) — decoded to None by `_media_ref`.
+# The M9 T3/T4 → M9.6 T4 read-time `media.capture_id -> media` join: the capture's media items as an
+# ordered jsonb ARRAY (composite: 0..N photos + <=1 voice), ordered by `part_ordinal` (legacy
+# single-part media have NULL ordinal → fall back to `created_at`), so the web renders the list
+# + per-part derivation badges off the capture without a second round-trip. NULL (→ `[]`) for a
+# capture with no media (text/mcp/chat) — decoded by `_media_refs`.
 _MEDIA_REF_JOIN = """
     LEFT JOIN LATERAL (
-        SELECT jsonb_build_object('id', m.id, 'kind', m.kind, 'status', m.status) AS media
+        SELECT jsonb_agg(
+                 jsonb_build_object('id', m.id, 'kind', m.kind, 'status', m.status,
+                                    'part_ordinal', m.part_ordinal)
+                 ORDER BY m.part_ordinal ASC NULLS LAST, m.created_at ASC, m.id
+               ) AS media
           FROM media m
          WHERE m.capture_id = c.id
-         ORDER BY m.created_at ASC
-         LIMIT 1
     ) media_ref ON true
 """
 
+# The M9.6 T4 read-time capture → Activity-run deep-link (ADR-061 §10): the capture's most recent
+# processing `agent_runs` id, found via the `capture_id` the pipeline stamps into `details` (every
+# `_process`/reorganize/reprocess interaction). NULL (→ None) until a run exists. Newest run wins so
+# the link always points at the latest processing pass.
+_RUN_REF_JOIN = """
+    LEFT JOIN LATERAL (
+        SELECT r.id AS run_id
+          FROM agent_runs r
+         WHERE r.agent = 'capture' AND r.details->>'capture_id' = c.id::text
+         ORDER BY r.started_at DESC
+         LIMIT 1
+    ) run_ref ON true
+"""
 
-def _media_ref(raw: object) -> CaptureMediaRef | None:
-    # asyncpg returns jsonb as text by default; tolerate both (mirrors `_node_refs`). No media row
-    # for this capture ⇒ the LEFT JOIN yields SQL NULL ⇒ None.
+
+def _media_refs(raw: object) -> list[CaptureMediaRef]:
+    # asyncpg returns jsonb as text by default; tolerate both (mirrors `_node_refs`). No media rows
+    # ⇒ `jsonb_agg` over zero rows is SQL NULL ⇒ [].
     if raw is None:
-        return None
-    item = json.loads(raw) if isinstance(raw, str) else raw
-    if not item:
-        return None
-    return CaptureMediaRef(id=str(item["id"]), kind=item["kind"], status=item["status"])
+        return []
+    items = json.loads(raw) if isinstance(raw, str) else raw
+    return [
+        CaptureMediaRef(
+            id=str(item["id"]),
+            kind=item["kind"],
+            status=item["status"],
+            part_ordinal=item.get("part_ordinal"),
+        )
+        for item in items
+    ]
 
 
 def _node_refs(raw: object) -> list[CaptureNodeRef]:
@@ -271,7 +300,8 @@ def _record(
     row,
     *,
     node_refs: list[CaptureNodeRef] | None = None,
-    media_ref: CaptureMediaRef | None = None,
+    media_refs: list[CaptureMediaRef] | None = None,
+    run_id: str | None = None,
 ) -> CaptureRecord:
     return CaptureRecord(
         id=str(row["id"]),
@@ -282,7 +312,8 @@ def _record(
         audio_path=row["audio_path"],
         node_paths=list(row["node_paths"] or []),
         node_refs=node_refs or [],
-        media_ref=media_ref,
+        media_refs=media_refs or [],
+        run_id=run_id,
         follow_up_question=row["follow_up_question"],
         follow_up_answer=row["follow_up_answer"],
         error=row["error"],
@@ -347,10 +378,12 @@ class PgCaptureStore:
         async with self._db.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_ref
+                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_refs,
+                       run_ref.run_id AS run_id
                   FROM captures c
                 {_NODE_REFS_JOIN}
                 {_MEDIA_REF_JOIN}
+                {_RUN_REF_JOIN}
                  WHERE c.id = $1
                 """,
                 capture_id,
@@ -358,24 +391,34 @@ class PgCaptureStore:
         if row is None:
             return None
         return _record(
-            row, node_refs=_node_refs(row["node_refs"]), media_ref=_media_ref(row["media_ref"])
+            row,
+            node_refs=_node_refs(row["node_refs"]),
+            media_refs=_media_refs(row["media_refs"]),
+            run_id=str(row["run_id"]) if row["run_id"] is not None else None,
         )
 
     async def list_recent(self, limit: int) -> list[CaptureRecord]:
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_ref
+                SELECT {_COLUMNS}, node_refs.refs AS node_refs, media_ref.media AS media_refs,
+                       run_ref.run_id AS run_id
                   FROM captures c
                 {_NODE_REFS_JOIN}
                 {_MEDIA_REF_JOIN}
+                {_RUN_REF_JOIN}
                  ORDER BY c.created_at DESC
                  LIMIT $1
                 """,
                 limit,
             )
         return [
-            _record(r, node_refs=_node_refs(r["node_refs"]), media_ref=_media_ref(r["media_ref"]))
+            _record(
+                r,
+                node_refs=_node_refs(r["node_refs"]),
+                media_refs=_media_refs(r["media_refs"]),
+                run_id=str(r["run_id"]) if r["run_id"] is not None else None,
+            )
             for r in rows
         ]
 

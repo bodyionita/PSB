@@ -17,7 +17,6 @@ from ..dependencies import get_capture_pipeline, require_session
 from ..models import (
     CaptureAcceptedResponse,
     CaptureAnchorEditRequest,
-    CaptureTextRequest,
     CaptureView,
     DraftPartView,
     DraftTextRequest,
@@ -39,54 +38,12 @@ from ..services.capture_pipeline import (
 router = APIRouter(tags=["capture"], dependencies=[Depends(require_session)])
 
 
-@router.post(
-    "/capture/text",
-    status_code=status.HTTP_202_ACCEPTED,
-    response_model=CaptureAcceptedResponse,
-)
-async def capture_text(
-    payload: CaptureTextRequest,
-    pipeline: CapturePipeline = Depends(get_capture_pipeline),
-) -> CaptureAcceptedResponse:
-    capture_id = await pipeline.create_text_capture(payload.text, created_at=payload.created_at)
-    return CaptureAcceptedResponse(capture_id=capture_id)
-
-
-@router.post(
-    "/capture/voice",
-    status_code=status.HTTP_202_ACCEPTED,
-    response_model=CaptureAcceptedResponse,
-)
-async def capture_voice(
-    file: UploadFile = File(...),
-    pipeline: CapturePipeline = Depends(get_capture_pipeline),
-) -> CaptureAcceptedResponse:
-    audio = await file.read()
-    try:
-        capture_id = await pipeline.create_voice_capture(audio, filename=file.filename or "audio")
-    except UnsupportedAudio as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
-    return CaptureAcceptedResponse(capture_id=capture_id)
-
-
-@router.post(
-    "/capture/image",
-    status_code=status.HTTP_202_ACCEPTED,
-    response_model=CaptureAcceptedResponse,
-)
-async def capture_image(
-    file: UploadFile = File(...),
-    pipeline: CapturePipeline = Depends(get_capture_pipeline),
-) -> CaptureAcceptedResponse:
-    """Ad-hoc PWA photo capture (M9 T3, ADR-057 §6): the raw image is kept under the media
-    substrate, its vision description derived (resumable), then organized (fenced). ``202`` — the
-    pipeline continues in the background; ``400`` on an unsupported type or an oversized upload."""
-    image = await file.read()
-    try:
-        capture_id = await pipeline.create_image_capture(image, filename=file.filename or "image")
-    except UnsupportedImage as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
-    return CaptureAcceptedResponse(capture_id=capture_id)
+# The three one-shot `POST /capture/{text,voice,image}` endpoints are **removed** in M9.6 (ADR-061
+# §8): every web capture — including a one-word text note — now goes through the composite draft
+# below (`draft → part/text → submit`), a single code path. The internal producers (MCP
+# `create_mcp_capture`, chat `create_chat_capture`, `reprocess-all` replay) create committed rows
+# directly and are unchanged; the pipeline's `create_text/voice/image_capture` helpers remain for
+# them + the legacy single-part tests.
 
 
 # --- Composite draft lifecycle (M9.6 T1, ADR-061 §3) ---

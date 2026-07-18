@@ -30,14 +30,7 @@ class MeResponse(BaseModel):
     session_created_at: datetime | None = None
 
 
-# --- Capture (03-api.md §Capture, M1 / ADR-019) ---
-class CaptureTextRequest(BaseModel):
-    text: str = Field(min_length=1)
-    # Optional client-supplied capture time (e.g. an offline note synced later). When absent
-    # the server stamps `now()`. Drives the vault-facing `created` frontmatter + filename date.
-    created_at: datetime | None = None
-
-
+# --- Capture (03-api.md §Capture, M1 / ADR-019; composite draft flow M9.6 / ADR-061) ---
 class FollowUpRequest(BaseModel):
     answer: str = Field(min_length=1)
 
@@ -51,7 +44,7 @@ class CaptureAnchorEditRequest(BaseModel):
 
 
 class CaptureAcceptedResponse(BaseModel):
-    """202 body shared by the capture-accepting endpoints (text/voice/retry/follow-up/anchor)."""
+    """202 body shared by the capture-accepting endpoints (submit/retry/follow-up/anchor)."""
 
     capture_id: str
     status: str = "received"
@@ -127,18 +120,20 @@ class CaptureNodeRefModel(BaseModel):
 
 
 class CaptureMediaView(BaseModel):
-    """The media item backing an image OR voice capture (M9 T3/T4, ADR-057 §6 / ADR-060 §5): the web
-    renders the photo / voice player via ``GET /media/{id}`` and shows a derivation-status badge,
-    straight off the capture. ``None`` for text/mcp/chat captures. ``kind`` is ``photo``/``voice``;
-    ``status`` is the derivation lifecycle (``pending``/``derived``/``unavailable``)."""
+    """One media part on a capture (M9 T3/T4 → M9.6 T4, ADR-057 §6 / ADR-060 §5 / ADR-061 §11): the
+    web renders the photo / voice player via ``GET /media/{id}`` + a derivation badge straight
+    off the capture. A capture exposes a **list** of these (composite: 0..N photos + <=1 voice),
+    ordered by ``part_ordinal``. ``kind`` is ``photo``/``voice``; ``status`` is the derivation
+    lifecycle (``pending``/``derived``/``unavailable``)."""
 
     id: str
     kind: str
     status: str
+    part_ordinal: int | None = None
 
     @classmethod
     def from_ref(cls, ref: CaptureMediaRef) -> CaptureMediaView:
-        return cls(id=ref.id, kind=ref.kind, status=ref.status)
+        return cls(id=ref.id, kind=ref.kind, status=ref.status, part_ordinal=ref.part_ordinal)
 
 
 class CaptureView(BaseModel):
@@ -148,6 +143,9 @@ class CaptureView(BaseModel):
     kind: str
     status: str
     raw_text: str | None = None
+    # The person's typed words on a composite capture (M9.6 T4, ADR-061 §5/§11); None for
+    # single-modality / mcp / chat captures.
+    text_body: str | None = None
     node_paths: list[str] = Field(default_factory=list)
     # Id-resolved projection of `node_paths` (M8.1 T4) — see `CaptureNodeRefModel`. A path with no
     # live `nodes` row (not yet indexed, or tombstoned) is simply absent, never null/error; the
@@ -162,10 +160,13 @@ class CaptureView(BaseModel):
     # falls back to `kind` for the source badge). Carried so the Captures expand
     # (GET /captures/{id}) renders the badge without re-reading the feed row.
     source: str | None = None
-    # The backing media item for an image OR voice capture (M9 T3/T4) — the photo/audio + its
-    # derivation status; None for text/mcp/chat captures. The web renders `GET /media/{media.id}` +
-    # a status badge (a themed audio player for voice — ADR-060 §7).
-    media: CaptureMediaView | None = None
+    # The capture's media parts (M9.6 T4, ADR-061 §11 — singular → list): 0..N photos + <=1 voice,
+    # ordered by part_ordinal. Empty for text/mcp/chat captures. The web renders each via
+    # `GET /media/{id}` + a status badge (a themed audio player for voice — ADR-060 §7).
+    media: list[CaptureMediaView] = Field(default_factory=list)
+    # The capture's most recent processing `agent_runs` id (M9.6 T4, ADR-061 §10) — the Activity-tab
+    # deep-link so the user can follow the (per-part) processing live. None until a run exists.
+    run_id: str | None = None
 
     @classmethod
     def from_record(cls, record: CaptureRecord) -> CaptureView:
@@ -174,6 +175,7 @@ class CaptureView(BaseModel):
             kind=record.kind,
             status=record.status,
             raw_text=record.raw_text,
+            text_body=record.text_body,
             node_paths=list(record.node_paths),
             node_refs=[CaptureNodeRefModel.from_ref(r) for r in record.node_refs],
             follow_up_question=record.follow_up_question,
@@ -182,11 +184,8 @@ class CaptureView(BaseModel):
             created_at=record.created_at,
             updated_at=record.updated_at,
             source=record.source,
-            media=(
-                CaptureMediaView.from_ref(record.media_ref)
-                if record.media_ref is not None
-                else None
-            ),
+            media=[CaptureMediaView.from_ref(r) for r in record.media_refs],
+            run_id=record.run_id,
         )
 
 
