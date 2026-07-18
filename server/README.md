@@ -13,11 +13,17 @@ app/
 ├── security.py        Argon2id + session-token hashing (pure)
 ├── dependencies.py    FastAPI DI: get_db / require_session / …
 ├── migration_check.py startup "are we behind head?" warning (no SQLAlchemy import)
-├── routers/           health, auth  (validation + delegation only)
-├── services/          auth_service, rate_limit, system_health (business logic)
-└── providers/         registry + fallback chain; openai-compatible + claude (CLI)
-migrations/            Alembic env + versions/001_initial_schema.py (full schema)
-scripts/hash_password.py
+├── routers/           thin HTTP surface (validation + delegation only)
+├── services/          cross-cutting business logic (auth, rate limit, health, …)
+├── providers/         registry + routing groups; openai-compatible + claude (CLI)
+├── capture/ indexing/ search/ graph/ entities/ tags/ vocab/   the graph core (M3)
+├── chat/              grounded chat + the chat distiller (M4/M6)
+├── mcp/ oauth/        the MCP surface + its OAuth 2.1 authorization server (M5)
+├── identity/          identity capsule distiller (M5)
+├── dedup/ inbox/      nightly sweep jobs (M6)
+└── temporal/          the M8.2 temporal engine (symbolic → deterministic resolution)
+migrations/            Alembic env + versions/ (001…, plain-SQL revisions)
+scripts/               hash_password.py, smoke_db.py (real-PG smoke)
 tests/                 unit tests — fakes for providers, no live LLMs/DB
 ```
 
@@ -33,11 +39,9 @@ uv run pytest
 uv run ruff check .
 ```
 
-Endpoints are served under `/api/v1` (Caddy proxies `/api` → FastAPI). M0 exposed
-`/health`, `/auth/login`, `/auth/logout`, `/auth/me`; M1/M2 added capture, search, admin.
-The current contract (incl. the mind-graph pivot renames — `/nodes/{id}`, graph, review,
-MCP surface) lives in `../../second-brain-docs/03-api.md`; the code adopts the renamed
-surface at M3 (see the root README's pivot note).
+Endpoints are served under `/api/v1` (Caddy proxies `/api` → FastAPI), plus the root-mounted
+MCP + OAuth surface (`/mcp`, `/.well-known/oauth-*`, `/authorize`, `/token`, `/register`).
+The binding contract lives in `../../second-brain-docs/03-api.md`.
 
 ## Notes
 

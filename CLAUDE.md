@@ -11,12 +11,11 @@ one in the docs repo.
 stop and replan, don't decide inline. **Commit + push docs at every pause**; commit code
 freely while implementing but **push code only when the user asks**.
 
-> **Pivot note (2026-07-13, ADR-026–029):** the design pivoted to a **typed mind graph** —
-> graph store of nodes/edges, Obsidian removed, organizer as single writer, MCP peer surface.
-> **Milestone M3 performs the code rename** (vault→graph store, notes→nodes, `VAULT_PATH`→
-> `GRAPH_STORE_PATH`, `notes`/`note_links`→`nodes`/`edges`). Until M3 lands, the codebase
-> deliberately keeps the pre-pivot names — **do not half-rename**; at/after M3, never introduce
-> "note"/"vault" in new work.
+> **Pivot history (2026-07-13, ADR-026–029; rename landed with M3, 2026-07-14):** the design
+> pivoted to a **typed mind graph** — graph store of nodes/edges, Obsidian removed, organizer
+> as single writer, MCP peer surface. The M3 code rename (vault→graph store, notes→nodes,
+> `VAULT_PATH`→`GRAPH_STORE_PATH`, `notes`/`note_links`→`nodes`/`edges`) is **done** —
+> never introduce "note"/"vault" in new work (superseded ADRs and old logs excepted).
 
 ## Hard rules
 
@@ -67,15 +66,15 @@ freely while implementing but **push code only when the user asks**.
 12. **LLMs classify, code computes** ([ADR-056](../second-brain-docs/adr/056-temporal-correctness-date-tokens.md)).
     No LLM-emitted arithmetic, date, or other numerical *derivation* is ever stored. The
     model emits symbolic classifications ("10 days ago" → `{kind: relative_days, offset:
-    -10}`); deterministic code (`datetime`/`dateutil`, plain Python) performs all
+    -10}`); deterministic code (stdlib `datetime`, plain Python — the temporal engine is
+    deliberately dependency-free so the web mirror stays byte-identical) performs all
     computation against stored anchors — never wall-clock in replayable paths (P10).
     Unresolvable input degrades (stays prose / files review), it is never guessed.
     Binding on all pipelines, connectors, and agents.
 
 ## Conventions
 
-- Python 3.12, `pathlib`, store paths `/`-separated relative to `GRAPH_STORE_PATH`
-  (pre-M3 code: `VAULT_PATH` — renamed wholesale at M3, see the pivot note above).
+- Python 3.12, `pathlib`, store paths `/`-separated relative to `GRAPH_STORE_PATH`.
   UTC timestamps in DB; `TZ` only for scheduling and store-facing formatting.
 - **Vocabulary (ADR-026):** nodes, edges, the graph, the graph store — never "note"/"vault"
   in new code, endpoints, or docs once M3 lands (superseded ADRs and old logs excepted).
