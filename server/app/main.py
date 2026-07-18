@@ -74,6 +74,7 @@ from .services.media_derivation import build_media_derivation_service
 from .services.media_store import MediaFiles, PgMediaStore
 from .services.model_routing import build_model_routing
 from .services.nl_time import NlTimeClassifier
+from .services.node_media_store import PgNodeMediaStore
 from .services.node_time_edit import NodeTimeEditService
 from .services.occurred_enrichment import build_occurred_enrichment_service
 from .services.rate_limit import RateLimiter
@@ -165,6 +166,12 @@ async def lifespan(app: FastAPI):
     # The single filesystem writer of node files (ADR-026), shared by the capture pipeline and the
     # review service (which appends a materialized entity edge onto an existing node file).
     node_writer = NodeWriter(settings.graph_store_path)
+
+    # The node↔media link store (M9 T4, ADR-060 §1): the derived-tier `node_media` attachment the
+    # capture pipeline rebuilds on every content-node write, the merge-core repoints loser→survivor,
+    # and `GET /nodes/{id}` reads back. Constructed here (before the merge-core) so both share it.
+    node_media_store = PgNodeMediaStore(db)
+    app.state.node_media_store = node_media_store
 
     # Derived-edge graph (ADR-023 surviving half): recomputes the DB-only `similar` edges.
     # Nightly + on /admin/reindex (via the reindex service); never on the capture path.
@@ -287,6 +294,9 @@ async def lifespan(app: FastAPI):
         node_writer=node_writer,
         indexer=indexer,
         store_backup=store_backup,
+        # Repoint node↔media links loser→survivor on a merge (ADR-060 §4) — a merged survivor
+        # inherits the loser's media.
+        node_media=node_media_store,
     )
     app.state.merge_service = MergeService(
         settings=settings,
@@ -367,6 +377,7 @@ async def lifespan(app: FastAPI):
         media_store=app.state.media_store,
         media_files=app.state.media_files,
         media_derivation=app.state.media_derivation_service,
+        node_media_store=node_media_store,
     )
     app.state.capture_pipeline = pipeline
 

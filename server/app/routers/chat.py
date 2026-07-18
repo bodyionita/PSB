@@ -204,6 +204,7 @@ def _to_response(answer: ChatAnswer) -> ChatResponse:
                 snippet=s.snippet,
                 score=s.score,
                 planes=s.planes,
+                media_kinds=s.media_kinds,
             )
             for s in answer.sources
         ],
@@ -220,4 +221,6 @@ def _source_item(source: dict) -> ChatSourceItem:
         snippet=source["snippet"],
         score=source["score"],
         planes=source.get("planes", []),
+        # Persisted history predating M9 T4 has no `media_kinds` — default to empty (ADR-060 §7).
+        media_kinds=source.get("media_kinds", []),
     )

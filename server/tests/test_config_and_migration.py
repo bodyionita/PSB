@@ -116,10 +116,10 @@ def test_production_rejects_insecure_default_secrets():
     Settings(environment="development")
 
 
-def test_compute_head_is_migration_017():
-    # M9 T2 adds revision 017 (the `media` table, ADR-057 §3); head advances to it from 016
-    # (nodes.interiority, ADR-055 §1).
-    assert compute_head() == "017"
+def test_compute_head_is_migration_018():
+    # M9 T4 adds revision 018 (the `node_media` link table, ADR-060 §1); head advances to it from
+    # 017 (the `media` table, ADR-057 §3).
+    assert compute_head() == "018"
 
 
 def test_media_config_defaults():

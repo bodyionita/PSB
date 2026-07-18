@@ -25,7 +25,6 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -51,7 +50,7 @@ from ..entities.resolver import (
 from ..entities.store import normalize_alias
 from ..graph.node_writer import NodeDocument, NodeEdge, NodeWriter
 from ..indexing.indexer import NodeIndexer
-from ..providers.base import ChatMessage, ProviderUnavailable, TranscriptResult
+from ..providers.base import ChatMessage, ProviderUnavailable
 from ..providers.registry import ProviderRegistry
 from ..services.model_routing import ModelRoutingService
 from ..services.review_queue import KIND_VOCAB_PROPOSAL, ReviewItem, ReviewQueue
@@ -85,7 +84,17 @@ from .capture_store import (
 )
 from .media_derivation import MediaDerivationService, placeholder
 from .media_store import DERIVED as MEDIA_DERIVED
-from .media_store import KIND_PHOTO, SOURCE_CAPTURE, MediaFiles, MediaStore
+from .media_store import (
+    KIND_PHOTO,
+    SOURCE_CAPTURE,
+    MediaFiles,
+    MediaRecord,
+    MediaStore,
+)
+from .media_store import (
+    KIND_VOICE as MEDIA_KIND_VOICE,
+)
+from .node_media_store import NodeMediaStore
 from .store_backup import StoreBackup
 
 logger = logging.getLogger(__name__)
@@ -106,8 +115,18 @@ _CHAT_CAPTURE_NS = uuid.UUID("b1d9e5c2-4a3f-5e6d-8b7a-0c1d2e3f4a5b")
 # §2 / M8.2 grill: reuse `led_to`, no new vocabulary — event `led_to` the feeling/insight).
 _INNER_VOICE_REL = "led_to"
 
-# Audio container extensions accepted by POST /capture/voice (03-api.md).
-ALLOWED_AUDIO_EXTS = frozenset({"m4a", "webm", "ogg", "mp3", "wav"})
+# Audio container extensions accepted by POST /capture/voice (03-api.md), mapped to the content type
+# stored on the voice `media` row so `GET /media/{id}` streams it with the right header for the
+# themed `<audio>` player (M9 T4, ADR-060 §5/§7). An unmapped ext leaves `mime_type` NULL and the
+# serving endpoint falls back to `application/octet-stream`.
+_AUDIO_MIME = {
+    "m4a": "audio/mp4",
+    "webm": "audio/webm",
+    "ogg": "audio/ogg",
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+}
+ALLOWED_AUDIO_EXTS = frozenset(_AUDIO_MIME)
 
 # Image types accepted by POST /capture/image (03-api.md / ADR-057 §6), mapped to the content type
 # stored on the media row (so GET /media/{id} serves the right header and the VLM data-URI carries
@@ -234,16 +253,20 @@ class CapturePipeline:
         media_store: MediaStore | None = None,
         media_files: MediaFiles | None = None,
         media_derivation: MediaDerivationService | None = None,
+        node_media_store: NodeMediaStore | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
-        # Media substrate (M9 T3, ADR-057) for ad-hoc image capture: the `media` row + raw file +
-        # the resumable vision derivation. Optional — a pipeline wired for text/voice/chat only
-        # (unit tests, the reprocess/chat-distiller CLI builder) leaves these None; `create_image_
-        # capture` / the `_process` image branch require them and fail clearly if unset.
+        # Media substrate (M9 T3/T4, ADR-057/060) for ad-hoc image + voice capture: the `media` row
+        # + raw file + the resumable derivation (photo→vision, voice→STT), and the derived-tier
+        # `node_media` link (T4). Optional — a pipeline wired for text/chat only (some unit tests)
+        # leaves these None; `create_image_capture` / the `_process` image branch require the first
+        # three and fail clearly if unset. `node_media_store` None just skips the link-write (the
+        # link is derived-tier — a reprocess rebuilds it), so a media-less test pipeline still runs.
         self._media_store = media_store
         self._media_files = media_files
         self._media_derivation = media_derivation
+        self._node_media_store = node_media_store
         # Organize + nudge distillation route through the `conspect` group (ADR-025); the registry
         # is kept for the STT leg (transcribe), which is a separate provider chain (ADR-020).
         self._routing = routing
@@ -349,6 +372,20 @@ class CapturePipeline:
         return record.source or record.kind
 
     async def create_voice_capture(self, audio: bytes, *, filename: str) -> str:
+        """Ad-hoc PWA voice capture (M9 T4, ADR-060 §5): persist the raw audio under the uniform
+        media layout, mint the capture + media (kind ``voice``) rows, then spawn the background
+        transcribe→organize.
+
+        Voice is **unified onto the media substrate** (ADR-060 §5): the audio is a ``media`` row
+        (source ``capture``, ``/srv/data/media/capture/…`` — the same layout as a photo), STT runs
+        through the derivation engine, and the transcript lands as ``media.derived_text`` mirrored
+        **plain** to ``captures.raw_text`` (the person's own words) as the organize/reprocess replay
+        source. Never-lose ordering (rule 2): audio to disk first, then the ``captures`` row, then
+        the ``media`` row (its ``capture_id`` fk needs the capture to exist). New voice captures no
+        longer set ``captures.audio_path`` — the audio lives as media; the legacy column is read
+        only by the backfill op."""
+        if self._media_store is None or self._media_files is None:
+            raise CaptureError("voice capture requires the media substrate to be wired")
         if len(audio) > self._settings.audio_max_bytes:
             raise UnsupportedAudio(
                 f"audio exceeds {self._settings.audio_max_bytes} bytes (Whisper limit)"
@@ -358,14 +395,16 @@ class CapturePipeline:
             raise UnsupportedAudio(f"unsupported audio type: .{ext}")
 
         capture_id = str(uuid.uuid4())
-        stored_name = f"{capture_id}.{ext}"
-        # Persist the audio to disk BEFORE the row exists / any model call — never-lose.
-        await asyncio.to_thread(self._write_audio, stored_name, audio)
-        await self._store.create(
+        rel_path = self._media_files.relative_path(SOURCE_CAPTURE, f"{capture_id}.{ext}")
+        # Raw audio to disk BEFORE any row — never-lose (mirrors the image capture write).
+        await self._media_files.write_async(rel_path, audio)
+        await self._store.create(capture_id=capture_id, kind=KIND_VOICE, status=RECEIVED)
+        await self._media_store.create(
+            kind=MEDIA_KIND_VOICE,
+            source=SOURCE_CAPTURE,
             capture_id=capture_id,
-            kind=KIND_VOICE,
-            status=RECEIVED,
-            audio_path=stored_name,
+            file_path=rel_path,
+            mime_type=_AUDIO_MIME.get(ext),
         )
         self._spawn(self._process(capture_id))
         return capture_id
@@ -445,7 +484,7 @@ class CapturePipeline:
             inter = _Interaction(capture_id=capture_id, kind=f"{record.kind}-reprocess")
             created_local = self._local(record.created_at)
             organize = await self._organize(self._combined_text(record), anchor=created_local)
-            paths = await self._resolve_and_write(
+            paths, content_ids = await self._resolve_and_write(
                 organize,
                 capture_id=capture_id,
                 created_local=created_local,
@@ -454,6 +493,9 @@ class CapturePipeline:
             )
             await self._store.set_node_paths(capture_id, paths)
             await self._index_nodes(paths)
+            # Rebuild the derived-tier `node_media` link off the replayed content nodes (ADR-060 §3:
+            # it falls out of reprocess like the search index does — no independent durability).
+            await self._link_node_media(capture_id, content_ids)
             await self._store.mark_status(capture_id, INDEXED)
             await self._backup.request_commit(f"reprocess {capture_id}")
             # Per-capture heal detail (ADR-042 auditability): coercions (ADR-039) come off the
@@ -510,32 +552,33 @@ class CapturePipeline:
         deterministically. Idempotent (rule 6); never raises past the shared core's own guard."""
         await self._reorganize(capture_id)
 
-    async def redescribe_image_capture(self, capture_id: str) -> None:
-        """Recover an image capture's node after a targeted photo re-derive (M9 T3, ADR-057 §3/§6).
+    async def rederive_capture(self, capture_id: str) -> None:
+        """Recover a media capture's node after a targeted re-derive — kind-aware (M9 T4, ADR-060).
 
-        The forward path files a placeholder node when derivation is ``unavailable`` (raw kept), and
-        the media re-derive core (T2) can later recover ``media.derived_text`` — but that recovery
-        is invisible to the graph until the node is rebuilt from it. This is the capture-layer seam
-        that closes that loop: **re-derive** the photo (reset→pending→derive, recovering the media
-        item), **refresh** the capture's fenced ``raw_text`` from the fresh description, then
-        **reorganize** the node so the recovered text reaches the graph. AWAITED (like
-        :meth:`reorganize_capture_now`) so a drill / the ad-hoc re-derive trigger can report the
-        outcome; the HTTP trigger lands with the connector re-derive surface (M9.5). Idempotent — a
-        still-``unavailable`` re-derive just re-fences the placeholder (a no-op node). ``404`` when
-        unknown; ``CaptureError`` if the capture is not an image or its media row is missing."""
+        Generalizes the T3 image-only ``redescribe_image_capture`` to **voice as well**. The forward
+        path files a placeholder node when derivation is ``unavailable`` (raw kept), and the media
+        re-derive core (T2) can later recover ``media.derived_text`` — but that recovery is unseen
+        by the graph until the node is rebuilt from it. This is the capture-layer seam that closes
+        the loop: **re-derive** the media (reset→pending→derive, recovering the item), **refresh**
+        the capture's ``raw_text`` from the fresh result (photo → re-fence ``<photo: …>``; voice →
+        plain transcript), then **reorganize** so the recovered text reaches the node — not just
+        ``GET /media/{id}``. AWAITED (like :meth:`reorganize_capture_now`) so a drill / the M9.5
+        re-derive trigger can report the outcome. Idempotent — a still-``unavailable`` re-derive
+        just re-writes the placeholder (a no-op node). ``404`` when unknown; ``CaptureError`` if the
+        capture is not a media capture or its media row is missing."""
         if self._media_store is None or self._media_derivation is None:
-            raise CaptureError("image capture requires the media substrate to be wired")
+            raise CaptureError("media capture requires the media substrate to be wired")
         record = await self._store.get(capture_id)
         if record is None:
             raise CaptureNotFound(capture_id)
-        if record.kind != KIND_IMAGE:
-            raise CaptureError(f"capture {capture_id} is not an image capture")
+        if record.kind not in (KIND_IMAGE, KIND_VOICE):
+            raise CaptureError(f"capture {capture_id} is not a media capture")
         media = await self._media_store.get_by_capture_id(capture_id)
         if media is None:
-            raise CaptureError(f"image capture {capture_id} has no media row")
+            raise CaptureError(f"capture {capture_id} has no media row")
         await self._media_derivation.rederive(media_ids=[media.id])
         media = await self._media_store.get(media.id) or media
-        await self._store.set_raw_text(capture_id, _fence_photo(media))
+        await self._store.set_raw_text(capture_id, _render_media_text(media))
         await self._reorganize(capture_id)
 
     async def retry_capture(self, capture_id: str) -> None:
@@ -604,35 +647,13 @@ class CapturePipeline:
             inter.kind = record.kind
 
             transcript = record.raw_text or ""
-            if record.kind == KIND_VOICE:
-                await self._store.mark_status(capture_id, TRANSCRIBING)
-                t0 = time.monotonic()
-                try:
-                    stt = await self._transcribe(record.audio_path)
-                except ProviderUnavailable as exc:
-                    # Whole STT chain exhausted (both providers down/limited) → infra failure,
-                    # capture is retryable; the audio is on disk (never-lose).
-                    inter.stt = {"provider": None, "fallback_used": False, "error": str(exc)}
-                    inter.timings_ms["transcribe"] = int((time.monotonic() - t0) * 1000)
-                    await self._store.mark_failed(capture_id, f"transcription failed: {exc}")
-                    await self._finish_run(
-                        run_id, RUN_FAILED, inter, error=f"transcription failed: {exc}"
-                    )
-                    return
-                inter.timings_ms["transcribe"] = int((time.monotonic() - t0) * 1000)
-                inter.stt = {
-                    "provider": stt.model_used,
-                    "fallback_used": stt.fallback_used,
-                    "error": None,
-                }
-                inter.fallback_used = inter.fallback_used or stt.fallback_used
-                transcript = stt.text
-                await self._store.set_raw_text(capture_id, transcript)
-            elif record.kind == KIND_IMAGE:
-                # Derive the photo's vision description (driving retries → placeholder without a
-                # human), fence it as `<photo: …>`, and persist it as the capture's raw text — the
-                # organize/reprocess replay source, exactly as a voice transcript is (ADR-057 §6).
-                transcript = await self._derive_image(capture_id, inter)
+            if record.kind in (KIND_VOICE, KIND_IMAGE):
+                # Voice + image both derive their organizer text through the shared media derivation
+                # (ADR-060 §5 unification): photo → fenced `<photo: …>` vision description, voice →
+                # plain STT transcript, both driven to a terminal state so a persistent failure
+                # walks retry → `unavailable` → an explicit placeholder WITHOUT blocking (§6). The
+                # derived text is persisted as the capture's raw text — the organize replay source.
+                transcript = await self._derive_capture_media(capture_id, record, inter)
                 await self._store.set_raw_text(capture_id, transcript)
 
             await self._store.mark_status(capture_id, ORGANIZING)
@@ -649,7 +670,7 @@ class CapturePipeline:
             inter.model_used = organize.model_used or inter.model_used
             inter.fallback_used = inter.fallback_used or organize.provider_fallback_used
 
-            paths = await self._resolve_and_write(
+            paths, content_ids = await self._resolve_and_write(
                 organize,
                 capture_id=capture_id,
                 created_local=created_local,
@@ -664,6 +685,9 @@ class CapturePipeline:
             # nodes are already durably in the store (truth), so an embed/index failure must not
             # fail the capture — it just leaves the node stale until the next reindex.
             inter.index = await self._index_nodes(paths)
+            # Derived-tier `node_media` link (ADR-060 §3): recompute this capture's node↔media links
+            # against the freshly-indexed content nodes. AFTER indexing (the fk needs the row).
+            await self._link_node_media(capture_id, content_ids)
             await self._store.mark_status(capture_id, INDEXED)
             await self._backup.request_commit(f"capture {capture_id}")
 
@@ -780,7 +804,7 @@ class CapturePipeline:
             await asyncio.to_thread(
                 self._writer.remove_nodes, list(record.node_paths), keep_types=keep
             )
-            paths = await self._resolve_and_write(
+            paths, content_ids = await self._resolve_and_write(
                 organize,
                 capture_id=capture_id,
                 created_local=created_local,
@@ -791,6 +815,9 @@ class CapturePipeline:
             await self._store.mark_status(capture_id, WRITTEN)
 
             inter.index = await self._index_nodes(paths)
+            # Rebuild the derived-tier `node_media` link against the fresh content nodes (ADR-060):
+            # a reorganize/retry mints new content-node ids, so the media re-attaches to them here.
+            await self._link_node_media(capture_id, content_ids)
             await self._store.mark_status(capture_id, INDEXED)
             await self._backup.request_commit(commit_reason)
             await self._finish_run(
@@ -914,11 +941,12 @@ class CapturePipeline:
         created_local: datetime,
         source: str,
         inter: _Interaction | None = None,
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         """Resolve entity mentions, build the node documents (content nodes + minted entities),
         write them to the store, apply any alias accretions, and file any vocab proposals. Returns
-        the written **content** store paths (accreted hub files are re-indexed but are not this
-        capture's nodes, so they are not in ``node_paths``).
+        ``(store_paths, content_node_ids)`` — the written paths (``node_paths``) plus the ids of the
+        **content** nodes only (ADR-060 §2: media links to content nodes, never to minted entity
+        hubs), which the caller hands to the derived-tier ``node_media`` link-write after indexing.
 
         Entity resolution is best-effort for *linking*: a resolver failure leaves an edge pending
         + a review item (never a guess, ADR-030 §3) — the content nodes still land (never-lose).
@@ -974,7 +1002,7 @@ class CapturePipeline:
                 "accreted": accreted,
                 "resolver_fallback": resolution.resolver_fallback_used,
             }
-        return [w.store_path for w in written]
+        return [w.store_path for w in written], node_ids
 
     async def _apply_accretions(self, accretions: list[AliasAccretion]) -> list[str]:
         """Rewrite the linked hubs' ``aliases`` (folded by the writer) then re-index them so the
@@ -1160,46 +1188,72 @@ class CapturePipeline:
             logger.exception("nudge generation failed for capture %s (ignored)", capture_id)
             return None
 
-    async def _derive_image(self, capture_id: str, inter: _Interaction) -> str:
-        """Derive an image capture's organizer text (M9 T3, ADR-057 §3/§5/§6).
+    async def _derive_capture_media(
+        self, capture_id: str, record: CaptureRecord, inter: _Interaction
+    ) -> str:
+        """Derive an image/voice capture's organizer text through the shared media stage (M9 T4,
+        ADR-060 §5/§6).
 
-        The raw image + ``media`` row were written at capture time; here we drive the vision
-        derivation to a terminal state (``derive_until_settled`` — a persistent VLM failure walks
-        retry → ``unavailable`` without a human, so the pipeline is never blocked and the kept
-        image stays re-derivable). The organizer text is built by :func:`_fence_photo`: a
-        description fenced as ``<photo: …>`` (shared material, never the person's words — the
-        binding screenshot-attribution rule), or the ``unavailable`` placeholder. The derivation
-        detail rides ``inter`` (agent_runs, rule 7).
+        The raw media + ``media`` row were written at capture time; here we drive derivation to a
+        terminal state (``derive_until_settled`` — a persistent VLM/STT failure walks retry →
+        ``unavailable`` **without a human**, so the pipeline is never blocked and the kept media
+        stays re-derivable). The organizer text is built by :func:`_render_media_text`: a photo
+        description fenced as ``<photo: …>`` (shared material, never the person's words), a voice
+        transcript **plain** (the person's own words), or the kind's ``unavailable`` placeholder.
+        derivation detail rides ``inter`` (agent_runs, rule 7) — under ``stt`` for voice, ``derive``
+        for a photo, mirroring the pre-unification field names.
 
         Raises only when the media substrate is unwired or the row is missing (a rare capture-time
-        partial write) — the outer ``_process`` guard then fails the capture retryably; the image
-        is still on disk (never-lose)."""
+        partial write, or a legacy voice capture the backfill op hasn't reached) — the outer
+        ``_process`` guard then fails the capture retryably; the raw media is still on disk
+        (never-lose)."""
         if self._media_store is None or self._media_derivation is None:
-            raise CaptureError("image capture requires the media substrate to be wired")
-        await self._store.mark_status(capture_id, DERIVING)
+            raise CaptureError("media capture requires the media substrate to be wired")
+        await self._store.mark_status(
+            capture_id, DERIVING if record.kind == KIND_IMAGE else TRANSCRIBING
+        )
         media = await self._media_store.get_by_capture_id(capture_id)
         if media is None:
-            raise CaptureError(f"image capture {capture_id} has no media row")
+            raise CaptureError(f"{record.kind} capture {capture_id} has no media row")
         t0 = time.monotonic()
         await self._media_derivation.derive_until_settled(media.id)
         # Re-read the settled row — the returned outcome is a snapshot; the row carries the
         # authoritative status / derived text / model after the (possibly looped) attempts.
         media = await self._media_store.get(media.id) or media
         inter.timings_ms["derive"] = int((time.monotonic() - t0) * 1000)
-        inter.derive = {
+        detail = {
             "media_id": media.id,
+            "kind": media.kind,
             "status": media.status,
             "model": media.model_used,
             "attempts": media.attempts,
             "error": media.error,
         }
-        return _fence_photo(media)
+        if record.kind == KIND_VOICE:
+            inter.stt = detail
+        else:
+            inter.derive = detail
+        return _render_media_text(media)
 
-    async def _transcribe(self, audio_path: str | None) -> TranscriptResult:
-        if not audio_path:
-            raise ProviderUnavailable("voice capture has no stored audio")
-        data = await asyncio.to_thread(self._read_audio, audio_path)
-        return await self._registry.transcribe(data, filename=audio_path)
+    async def _link_node_media(self, capture_id: str, content_node_ids: list[str]) -> None:
+        """Rebuild this capture's derived-tier ``node_media`` links (ADR-060 §1/§3): attach the
+        capture's media to its just-written **content** nodes. Called AFTER indexing (the
+        ``node_id`` fk needs the ``nodes`` row). Best-effort (rule 7): the links are derived — a
+        failure (e.g. indexing didn't materialize a node yet) leaves the nodes intact and the link
+        rebuilds on the next reindex/reprocess, never failing an already-written capture. A pipeline
+        wired without the media substrate (some tests) simply skips it."""
+        if self._media_store is None or self._node_media_store is None:
+            return
+        try:
+            media = await self._media_store.list_by_capture_id(capture_id)
+            media_ids = [m.id for m in media]
+            if not media_ids:
+                return  # text/chat capture — nothing to link
+            await self._node_media_store.rebuild_for_media(
+                media_ids=media_ids, node_ids=content_node_ids
+            )
+        except Exception:  # noqa: BLE001 — the link is derived-tier; never fail a written capture
+            logger.exception("node_media link-write failed for capture %s (ignored)", capture_id)
 
     # --- agent_runs interaction log (ADR-021) -------------------------------------------
 
@@ -1255,17 +1309,6 @@ class CapturePipeline:
             created_at = datetime.now(self._tz)
         return created_at.astimezone(self._tz)
 
-    def _audio_file(self, stored_name: str) -> Path:
-        return Path(self._settings.data_path) / stored_name
-
-    def _write_audio(self, stored_name: str, data: bytes) -> None:
-        path = self._audio_file(stored_name)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-
-    def _read_audio(self, stored_name: str) -> bytes:
-        return self._audio_file(stored_name).read_bytes()
-
     async def _safe_mark_failed(self, capture_id: str, error: str) -> None:
         try:
             await self._store.mark_failed(capture_id, error)
@@ -1290,6 +1333,18 @@ def _fence_photo(media) -> str:
     description could be derived. Both are ``<photo …>`` forms the organizer prompt recognizes."""
     if media.status == MEDIA_DERIVED and (media.derived_text or "").strip():
         return _PHOTO_FENCE.format(description=media.derived_text.strip())
+    return placeholder(media.kind)
+
+
+def _render_media_text(media: MediaRecord) -> str:
+    """The organizer-facing replay text for a derived media item (M9 T4, ADR-060 §5). A **photo**
+    is fenced ``<photo: …>`` (shared material — never the person's words); a **voice** transcript is
+    **plain/unfenced** (the person's OWN words, so the organizer treats it like any spoken capture).
+    An ``unavailable`` item renders the kind's self-describing placeholder."""
+    if media.kind == KIND_PHOTO:
+        return _fence_photo(media)
+    if media.status == MEDIA_DERIVED and (media.derived_text or "").strip():
+        return media.derived_text.strip()
     return placeholder(media.kind)
 
 
@@ -1318,7 +1373,9 @@ def build_capture_pipeline(settings: Settings, db, store_backup: StoreBackup) ->
     from ..vocab.store import PgVocabularyStore
     from .agent_runs import PgAgentRunStore
     from .capture_store import PgCaptureStore
+    from .media_store import PgMediaStore
     from .model_routing import build_model_routing
+    from .node_media_store import PgNodeMediaStore
     from .review_queue import PgReviewQueue
 
     registry = build_registry(settings)
@@ -1352,4 +1409,10 @@ def build_capture_pipeline(settings: Settings, db, store_backup: StoreBackup) ->
         review_queue=review_queue,
         tag_vocabulary=PgTagStore(db),
         vocab=vocabulary_service,
+        # Media substrate for the derived-tier `node_media` rebuild on reprocess-all replay
+        # (ADR-060 §3): the CLI pipeline re-links image/voice captures' media to their replayed
+        # content nodes. Derivation is NOT wired — reprocess replays the stored fenced/transcript
+        # `raw_text`, never re-running the VLM/STT (parity with the existing reprocess behaviour).
+        media_store=PgMediaStore(db),
+        node_media_store=PgNodeMediaStore(db),
     )

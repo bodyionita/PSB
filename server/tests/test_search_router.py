@@ -16,6 +16,7 @@ from app.providers.base import ProviderUnavailable
 from app.routers import search
 from app.search.service import NodePreview
 from app.search.store import NodeEdgeView, SearchHit
+from app.services.node_media_store import NodeMediaItem
 
 from .fakes import FakeNeighborStore, FakeNodeReader
 
@@ -169,6 +170,45 @@ def test_get_node_returns_detail_with_edges():
     assert body["body"] == "# X\n\nbody"
     assert body["edges"][0]["node_id"] == "22222222-2222-2222-2222-222222222222"
     assert body["edges"][0]["dir"] == "out"
+
+
+def test_search_exposes_media_kinds():
+    # M9 T4 (ADR-060 §7): a hit's `media_kinds` (off the node_media link) rides the result card as
+    # the glyph source. Empty for a node with no media.
+    hit = SearchHit(
+        node_id="11111111-1111-1111-1111-111111111111",
+        store_path="memory/x.md",
+        type="memory",
+        title="X",
+        plane="Ideas",
+        planes=["Ideas"],
+        tags=["t"],
+        snippet="s",
+        score=0.5,
+        media_kinds=["photo", "voice"],
+    )
+    resp = _client(FakeSearchService(hits=[hit])).post(f"{PREFIX}/search", json={"query": "q"})
+    assert resp.status_code == 200
+    assert resp.json()[0]["media_kinds"] == ["photo", "voice"]
+    # A hit with no media defaults to [].
+    resp2 = _client(FakeSearchService(hits=[_HIT])).post(f"{PREFIX}/search", json={"query": "q"})
+    assert resp2.json()[0]["media_kinds"] == []
+
+
+def test_get_node_exposes_media():
+    # M9 T4 (ADR-060 §1): `GET /nodes/{id}` carries the node's media strip (id, kind, status,
+    # capture_id) so NodePreview can render photos/voice inline + open "see raw capture".
+    nid = "11111111-1111-1111-1111-111111111111"
+    preview = _preview(nid)
+    object.__setattr__(
+        preview,
+        "media",
+        [NodeMediaItem(id="m-1", kind="photo", status="derived", capture_id="cap-1")],
+    )
+    resp = _client(FakeSearchService(preview=preview)).get(f"{PREFIX}/nodes/{nid}")
+    assert resp.status_code == 200
+    media = resp.json()["media"]
+    assert media == [{"id": "m-1", "kind": "photo", "status": "derived", "capture_id": "cap-1"}]
 
 
 def test_get_node_exposes_interiority():

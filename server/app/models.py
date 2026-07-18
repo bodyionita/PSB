@@ -73,10 +73,10 @@ class CaptureNodeRefModel(BaseModel):
 
 
 class CaptureMediaView(BaseModel):
-    """The media item backing an image capture (M9 T3, ADR-057 §6): the web renders the photo via
-    ``GET /media/{id}`` and shows a derivation-status badge, straight off the capture. ``None`` for
-    text/voice/mcp/chat captures. ``status`` is the derivation lifecycle
-    (``pending``/``derived``/``unavailable``)."""
+    """The media item backing an image OR voice capture (M9 T3/T4, ADR-057 §6 / ADR-060 §5): the web
+    renders the photo / voice player via ``GET /media/{id}`` and shows a derivation-status badge,
+    straight off the capture. ``None`` for text/mcp/chat captures. ``kind`` is ``photo``/``voice``;
+    ``status`` is the derivation lifecycle (``pending``/``derived``/``unavailable``)."""
 
     id: str
     kind: str
@@ -108,8 +108,9 @@ class CaptureView(BaseModel):
     # falls back to `kind` for the source badge). Carried so the Captures expand
     # (GET /captures/{id}) renders the badge without re-reading the feed row.
     source: str | None = None
-    # The backing media item for an image capture (M9 T3) — the photo + its derivation status; None
-    # for non-image captures. The web renders `GET /media/{media.id}` + a status badge.
+    # The backing media item for an image OR voice capture (M9 T3/T4) — the photo/audio + its
+    # derivation status; None for text/mcp/chat captures. The web renders `GET /media/{media.id}` +
+    # a status badge (a themed audio player for voice — ADR-060 §7).
     media: CaptureMediaView | None = None
 
     @classmethod
@@ -163,6 +164,10 @@ class SearchResultItem(BaseModel):
     tags: list[str] = Field(default_factory=list)
     snippet: str
     score: float
+    # Distinct media kinds the node carries (M9 T4, ADR-060 §7): `photo`/`voice`/`video`, off the
+    # `node_media` link. Drives a tiny glyph on the result card — no thumbnails in lists. Empty when
+    # the node has no media.
+    media_kinds: list[str] = Field(default_factory=list)
 
 
 class NodeEdgeItem(BaseModel):
@@ -182,11 +187,24 @@ class NodeEdgeItem(BaseModel):
     until: date | None = None
 
 
+class NodeMediaItemModel(BaseModel):
+    """One media item a node carries (GET /nodes/{id}.media[], M9 T4 / ADR-060 §1). The web renders
+    the photo/voice via ``GET /media/{id}``; ``kind`` (photo/voice/video) picks the tile/player,
+    ``status`` (pending/derived/unavailable) the shimmer/broken state, and ``capture_id`` opens the
+    "see raw capture" detail sheet (ADR-060 §7)."""
+
+    id: str
+    kind: str
+    status: str
+    capture_id: str | None = None
+
+
 class NodeDetailResponse(BaseModel):
     """Read-only node detail for the search UI expand + map (GET /nodes/{id}, 03-api §Nodes).
 
     ``profile`` is the derived entity profile ([ADR-030], null for content nodes and until the
-    profile-refresh job lands); ``edges`` are canonical + derived, both directions."""
+    profile-refresh job lands); ``edges`` are canonical + derived, both directions; ``media`` is the
+    node↔media link (M9 T4, ADR-060 §1 — the NodePreview media strip)."""
 
     node_id: str
     store_path: str
@@ -205,6 +223,7 @@ class NodeDetailResponse(BaseModel):
     body: str
     profile: str | None = None
     edges: list[NodeEdgeItem] = Field(default_factory=list)
+    media: list[NodeMediaItemModel] = Field(default_factory=list)
 
 
 class NodeDateTokenEditRequest(BaseModel):
@@ -327,6 +346,8 @@ class ChatSourceItem(BaseModel):
     snippet: str
     score: float
     planes: list[str] = Field(default_factory=list)
+    # Distinct media kinds the cited node carries (M9 T4, ADR-060 §7) — the source card's glyph.
+    media_kinds: list[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):

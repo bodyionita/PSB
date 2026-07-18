@@ -38,6 +38,7 @@ from .fakes import (
     FakeChatProvider,
     FakeIndexer,
     FakeMediaStore,
+    FakeNodeMediaStore,
     FakeReviewQueue,
     FakeStoreBackup,
     FakeSTTProvider,
@@ -129,6 +130,20 @@ def _make_pipeline(
         review_queue=review,
         routing=routing,
     )
+    # Voice is unified onto the media substrate (M9 T4, ADR-060 §5): wire the media store/files +
+    # derivation so `create_voice_capture` mints a `voice` media row and STT runs through the
+    # derivation engine. Text/chat captures leave it untouched (no media → link-write is a no-op).
+    media_store = FakeMediaStore()
+    media_files = MediaFiles(settings)
+    media_derivation = MediaDerivationService(
+        store=media_store,
+        files=media_files,
+        routing=routing,
+        registry=registry,
+        run_store=runs,
+        max_attempts=settings.media_derive_max_attempts,
+        rederive_max_per_run=50,
+    )
     pipeline = CapturePipeline(
         settings=settings,
         store=store,
@@ -141,6 +156,10 @@ def _make_pipeline(
         entity_resolver=resolver,
         review_queue=review,
         tag_vocabulary=tag_vocabulary,
+        media_store=media_store,
+        media_files=media_files,
+        media_derivation=media_derivation,
+        node_media_store=FakeNodeMediaStore(),
     )
     return pipeline, store, backup, runs, tmp_path / "store"
 
@@ -472,7 +491,12 @@ async def test_capture_writes_agent_runs_interaction_row(tmp_path: Path):
     assert run.model_used == "fake-chat"  # organize model
     assert run.fallback_used is False
     assert run.details["capture_id"] == cid
-    assert run.details["stt"] == {"provider": "fake-stt", "fallback_used": False, "error": None}
+    # Voice STT now rides the media derivation engine (ADR-060 §5) — the `stt` detail carries the
+    # media id + terminal status + model (mirroring the image `derive` detail), not the old
+    # provider/fallback shape.
+    assert run.details["stt"]["status"] == "derived"
+    assert run.details["stt"]["model"] == "fake-stt"
+    assert run.details["stt"]["kind"] == "voice"
     assert run.details["organize"] == {
         "model": "fake-chat",
         "fallback_used": False,
@@ -482,19 +506,24 @@ async def test_capture_writes_agent_runs_interaction_row(tmp_path: Path):
     assert "total" in run.details["timings_ms"]
 
 
-async def test_capture_failure_closes_agent_runs_row_failed(tmp_path: Path):
+async def test_voice_stt_down_degrades_to_placeholder(tmp_path: Path):
+    # ADR-060 §6: STT is now a DERIVATION, symmetric with image — a persistent STT failure walks
+    # retry → `unavailable` → the explicit placeholder WITHOUT blocking. The capture organizes
+    # anyway and lands `indexed` (never `failed`); the audio is kept + re-derivable. `failed` is
+    # reserved for true infra only.
     stt = FakeSTTProvider(available=False)
     pipeline, store, _, runs, _ = _make_pipeline(tmp_path, stt=stt)
     cid = await pipeline.create_voice_capture(b"audio", filename="memo.wav")
     await pipeline.drain()
 
-    capture_runs = [r for r in runs.runs.values() if r.agent == "capture"]
-    assert len(capture_runs) == 1
-    run = capture_runs[0]
-    assert run.status == "failed"
-    assert "transcription failed" in (run.error or "")
-    assert run.details["capture_id"] == cid
-    assert run.details["stt"]["provider"] is None
+    rec = store.records[cid]
+    assert rec.status == INDEXED  # degrades, never blocks
+    assert rec.raw_text == placeholder("voice")  # "<voice note — transcript unavailable>"
+    media = await pipeline._media_store.get_by_capture_id(cid)
+    assert media.status == UNAVAILABLE
+    run = next(r for r in runs.runs.values() if r.agent == "capture")
+    assert run.status == "succeeded"
+    assert run.details["stt"]["status"] == "unavailable"
 
 
 async def test_logging_store_failure_does_not_break_capture(tmp_path: Path):
@@ -562,22 +591,69 @@ async def test_voice_happy_path_transcribes_then_organizes(tmp_path: Path):
 
     rec = store.records[cid]
     assert rec.status == INDEXED
-    assert rec.raw_text == "a spoken memo"  # transcript persisted
-    assert rec.audio_path == f"{cid}.m4a"
-    assert (tmp_path / "data" / f"{cid}.m4a").read_bytes() == b"fake-audio-bytes"
+    # The transcript is persisted PLAIN/unfenced (the person's own words — ADR-060 §5), unlike the
+    # `<photo: …>` fence, so it organizes like any spoken capture.
+    assert rec.raw_text == "a spoken memo"
+    assert rec.audio_path is None  # audio now lives as a media row, not captures.audio_path
+    # Voice is unified onto the media substrate: a `voice` media row under the uniform layout, its
+    # audio at /srv/data/media/capture/<id>.m4a, transcript = derived_text.
+    media = await pipeline._media_store.get_by_capture_id(cid)
+    assert media.kind == "voice" and media.source == "capture"
+    assert media.status == DERIVED and media.derived_text == "a spoken memo"
+    assert media.file_path == f"capture/{cid}.m4a" and media.mime_type == "audio/mp4"
+    assert (
+        tmp_path / "data" / "media" / "capture" / f"{cid}.m4a"
+    ).read_bytes() == b"fake-audio-bytes"
     assert rec.node_paths and (root / rec.node_paths[0]).exists()
+    # The voice content node is linked to its media (ADR-060 §1) via the derived-tier node_media.
+    assert any(m == media.id for _n, m in pipeline._node_media_store.links)
 
 
-async def test_voice_stt_down_marks_failed(tmp_path: Path):
-    stt = FakeSTTProvider(available=False)
-    pipeline, store, _, _, _ = _make_pipeline(tmp_path, stt=stt)
-    cid = await pipeline.create_voice_capture(b"audio", filename="memo.wav")
+async def test_voice_rederive_recovers_node_after_stt_failure(tmp_path: Path):
+    # Symmetric with the image redescribe drill (ADR-060 §5): a persistent STT failure files a
+    # placeholder node; once STT is back, kind-aware `rederive_capture` re-transcribes AND rebuilds
+    # the node from the recovered transcript — the recovery reaches the GRAPH, not just media.
+    def responder(messages):
+        system = messages[0].content
+        if "organize a person's raw capture" in system:
+            captured = messages[1].content  # echo the transcript/placeholder into the node body
+            return json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "title": "A memo",
+                            "type": "memory",
+                            "plane": "Ideas",
+                            "planes": ["Ideas"],
+                            "tags": ["voice"],
+                            "body": captured,
+                            "entities": [],
+                        }
+                    ]
+                }
+            )
+        return "What did that bring up?"
+
+    stt = FakeSTTProvider(transcript="a recovered memo", available=False)
+    chat = FakeChatProvider("fake-chat", responder=responder)
+    pipeline, store, _, _, root = _make_pipeline(tmp_path, chat=chat, stt=stt)
+    cid = await pipeline.create_voice_capture(b"audio", filename="memo.m4a")
+    await pipeline.drain()
+    assert store.records[cid].status == INDEXED  # degraded, not failed
+    assert store.records[cid].raw_text == placeholder("voice")
+    assert (await pipeline._media_store.get_by_capture_id(cid)).status == UNAVAILABLE
+
+    stt._available = True
+    await pipeline.rederive_capture(cid)
     await pipeline.drain()
 
     rec = store.records[cid]
-    assert rec.status == FAILED
-    assert "transcription failed" in (rec.error or "")
-    assert (tmp_path / "data" / f"{cid}.wav").exists()  # audio kept (never-lose)
+    assert rec.status == INDEXED
+    assert rec.raw_text == "a recovered memo"  # plain transcript (voice), not fenced
+    media = await pipeline._media_store.get_by_capture_id(cid)
+    assert media.status == DERIVED and media.derived_text == "a recovered memo"
+    body = (root / rec.node_paths[0]).read_text(encoding="utf-8")
+    assert "recovered memo" in body and placeholder("voice") not in body
 
 
 async def test_voice_rejects_oversized_and_unsupported(tmp_path: Path):
@@ -668,24 +744,6 @@ async def test_nudge_store_failure_does_not_fail_capture(tmp_path: Path):
     rec = store.records[cid]
     assert rec.status == INDEXED  # nudge failure swallowed; capture stays healthy
     assert rec.follow_up_question is None
-    assert rec.node_paths and (root / rec.node_paths[0]).exists()
-
-
-async def test_retry_reruns_failed_voice_capture(tmp_path: Path):
-    stt = FakeSTTProvider(transcript="a recovered memo", available=False)
-    pipeline, store, _, _, root = _make_pipeline(tmp_path, stt=stt)
-    cid = await pipeline.create_voice_capture(b"audio", filename="memo.m4a")
-    await pipeline.drain()
-    assert store.records[cid].status == FAILED
-
-    stt._available = True
-    await pipeline.retry_capture(cid)
-    await pipeline.drain()
-
-    rec = store.records[cid]
-    assert rec.status == INDEXED
-    assert rec.error is None  # reset_for_retry cleared the stale failure
-    assert rec.raw_text == "a recovered memo"
     assert rec.node_paths and (root / rec.node_paths[0]).exists()
 
 
@@ -935,6 +993,7 @@ def _make_image_pipeline(tmp_path: Path, *, vlm: FakeChatProvider | None = None,
         media_store=media_store,
         media_files=media_files,
         media_derivation=media_derivation,
+        node_media_store=FakeNodeMediaStore(),
     )
     return pipeline, store, media_store, runs, vlm, tmp_path / "store"
 
@@ -965,6 +1024,8 @@ async def test_image_capture_happy_path(tmp_path: Path):
     # The vision leg actually received the image (data URI) and the organize leg got the fence.
     assert any(imgs for imgs in vlm.images_seen if imgs)
     assert "<photo:" in vlm.last_messages[1].content  # last call = organize, over the fenced text
+    # The content node is linked to its media via the derived-tier node_media (ADR-060 §1).
+    assert any(m == media.id for _n, m in pipeline._node_media_store.links)
 
 
 async def test_image_screenshot_description_is_fenced_into_organize(tmp_path: Path):
@@ -1010,10 +1071,10 @@ async def test_image_derivation_failure_walks_to_placeholder(tmp_path: Path):
     assert rec.node_paths and not rec.node_paths[0].startswith("inbox/")
 
 
-async def test_image_redescribe_recovers_node_after_failure(tmp_path: Path):
+async def test_image_rederive_recovers_node_after_failure(tmp_path: Path):
     # The acceptance drill (08 §M9): a forced failure files a placeholder node; once the VLM is
-    # back, `redescribe_image_capture` re-derives the photo AND rebuilds the node from the recovered
-    # description — the recovery reaches the GRAPH, not just the media viewer (ADR-057 §3/§6).
+    # back, kind-aware `rederive_capture` re-derives the photo AND rebuilds the node from the
+    # recovered description — the recovery reaches the GRAPH, not just the media row (ADR-060 §5).
     vlm = FakeChatProvider("fake-vlm", responder=_image_responder(vision_down=True))
     pipeline, store, media_store, _runs, _vlm, root = _make_image_pipeline(
         tmp_path, vlm=vlm, max_attempts=2
@@ -1025,9 +1086,9 @@ async def test_image_redescribe_recovers_node_after_failure(tmp_path: Path):
     stale_node = store.records[cid].node_paths[0]
     assert placeholder("photo") in (root / stale_node).read_text(encoding="utf-8")
 
-    # VLM recovers; the capture-layer re-describe seam recovers the media AND rebuilds the node.
+    # VLM recovers; the capture-layer re-derive seam recovers the media AND rebuilds the node.
     vlm._responder = _image_responder("A recovered whiteboard photo.")
-    await pipeline.redescribe_image_capture(cid)
+    await pipeline.rederive_capture(cid)
     await pipeline.drain()
 
     media = await media_store.get_by_capture_id(cid)

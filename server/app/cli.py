@@ -60,6 +60,9 @@ MAYBE_DIGEST = "maybe-digest"
 # The reprocess-all-from-raw op (ADR-042). Destructive of derived state but confirm is implicit at
 # the CLI (an operator running it deliberately) — raw + approved vocab are preserved.
 REPROCESS = "reprocess-all"
+# The legacy-voice → media backfill (ADR-060 §5): relocate pre-substrate voice audio into the media
+# layout, mint `voice` media rows, link node_media. Idempotent + degrading; T6 runs it at deploy.
+VOICE_MEDIA_BACKFILL = "voice-media-backfill"
 # Every valid CLI job name (backup jobs + reindex + entity jobs + capsule + distill + reprocess).
 JOBS: tuple[str, ...] = (
     *BACKUP_JOBS.keys(),
@@ -72,6 +75,7 @@ JOBS: tuple[str, ...] = (
     INBOX_DRAIN,
     MAYBE_DIGEST,
     REPROCESS,
+    VOICE_MEDIA_BACKFILL,
 )
 
 
@@ -215,6 +219,12 @@ async def run_job(name: str) -> None:
             from .services.maybe_digest import build_maybe_digest_service
 
             await build_maybe_digest_service(settings, db).run_scheduled()
+        elif name == VOICE_MEDIA_BACKFILL:
+            # Relocate legacy voice audio → mint media rows → link node_media (ADR-060 §5). DB + the
+            # /srv/data media volume (R2-synced), no git store — idempotent + degrading. Deploy op.
+            from .services.media_backfill import build_voice_media_backfill_service
+
+            await (await build_voice_media_backfill_service(settings, db)).run()
         else:
             jobs = build_backup_jobs(settings, db, store_backup)
             await getattr(jobs, BACKUP_JOBS[name])()

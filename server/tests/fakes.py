@@ -1379,6 +1379,12 @@ class FakeMediaStore:
         )
         return matches[0] if matches else None
 
+    async def list_by_capture_id(self, capture_id: str) -> list[MediaRecord]:
+        return sorted(
+            (r for r in self.rows.values() if r.capture_id == capture_id),
+            key=lambda r: r.created_at or datetime.now(UTC),
+        )
+
     async def get_many(self, media_ids: list[str]) -> list[MediaRecord]:
         return [self.rows[m] for m in media_ids if m in self.rows]
 
@@ -1417,3 +1423,30 @@ class FakeMediaStore:
                 r.error = None
                 count += 1
         return count
+
+
+class FakeNodeMediaStore:
+    """In-memory NodeMediaStore (ADR-060 §1) — the node↔media link double for pipeline/merge tests.
+
+    ``links`` is the set of ``(node_id, media_id)`` pairs; the derived-tier rebuild + merge repoint
+    mutate it in place, mirroring PgNodeMediaStore's semantics so the pipeline's link-write and the
+    merge-core's repoint are exercised end-to-end."""
+
+    def __init__(self) -> None:
+        self.links: set[tuple[str, str]] = set()
+
+    async def rebuild_for_media(self, *, media_ids: list[str], node_ids: list[str]) -> None:
+        if not media_ids:
+            return
+        # Wipe this media's existing links, then re-insert against the current content nodes.
+        self.links = {(n, m) for (n, m) in self.links if m not in set(media_ids)}
+        for media_id in media_ids:
+            for node_id in node_ids:
+                self.links.add((node_id, media_id))
+
+    async def repoint(self, *, loser_id: str, survivor_id: str) -> int:
+        loser_links = [(n, m) for (n, m) in self.links if n == loser_id]
+        for _n, media_id in loser_links:
+            self.links.discard((loser_id, media_id))
+            self.links.add((survivor_id, media_id))
+        return len(loser_links)

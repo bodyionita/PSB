@@ -17,13 +17,14 @@ for the router to map to ``503`` (this is a request path, not a background job).
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
 from ..config import Settings
 from ..indexing.chunking import split_frontmatter
 from ..providers.registry import ProviderRegistry
+from ..services.node_media_store import NodeMediaItem
 from .store import NodeEdgeView, RetrievalParams, SearchHit, SearchStore
 
 # nomic asymmetric task prefix for the query side (ADR-022); the indexer uses ``search_document:``.
@@ -51,6 +52,8 @@ class NodePreview:
     merged_into: str | None
     created_at: datetime | None = None
     interiority: str | None = None
+    # The media this node carries (M9 T4, ADR-060 §1) — the `GET /nodes/{id}.media[]` strip.
+    media: list[NodeMediaItem] = field(default_factory=list)
 
 
 class SearchService:
@@ -131,6 +134,7 @@ class SearchService:
             merged_into=row.merged_into,
             created_at=row.created_at,
             interiority=row.interiority,
+            media=row.media,  # node↔media link (M9 T4, ADR-060 §1)
         )
 
     def _clamp_top_k(self, top_k: int | None) -> int:
@@ -156,6 +160,7 @@ class SearchService:
             occurred_end=hit.occurred_end,
             created_at=hit.created_at,
             interiority=hit.interiority,
+            media_kinds=hit.media_kinds,
         )
 
     def _read_body(self, store_path: str) -> str:

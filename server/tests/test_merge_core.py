@@ -18,7 +18,12 @@ from app.entities.entity_store import EntityNode, InboundEdge
 from app.entities.merge_core import MergeCore, MergeTarget
 from app.graph.node_writer import NodeDocument, NodeEdge, NodeWriter
 from app.indexing.frontmatter import parse_node_metadata
-from tests.fakes import FakeCommitBackup, FakeEntityStore, FakeIndexer
+from tests.fakes import (
+    FakeCommitBackup,
+    FakeEntityStore,
+    FakeIndexer,
+    FakeNodeMediaStore,
+)
 
 CREATED = datetime(2026, 7, 12, 12, 0, 0)
 
@@ -136,6 +141,50 @@ async def test_fold_skips_missing_source_never_crashes(tmp_path: Path):
         ).merged_into
         == "surv-2"
     )
+
+
+@pytest.mark.asyncio
+async def test_fold_repoints_node_media_to_survivor(tmp_path: Path):
+    # ADR-060 §4: a merged survivor inherits the loser's media — the core repoints node_media
+    # loser→survivor (the tombstone is kept, so the FK cascade never fires; the explicit repoint is
+    # what stops photos stranding on the tombstone).
+    writer = NodeWriter(str(tmp_path))
+    loser = _write_content(writer, "loser-1", "memory")
+    survivor = _write_content(writer, "surv-2", "memory")
+    store = FakeEntityStore(inbound={})
+    indexer, backup = FakeIndexer(), FakeCommitBackup()
+    node_media = FakeNodeMediaStore()
+    node_media.links = {("loser-1", "media-a"), ("surv-2", "media-b")}
+    core = MergeCore(
+        entity_store=store,
+        node_writer=writer,
+        indexer=indexer,
+        store_backup=backup,
+        node_media=node_media,
+    )
+
+    result = await core.fold(
+        loser=_target("loser-1", loser), survivor=_target("surv-2", survivor), reason="merge"
+    )
+
+    # The loser's media now hangs off the survivor; the loser holds no links.
+    assert ("surv-2", "media-a") in node_media.links
+    assert not any(n == "loser-1" for n, _m in node_media.links)
+    assert result.media_repointed == 1
+
+
+@pytest.mark.asyncio
+async def test_fold_without_node_media_store_is_a_noop(tmp_path: Path):
+    # The repoint is optional — a core wired without a node_media store (some callers/tests) simply
+    # skips it and reports 0, never crashing the fold (the link is derived-tier).
+    writer = NodeWriter(str(tmp_path))
+    loser = _write_content(writer, "loser-1", "memory")
+    survivor = _write_content(writer, "surv-2", "memory")
+    store = FakeEntityStore(inbound={})
+    result = await _core(store, writer, FakeIndexer(), FakeCommitBackup()).fold(
+        loser=_target("loser-1", loser), survivor=_target("surv-2", survivor), reason="merge"
+    )
+    assert result.media_repointed == 0
 
 
 @pytest.mark.asyncio

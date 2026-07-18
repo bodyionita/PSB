@@ -57,10 +57,11 @@ class CaptureNodeRef:
 
 @dataclass(frozen=True)
 class CaptureMediaRef:
-    """The media item backing an ad-hoc image capture (M9 T3, ADR-057 §6), resolved at read time
-    from ``media.capture_id`` so the web can render the photo (``GET /media/{id}``) + a derivation-
-    status badge straight off the capture. ``None`` for text/voice/mcp/chat captures (no media
-    row). ``status`` is the derivation lifecycle (``pending``/``derived``/``unavailable``)."""
+    """The media item backing an ad-hoc image OR voice capture (M9 T3/T4, ADR-057 §6 / ADR-060 §5),
+    resolved at read time from ``media.capture_id`` so the web can render the photo / voice player
+    (``GET /media/{id}``) + a derivation-status badge straight off the capture. ``None`` for
+    text/mcp/chat captures (no media row). ``kind`` is ``photo``/``voice``; ``status`` is the
+    derivation lifecycle (``pending``/``derived``/``unavailable``)."""
 
     id: str
     kind: str
@@ -79,8 +80,9 @@ class CaptureRecord:
     # Populated by `get`/`list_recent`'s read-time join; empty on a freshly-created record (no
     # nodes yet) and never written back to `captures` (derived, not stored).
     node_refs: list[CaptureNodeRef] = field(default_factory=list)
-    # The backing media item for an image capture (M9 T3) — resolved by `get`/`list_recent`'s
-    # read-time `media.capture_id` join; None for non-image captures. Derived, not stored here.
+    # The backing media item for an image OR voice capture (M9 T3/T4) — resolved by `get`/
+    # `list_recent`'s read-time `media.capture_id` join; None for text/mcp/chat captures. Derived,
+    # not stored here.
     media_ref: CaptureMediaRef | None = None
     follow_up_question: str | None = None
     follow_up_answer: str | None = None
@@ -185,10 +187,10 @@ _NODE_REFS_JOIN = """
     ) node_refs ON true
 """
 
-# The M9 T3 read-time `media.capture_id -> media` join: the one media item backing an ad-hoc image
-# capture (1:1; LIMIT 1 is a defensive cap), as a jsonb object so the web renders the photo +
-# derivation-status badge off the capture without a second round-trip. NULL for a capture with no
-# media (text/voice/mcp/chat) — decoded to None by `_media_ref`.
+# The M9 T3/T4 read-time `media.capture_id -> media` join: the one media item backing an ad-hoc
+# image or voice capture (1:1; LIMIT 1 is a defensive cap), as a jsonb object so the web renders the
+# photo / voice player + derivation-status badge off the capture without a second round-trip. NULL
+# for a capture with no media (text/mcp/chat) — decoded to None by `_media_ref`.
 _MEDIA_REF_JOIN = """
     LEFT JOIN LATERAL (
         SELECT jsonb_build_object('id', m.id, 'kind', m.kind, 'status', m.status) AS media

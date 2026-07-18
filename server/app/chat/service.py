@@ -81,6 +81,8 @@ class CitedSource:
     snippet: str
     score: float
     planes: list[str] = field(default_factory=list)
+    # Distinct media kinds the cited node carries (M9 T4, ADR-060 §7) — the source card's glyph.
+    media_kinds: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -303,12 +305,13 @@ def _to_source(hit: SearchHit) -> CitedSource:
         snippet=hit.snippet,
         score=hit.score,
         planes=list(hit.planes),
+        media_kinds=list(hit.media_kinds),
     )
 
 
 def _source_dict(source: CitedSource) -> dict:
     """The persisted/returned source shape (03-api §Chat): node_id, store_path, type, title,
-    snippet, score, planes."""
+    snippet, score, planes, media_kinds (M9 T4)."""
     return {
         "node_id": source.node_id,
         "store_path": source.store_path,
@@ -317,6 +320,7 @@ def _source_dict(source: CitedSource) -> dict:
         "snippet": source.snippet,
         "score": source.score,
         "planes": list(source.planes),
+        "media_kinds": list(source.media_kinds),
     }
 
 

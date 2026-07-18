@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 
 from ..graph.node_writer import NodeWriter
 from ..indexing.indexer import NodeIndexer
+from ..services.node_media_store import NodeMediaStore
 from ..services.store_backup import StoreCommitter
 from .entity_store import EntityStore, InboundEdge
 
@@ -56,6 +57,8 @@ class MergeCoreResult:
     committed: bool = False
     pushed: bool = False
     index: dict[str, object] | None = None
+    # Media links moved loser→survivor (ADR-060 §4) — a merged survivor inherits the loser's media.
+    media_repointed: int = 0
 
     @property
     def files_changed(self) -> int:
@@ -72,11 +75,16 @@ class MergeCore:
         node_writer: NodeWriter,
         indexer: NodeIndexer,
         store_backup: StoreCommitter,
+        node_media: NodeMediaStore | None = None,
     ) -> None:
         self._entities = entity_store
         self._writer = node_writer
         self._indexer = indexer
         self._backup = store_backup
+        # The node↔media link store (ADR-060 §4): repoint loser→survivor so a merged survivor
+        # inherits the loser's media. Optional — a merge-core wired without it (some unit tests)
+        # simply skips the repoint; the link is derived-tier and a reprocess would rebuild it.
+        self._node_media = node_media
 
     async def fold(
         self,
@@ -123,15 +131,24 @@ class MergeCore:
         if loser.store_path not in changed:
             changed.append(loser.store_path)
 
+        # Repoint the loser's node↔media links onto the survivor (ADR-060 §4). Done BEFORE the
+        # reindex: the tombstone is kept (not deleted), so the `node_media` FK cascade never fires —
+        # the explicit repoint is what stops the loser's photos/voice stranding on the tombstone.
+        # DB-only + `ON CONFLICT DO NOTHING`; best-effort (rule 7) so a link hiccup never aborts a
+        # committed merge — a reprocess rebuilds the derived-tier link regardless.
+        media_repointed = await self._repoint_media(loser.id, survivor.id)
+
         index = await self._indexer.index_paths(changed) if changed else None
         backup = await self._backup.backup_now(reason)
         logger.info(
-            "merge-core: %s → %s (%d edge(s) retargeted, %d file(s), %d skipped, pushed=%s)",
+            "merge-core: %s → %s (%d edge(s) retargeted, %d file(s), %d skipped, "
+            "%d media repointed, pushed=%s)",
             loser.id,
             survivor.id,
             retargeted,
             len(changed),
             skipped,
+            media_repointed,
             backup.pushed,
         )
         return MergeCoreResult(
@@ -141,7 +158,19 @@ class MergeCore:
             committed=backup.committed,
             pushed=backup.pushed,
             index=index.as_dict() if index is not None else None,
+            media_repointed=media_repointed,
         )
+
+    async def _repoint_media(self, loser_id: str, survivor_id: str) -> int:
+        """Move loser→survivor `node_media` links (ADR-060 §4). Best-effort: no store wired, or a
+        DB hiccup, yields 0 and never aborts the merge (the link is derived-tier)."""
+        if self._node_media is None:
+            return 0
+        try:
+            return await self._node_media.repoint(loser_id=loser_id, survivor_id=survivor_id)
+        except Exception:  # noqa: BLE001 — a link repoint must never break a committed merge
+            logger.exception("merge-core: node_media repoint %s → %s failed", loser_id, survivor_id)
+            return 0
 
 
 def _distinct_source_paths(inbound: list[InboundEdge]) -> list[str]:

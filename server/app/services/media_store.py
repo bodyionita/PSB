@@ -89,6 +89,12 @@ class MediaStore(Protocol):
         image-capture pipeline treats that as an anomaly (the row is written at capture time)."""
         ...
 
+    async def list_by_capture_id(self, capture_id: str) -> list[MediaRecord]:
+        """Every media item backing a capture, oldest-first (M9 T4): the derived-tier `node_media`
+        link-write recomputes a capture's node↔media links from this set (ADR-060 §3). One row for
+        an ad-hoc photo/voice capture today; the list shape carries the future many-media case."""
+        ...
+
     async def get_many(self, media_ids: list[str]) -> list[MediaRecord]:
         """The given ids that exist, in ``created_at`` order (an unknown id is simply absent)."""
         ...
@@ -200,6 +206,18 @@ class PgMediaStore:
                 capture_id,
             )
         return _record(row) if row is not None else None
+
+    async def list_by_capture_id(self, capture_id: str) -> list[MediaRecord]:
+        async with self._db.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {_COLUMNS} FROM media
+                 WHERE capture_id = $1
+                 ORDER BY created_at ASC, id
+                """,
+                capture_id,
+            )
+        return [_record(r) for r in rows]
 
     async def get_many(self, media_ids: list[str]) -> list[MediaRecord]:
         if not media_ids:

@@ -32,7 +32,13 @@ from .fakes import FakeChatProvider, FakeChatStore, FakeModelRoutingStore, FakeR
 PREFIX = "/api/v1"
 
 
-def _hit(node_id: str, *, snippet: str = "a snippet", score: float = 0.03) -> SearchHit:
+def _hit(
+    node_id: str,
+    *,
+    snippet: str = "a snippet",
+    score: float = 0.03,
+    media_kinds: list[str] | None = None,
+) -> SearchHit:
     return SearchHit(
         node_id=node_id,
         store_path=f"memory/{node_id}.md",
@@ -43,6 +49,7 @@ def _hit(node_id: str, *, snippet: str = "a snippet", score: float = 0.03) -> Se
         tags=["t"],
         snippet=snippet,
         score=score,
+        media_kinds=media_kinds or [],
     )
 
 
@@ -110,6 +117,14 @@ def test_post_chat_answers_with_renumbered_citations_and_creates_session():
     assert body["sources"][0]["planes"] == ["Ideas"]
     assert body["model_used"] == "chat-p"
     assert body["fallback_used"] is False
+
+
+def test_post_chat_source_carries_media_kinds():
+    # M9 T4 (ADR-060 §7): a cited node's `media_kinds` rides the source card as the glyph source.
+    service, routing, _ = _build(answer="See [1].", hits=[_hit("n1", media_kinds=["photo"])])
+    resp = _client(service, routing).post(f"{PREFIX}/chat", json={"message": "q"})
+    assert resp.status_code == 200
+    assert resp.json()["sources"][0]["media_kinds"] == ["photo"]
 
 
 def test_post_chat_forwards_picker_and_filters():

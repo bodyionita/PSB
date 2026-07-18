@@ -36,6 +36,7 @@ from ..models import (
     NodeDateTokenEditResponse,
     NodeDetailResponse,
     NodeEdgeItem,
+    NodeMediaItemModel,
     SearchRequest,
     SearchResultItem,
 )
@@ -97,6 +98,7 @@ async def search(
             tags=hit.tags,
             snippet=hit.snippet,
             score=hit.score,
+            media_kinds=hit.media_kinds,
         )
         for hit in hits
     ]
@@ -146,6 +148,10 @@ async def get_node(
                 until=e.until,
             )
             for e in preview.edges
+        ],
+        media=[
+            NodeMediaItemModel(id=m.id, kind=m.kind, status=m.status, capture_id=m.capture_id)
+            for m in preview.media
         ],
     )
 

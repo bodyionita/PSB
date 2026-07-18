@@ -24,6 +24,7 @@ from datetime import date, datetime
 from typing import Protocol
 
 from ..db import Database
+from ..services.node_media_store import NodeMediaItem
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,9 @@ class SearchHit:
 
     The temporal fields (``occurred_*`` + ``created_at``) and ``interiority`` feed the LLM-bound
     rendering contract's per-item header (ADR-056 §4) and the map/preview marker; they never change
-    the API ``/search`` shape (the router omits them)."""
+    the API ``/search`` shape (the router omits them). ``media_kinds`` (M9 T4, ADR-060 §7) is the
+    distinct kinds (``photo``/``voice``/``video``) the node carries, off the `node_media` link — it
+    rides the search-result + chat-source cards as a tiny glyph (no thumbnails in lists)."""
 
     node_id: str
     store_path: str
@@ -47,6 +50,7 @@ class SearchHit:
     occurred_end: date | None = None
     created_at: datetime | None = None
     interiority: str | None = None
+    media_kinds: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,9 @@ class NodeRow:
     interiority: str | None = None
     profile: str | None = None
     edges: list[NodeEdgeView] = field(default_factory=list)
+    # The media this node carries (M9 T4, ADR-060 §1) — the `GET /nodes/{id}.media[]` strip. Empty
+    # for a node with no media (off the `node_media` link).
+    media: list[NodeMediaItem] = field(default_factory=list)
 
 
 class SearchStore(Protocol):
@@ -289,7 +296,15 @@ class PgSearchStore:
                     FROM fused
                 )
                 SELECT node_id, store_path, type, title, plane, planes, tags, snippet, score,
-                       occurred_start, occurred_end, node_created_at, interiority
+                       occurred_start, occurred_end, node_created_at, interiority,
+                       -- The distinct media kinds this node carries (M9 T4, ADR-060 §7) — the
+                       -- search/chat cards' glyph. `{}` when the node has no `node_media` link.
+                       COALESCE(
+                           (SELECT array_agg(DISTINCT m.kind ORDER BY m.kind)
+                              FROM node_media nm JOIN media m ON m.id = nm.media_id
+                             WHERE nm.node_id = scored.node_id),
+                           '{}'::text[]
+                       ) AS media_kinds
                 FROM scored
                 WHERE score >= $12
                 ORDER BY score DESC
@@ -325,6 +340,7 @@ class PgSearchStore:
                 occurred_end=row["occurred_end"],
                 created_at=row["node_created_at"],
                 interiority=row["interiority"],
+                media_kinds=list(row["media_kinds"] or []),
             )
             for row in rows
         ]
@@ -359,6 +375,17 @@ class PgSearchStore:
                 """,
                 node_id,
             )
+            # The media this node carries (M9 T4, ADR-060 §1) — the `GET /nodes/{id}.media[]` strip,
+            # off the derived-tier `node_media` link, oldest-media-first.
+            media = await conn.fetch(
+                """
+                SELECT m.id, m.kind, m.status, m.capture_id
+                  FROM node_media nm JOIN media m ON m.id = nm.media_id
+                 WHERE nm.node_id = $1
+                 ORDER BY m.created_at ASC, m.id
+                """,
+                node_id,
+            )
         return NodeRow(
             node_id=str(node["id"]),
             store_path=node["store_path"],
@@ -388,5 +415,14 @@ class PgSearchStore:
                     until=e["until"],
                 )
                 for e in edges
+            ],
+            media=[
+                NodeMediaItem(
+                    id=str(m["id"]),
+                    kind=m["kind"],
+                    status=m["status"],
+                    capture_id=str(m["capture_id"]) if m["capture_id"] is not None else None,
+                )
+                for m in media
             ],
         )
