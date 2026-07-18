@@ -178,6 +178,12 @@ class Settings(BaseSettings):
     # Bound on how many `unavailable` items one targeted re-derive pass revisits (a run's budget;
     # the rest wait for the next pass — the scan is idempotent, ADR-057 §3).
     media_rederive_max_per_run: int = 200
+
+    # --- Composite capture drafts (M9.6, ADR-061 §9) ---
+    # An unsubmitted compose draft older than this is reclaimed (raw files + rows) by the boot/
+    # periodic draft GC — a draft is intentionally open (never orphan-swept), but an abandoned one
+    # must not linger forever. The orphan-sweep never touches a draft (§9).
+    draft_gc_max_age_days: int = 7
     # Bounds on a single organize result, enforced by validate_organizer_output.
     organizer_max_nodes: int = 8
     organizer_max_tags: int = 12

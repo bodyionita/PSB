@@ -11,7 +11,7 @@ public) — enforced once at the router level.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
 from ..dependencies import get_capture_pipeline, require_session
 from ..models import (
@@ -19,15 +19,21 @@ from ..models import (
     CaptureAnchorEditRequest,
     CaptureTextRequest,
     CaptureView,
+    DraftPartView,
+    DraftTextRequest,
+    DraftView,
     FollowUpRequest,
 )
 from ..services.capture_pipeline import (
     CaptureNotFound,
     CapturePipeline,
+    DraftNotOpen,
+    EmptyDraft,
     FollowUpNotPending,
     NotRetryable,
     UnsupportedAudio,
     UnsupportedImage,
+    VoicePartLimit,
 )
 
 router = APIRouter(tags=["capture"], dependencies=[Depends(require_session)])
@@ -81,6 +87,149 @@ async def capture_image(
     except UnsupportedImage as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
     return CaptureAcceptedResponse(capture_id=capture_id)
+
+
+# --- Composite draft lifecycle (M9.6 T1, ADR-061 §3) ---
+
+
+@router.post("/capture/draft", response_model=DraftView)
+async def open_draft(
+    pipeline: CapturePipeline = Depends(get_capture_pipeline),
+) -> DraftView:
+    """Open a composite draft, or resume the one already open (one active draft — ADR-061 §3).
+    Returns the draft's text body + ordinal-ordered parts so the compose screen can resume it."""
+    record = await pipeline.open_or_resume_draft()
+    parts = await pipeline.draft_parts(record.id)
+    return DraftView.from_record(record, parts)
+
+
+@router.post("/capture/{capture_id}/part", response_model=DraftPartView)
+async def add_draft_part(
+    capture_id: str,
+    kind: str = Form(...),
+    file: UploadFile = File(...),
+    pipeline: CapturePipeline = Depends(get_capture_pipeline),
+) -> DraftPartView:
+    """Attach one media part (``kind`` = ``photo``/``voice``) to an open draft (ADR-061 §3). Raw
+    persists immediately; derivation is deferred to Submit. ``409`` if not an open draft or a 2nd
+    voice; ``400`` on a bad type/size; ``404`` unknown capture."""
+    data = await file.read()
+    try:
+        media = await pipeline.add_draft_part(
+            capture_id, data, filename=file.filename or kind, kind=kind
+        )
+    except CaptureNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="capture not found"
+        ) from None
+    except DraftNotOpen:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="capture is not an open draft"
+        ) from None
+    except VoicePartLimit:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="a draft may carry at most one voice part"
+        ) from None
+    except (UnsupportedAudio, UnsupportedImage) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    return DraftPartView.from_record(media)
+
+
+@router.delete(
+    "/capture/{capture_id}/part/{media_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_draft_part(
+    capture_id: str,
+    media_id: str,
+    pipeline: CapturePipeline = Depends(get_capture_pipeline),
+) -> None:
+    """Remove a draft part — the 'x' (ADR-061 §3). Hard-removes raw + row. ``409`` if not an open
+    draft; ``404`` unknown capture/part."""
+    try:
+        await pipeline.remove_draft_part(capture_id, media_id)
+    except CaptureNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="capture or part not found"
+        ) from None
+    except DraftNotOpen:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="capture is not an open draft"
+        ) from None
+
+
+@router.put("/capture/{capture_id}/text", response_model=DraftView)
+async def edit_draft_text(
+    capture_id: str,
+    payload: DraftTextRequest,
+    pipeline: CapturePipeline = Depends(get_capture_pipeline),
+) -> DraftView:
+    """Edit the draft's typed text body (ADR-061 §3). ``409`` if not an open draft; ``404``
+    unknown."""
+    try:
+        await pipeline.set_draft_text(capture_id, payload.text)
+    except CaptureNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="capture not found"
+        ) from None
+    except DraftNotOpen:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="capture is not an open draft"
+        ) from None
+    record = await pipeline.get(capture_id)
+    assert record is not None  # just edited it
+    parts = await pipeline.draft_parts(capture_id)
+    return DraftView.from_record(record, parts)
+
+
+@router.post(
+    "/capture/{capture_id}/submit",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=CaptureAcceptedResponse,
+)
+async def submit_draft(
+    capture_id: str,
+    pipeline: CapturePipeline = Depends(get_capture_pipeline),
+) -> CaptureAcceptedResponse:
+    """Submit a composite draft → blended organize (ADR-061 §3). ``202``; ``400`` if the draft has
+    no non-empty part; ``409`` if not an open draft; ``404`` unknown."""
+    try:
+        await pipeline.submit_draft(capture_id)
+    except CaptureNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="capture not found"
+        ) from None
+    except EmptyDraft:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="draft has no content to submit"
+        ) from None
+    except DraftNotOpen:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="capture is not an open draft"
+        ) from None
+    return CaptureAcceptedResponse(capture_id=capture_id)
+
+
+@router.delete(
+    "/capture/{capture_id}/draft",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def discard_draft(
+    capture_id: str,
+    pipeline: CapturePipeline = Depends(get_capture_pipeline),
+) -> None:
+    """Discard an open draft (ADR-061 §3 — the Discard action): removes every part + the row.
+    ``409`` if not an open draft; ``404`` unknown."""
+    try:
+        await pipeline.discard_draft(capture_id)
+    except CaptureNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="capture not found"
+        ) from None
+    except DraftNotOpen:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="capture is not an open draft"
+        ) from None
 
 
 @router.get("/captures", response_model=list[CaptureView])

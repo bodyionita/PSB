@@ -38,7 +38,13 @@ from app.services.agent_runs import (
     current_trigger,
     end_run_scope,
 )
-from app.services.capture_store import FAILED, RECEIVED, TERMINAL_STATUSES, CaptureRecord
+from app.services.capture_store import (
+    DRAFT,
+    FAILED,
+    NON_SWEEPABLE_STATUSES,
+    RECEIVED,
+    CaptureRecord,
+)
 from app.services.git_repo import PushOutcome
 from app.services.media_store import DERIVED, PENDING, UNAVAILABLE, MediaRecord
 from app.services.model_routing import GroupRouting, ModelRoutingService
@@ -1040,6 +1046,7 @@ class FakeCaptureStore:
         kind: str,
         status: str,
         raw_text: str | None = None,
+        text_body: str | None = None,
         audio_path: str | None = None,
         created_at: datetime | None = None,
         source: str | None = None,
@@ -1051,6 +1058,7 @@ class FakeCaptureStore:
             kind=kind,
             status=status,
             raw_text=raw_text,
+            text_body=text_body,
             audio_path=audio_path,
             created_at=now,
             updated_at=now,
@@ -1059,6 +1067,14 @@ class FakeCaptureStore:
         )
         self.records[capture_id] = record
         return record
+
+    async def get_active_draft(self) -> CaptureRecord | None:
+        drafts = sorted(
+            (r for r in self.records.values() if r.status == DRAFT),
+            key=lambda r: r.created_at or datetime.now(UTC),
+            reverse=True,
+        )
+        return drafts[0] if drafts else None
 
     async def get(self, capture_id: str) -> CaptureRecord | None:
         return self.records.get(capture_id)
@@ -1090,6 +1106,9 @@ class FakeCaptureStore:
     async def set_raw_text(self, capture_id: str, raw_text: str) -> None:
         self.records[capture_id].raw_text = raw_text
 
+    async def set_text_body(self, capture_id: str, text_body: str) -> None:
+        self.records[capture_id].text_body = text_body
+
     async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None:
         self.records[capture_id].node_paths = list(node_paths)
 
@@ -1107,11 +1126,23 @@ class FakeCaptureStore:
     async def sweep_orphans(self, error: str) -> int:
         count = 0
         for rec in self.records.values():
-            if rec.status not in TERMINAL_STATUSES:
+            if rec.status not in NON_SWEEPABLE_STATUSES:
                 rec.status = FAILED
                 rec.error = error
                 count += 1
         return count
+
+    async def delete(self, capture_id: str) -> None:
+        self.records.pop(capture_id, None)
+
+    async def list_drafts_created_before(self, cutoff: datetime) -> list[CaptureRecord]:
+        drafts = [
+            r
+            for r in self.records.values()
+            if r.status == DRAFT and (r.created_at or datetime.now(UTC)) < cutoff
+        ]
+        drafts.sort(key=lambda r: r.created_at or datetime.now(UTC))
+        return drafts
 
 
 class FakeCapsuleStore:
@@ -1344,6 +1375,7 @@ class FakeMediaStore:
         kind: str,
         source: str,
         capture_id: str | None = None,
+        part_ordinal: int | None = None,
         file_path: str | None = None,
         thumb_path: str | None = None,
         mime_type: str | None = None,
@@ -1359,6 +1391,7 @@ class FakeMediaStore:
             source=source,
             status=status,
             capture_id=capture_id,
+            part_ordinal=part_ordinal,
             file_path=file_path,
             thumb_path=thumb_path,
             mime_type=mime_type,
@@ -1372,6 +1405,9 @@ class FakeMediaStore:
     async def get(self, media_id: str) -> MediaRecord | None:
         return self.rows.get(media_id)
 
+    async def delete(self, media_id: str) -> None:
+        self.rows.pop(media_id, None)
+
     async def get_by_capture_id(self, capture_id: str) -> MediaRecord | None:
         matches = sorted(
             (r for r in self.rows.values() if r.capture_id == capture_id),
@@ -1380,9 +1416,13 @@ class FakeMediaStore:
         return matches[0] if matches else None
 
     async def list_by_capture_id(self, capture_id: str) -> list[MediaRecord]:
+        # Mirror PgMediaStore: part_ordinal first (NULLS LAST), then created_at (M9.6 T1).
         return sorted(
             (r for r in self.rows.values() if r.capture_id == capture_id),
-            key=lambda r: r.created_at or datetime.now(UTC),
+            key=lambda r: (
+                r.part_ordinal if r.part_ordinal is not None else float("inf"),
+                r.created_at or datetime.now(UTC),
+            ),
         )
 
     async def get_many(self, media_ids: list[str]) -> list[MediaRecord]:

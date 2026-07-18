@@ -24,7 +24,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -70,8 +70,10 @@ from .agent_runs import (
 )
 from .capture_store import (
     DERIVING,
+    DRAFT,
     FAILED,
     INDEXED,
+    KIND_COMPOSITE,
     KIND_IMAGE,
     KIND_TEXT,
     KIND_VOICE,
@@ -105,6 +107,10 @@ SOURCE_MCP = "mcp"
 # Node-frontmatter `source` for a capture materialized from an endorsed chat-distiller candidate
 # (ADR-048 §1). The capture's `source_ref` carries the originating chat-session id.
 SOURCE_CHAT = "chat"
+# Node-frontmatter `source` for a **composite** web capture (M9.6, ADR-061 §2): a composite has no
+# single modality (text + photos + voice), so it is stamped `web` rather than a kind. Set on the
+# capture row at draft-open so `_effective_source` (`source or kind`) returns it.
+SOURCE_WEB = "web"
 # Fixed namespace for the DETERMINISTIC chat-capture id (uuid5 over session-id + the normalized
 # memory statement). A re-distill of the same delta — a prior distiller run that materialized some
 # candidates then failed before advancing its watermark — yields the SAME id, so the conflict-safe
@@ -224,6 +230,21 @@ class UnsupportedImage(CaptureError):
 
 class CaptureNotFound(CaptureError):
     """No capture with the given id."""
+
+
+class DraftNotOpen(CaptureError):
+    """A draft operation targeted a capture that is not an open ``draft`` (409). Covers a
+    submit/part/text/delete on an already-submitted (or unknown-kind) capture — the idempotent
+    guard (ADR-061 §3 rule 6)."""
+
+
+class VoicePartLimit(CaptureError):
+    """A second voice part was attached to a composite draft — only one is allowed (ADR-061 §3)."""
+
+
+class EmptyDraft(CaptureError):
+    """Submit was requested on a draft with no non-empty part (no text body, no media) — Send needs
+    >=1 part (ADR-061 §3)."""
 
 
 class FollowUpNotPending(CaptureError):
@@ -448,6 +469,189 @@ class CapturePipeline:
         self._spawn(self._process(capture_id))
         return capture_id
 
+    # --- composite draft lifecycle (M9.6 T1, ADR-061 §3) ------------------------------------
+
+    async def open_or_resume_draft(self) -> CaptureRecord:
+        """Open a composite draft, or resume the one already open (ADR-061 §3 — one active draft).
+
+        ``POST /capture/draft``. Idempotent: if a ``draft`` capture already exists it is returned
+        (the compose screen resumes it, parts and text body intact); otherwise a fresh
+        ``kind=composite``, ``status=draft`` capture is minted, its node ``source`` pinned to
+        ``web`` (a composite has no single modality — ADR-061 §2). The partial unique index
+        (``captures_single_active_draft``) is the DB backstop for the invariant. No ``_process``
+        runs until :meth:`submit_draft`."""
+        existing = await self._store.get_active_draft()
+        if existing is not None:
+            return existing
+        capture_id = str(uuid.uuid4())
+        return await self._store.create(
+            capture_id=capture_id,
+            kind=KIND_COMPOSITE,
+            status=DRAFT,
+            source=SOURCE_WEB,
+        )
+
+    async def add_draft_part(
+        self, capture_id: str, data: bytes, *, filename: str, kind: str
+    ) -> MediaRecord:
+        """Attach one media part (photo or voice) to an open composite draft (ADR-061 §3).
+
+        ``POST /capture/{id}/part`` — one part per call. Never-lose ordering: raw file to disk
+        first, then the ``media`` row (its ``capture_id`` fk needs the capture). The part is minted
+        ``pending`` — **derivation is deferred to Submit** (ADR-061 §4), so nothing is wasted on a
+        part the user removes. Each part carries a stable 0-based ``part_ordinal`` (max existing +1)
+        so a later delete + re-add never reuses a position. Enforces **<=1 voice** per draft
+        server-side. Raises ``DraftNotOpen`` (not a draft), ``VoicePartLimit`` (2nd voice),
+        ``UnsupportedImage``/``UnsupportedAudio`` (bad type/size)."""
+        if self._media_store is None or self._media_files is None:
+            raise CaptureError("composite capture requires the media substrate to be wired")
+        record = await self._store.get(capture_id)
+        if record is None:
+            raise CaptureNotFound(capture_id)
+        if record.status != DRAFT or record.kind != KIND_COMPOSITE:
+            raise DraftNotOpen(capture_id)
+
+        media_kind, mime, ext = self._validate_part(data, filename=filename, kind=kind)
+        parts = await self._media_store.list_by_capture_id(capture_id)
+        if media_kind == MEDIA_KIND_VOICE and any(p.kind == MEDIA_KIND_VOICE for p in parts):
+            raise VoicePartLimit(capture_id)
+        ordinal = max((p.part_ordinal for p in parts if p.part_ordinal is not None), default=-1) + 1
+
+        rel_path = self._media_files.relative_path(SOURCE_CAPTURE, f"{uuid.uuid4()}.{ext}")
+        await self._media_files.write_async(rel_path, data)
+        return await self._media_store.create(
+            kind=media_kind,
+            source=SOURCE_CAPTURE,
+            capture_id=capture_id,
+            part_ordinal=ordinal,
+            file_path=rel_path,
+            mime_type=mime,
+        )
+
+    async def draft_parts(self, capture_id: str) -> list[MediaRecord]:
+        """The draft's media parts in ordinal order (M9.6 T1) — for the compose ``DraftView``.
+        Empty when the media substrate is unwired."""
+        if self._media_store is None:
+            return []
+        return await self._media_store.list_by_capture_id(capture_id)
+
+    async def remove_draft_part(self, capture_id: str, media_id: str) -> None:
+        """Remove a draft part — the 'x' (ADR-061 §3). ``DELETE /capture/{id}/part/{mediaId}``.
+        Hard-removes the raw file + ``media`` row (a user-initiated pre-commit edit, not a pipeline
+        drop, so rule 2 is not violated). Idempotent: an unknown/foreign media id is a no-op 404.
+        Ordinals are NOT renumbered — assembly tolerates gaps (ADR-061 §6)."""
+        if self._media_store is None or self._media_files is None:
+            raise CaptureError("composite capture requires the media substrate to be wired")
+        record = await self._store.get(capture_id)
+        if record is None:
+            raise CaptureNotFound(capture_id)
+        if record.status != DRAFT or record.kind != KIND_COMPOSITE:
+            raise DraftNotOpen(capture_id)
+        media = await self._media_store.get(media_id)
+        if media is None or media.capture_id != capture_id:
+            raise CaptureNotFound(media_id)
+        if media.file_path:
+            await self._media_files.delete_async(media.file_path)
+        await self._media_store.delete(media_id)
+
+    async def set_draft_text(self, capture_id: str, text: str) -> None:
+        """Edit the draft's typed text body (ADR-061 §3 — one field, not N interleaved text parts).
+        ``PUT /capture/{id}/text``. Raises ``DraftNotOpen`` on a non-draft capture."""
+        record = await self._store.get(capture_id)
+        if record is None:
+            raise CaptureNotFound(capture_id)
+        if record.status != DRAFT or record.kind != KIND_COMPOSITE:
+            raise DraftNotOpen(capture_id)
+        await self._store.set_text_body(capture_id, text)
+
+    async def submit_draft(self, capture_id: str) -> None:
+        """Submit a composite draft → spawn the blended ``_process`` (ADR-061 §3). ``POST
+        /capture/{id}/submit``. Requires **>=1 non-empty part** (a non-empty text body OR >=1 media)
+        — ``EmptyDraft`` otherwise. Idempotent (rule 6): submit on a non-draft raises
+        ``DraftNotOpen`` (the router maps it to a 409/no-op). Flips ``draft`` → ``received`` and
+        spawns the background derive → assemble → organize; 202 semantics."""
+        record = await self._store.get(capture_id)
+        if record is None:
+            raise CaptureNotFound(capture_id)
+        if record.status != DRAFT or record.kind != KIND_COMPOSITE:
+            raise DraftNotOpen(capture_id)
+        has_text = bool((record.text_body or "").strip())
+        parts = (
+            await self._media_store.list_by_capture_id(capture_id)
+            if self._media_store is not None
+            else []
+        )
+        if not has_text and not parts:
+            raise EmptyDraft(capture_id)
+        await self._store.mark_status(capture_id, RECEIVED)
+        self._spawn(self._process(capture_id))
+
+    async def discard_draft(self, capture_id: str) -> None:
+        """Discard an open draft (ADR-061 §3 — the Discard action). Removes every part's raw file
+        then deletes the capture row (its ``media`` rows cascade). Idempotent; ``DraftNotOpen`` if
+        the capture is not an open draft (never deletes a submitted capture)."""
+        record = await self._store.get(capture_id)
+        if record is None:
+            raise CaptureNotFound(capture_id)
+        if record.status != DRAFT or record.kind != KIND_COMPOSITE:
+            raise DraftNotOpen(capture_id)
+        await self._delete_capture_with_media(capture_id)
+
+    async def gc_stale_drafts(self) -> int:
+        """Delete unsubmitted drafts older than ``draft_gc_max_age_days`` (ADR-061 §9). Called at
+        boot (and safe to call periodically): raw files + rows, never a submitted capture. Returns
+        the count reclaimed. Best-effort per draft (rule 7) — one bad delete never aborts the sweep.
+        No-op when the media substrate is unwired."""
+        if self._media_store is None or self._media_files is None:
+            return 0
+        cutoff = datetime.now(self._tz) - timedelta(days=self._settings.draft_gc_max_age_days)
+        stale = await self._store.list_drafts_created_before(cutoff)
+        count = 0
+        for draft in stale:
+            try:
+                await self._delete_capture_with_media(draft.id)
+                count += 1
+            except Exception:  # noqa: BLE001 — one bad delete must not abort the GC sweep
+                logger.exception("draft GC: could not delete stale draft %s (skipped)", draft.id)
+        if count:
+            logger.info("draft GC: reclaimed %d stale draft(s) older than %s", count, cutoff)
+        return count
+
+    async def _delete_capture_with_media(self, capture_id: str) -> None:
+        """Remove a capture's media raw files, then the capture row (media rows cascade). Shared by
+        discard + draft GC. The files are removed first so a mid-delete crash can only orphan the
+        (cascaded-away) rows' files, which the next GC/backfill never re-references."""
+        if self._media_store is not None and self._media_files is not None:
+            for media in await self._media_store.list_by_capture_id(capture_id):
+                if media.file_path:
+                    await self._media_files.delete_async(media.file_path)
+        await self._store.delete(capture_id)
+
+    def _validate_part(
+        self, data: bytes, *, filename: str, kind: str
+    ) -> tuple[str, str | None, str]:
+        """Validate a draft part upload and resolve ``(media_kind, mime, ext)``. ``kind`` is the
+        client-declared part kind (``photo``/``voice``); the extension is validated against it and
+        the mime derived from the extension (never the client content-type — mirrors
+        ``create_image_capture``). Raises ``UnsupportedImage``/``UnsupportedAudio`` on a bad
+        size/type, ``CaptureError`` on an unknown kind."""
+        ext = _file_ext(filename)
+        if kind == KIND_PHOTO:
+            if len(data) > self._settings.image_max_bytes:
+                raise UnsupportedImage(f"image exceeds {self._settings.image_max_bytes} bytes")
+            if ext not in ALLOWED_IMAGE_EXTS:
+                raise UnsupportedImage(f"unsupported image type: .{ext}")
+            return KIND_PHOTO, _IMAGE_MIME[ext], ext
+        if kind == MEDIA_KIND_VOICE:
+            if len(data) > self._settings.audio_max_bytes:
+                raise UnsupportedAudio(
+                    f"audio exceeds {self._settings.audio_max_bytes} bytes (Whisper limit)"
+                )
+            if ext not in ALLOWED_AUDIO_EXTS:
+                raise UnsupportedAudio(f"unsupported audio type: .{ext}")
+            return MEDIA_KIND_VOICE, _AUDIO_MIME.get(ext), ext
+        raise CaptureError(f"unknown part kind: {kind!r}")
+
     async def get(self, capture_id: str) -> CaptureRecord | None:
         """Read a capture's current pipeline state (GET /captures/{id})."""
         return await self._store.get(capture_id)
@@ -655,6 +859,13 @@ class CapturePipeline:
                 # derived text is persisted as the capture's raw text — the organize replay source.
                 transcript = await self._derive_capture_media(capture_id, record, inter)
                 await self._store.set_raw_text(capture_id, transcript)
+            elif record.kind == KIND_COMPOSITE:
+                # Composite (M9.6, ADR-061): derive every part, then assemble the blended organize
+                # input = text body + ordinal-ordered rendered parts, cached as `raw_text` (the
+                # byte-parity replay source). T2 makes derivation concurrent + adds indexed part
+                # markers; T3 adds per-node attribution.
+                transcript = await self._assemble_composite(capture_id, record, inter)
+                await self._store.set_raw_text(capture_id, transcript)
 
             await self._store.mark_status(capture_id, ORGANIZING)
             t1 = time.monotonic()
@@ -694,9 +905,10 @@ class CapturePipeline:
             # Trailing, non-blocking nudge — nodes have already landed. Skipped on the inbox
             # fallback path (there is no understanding to dig into — ADR-019 §1). Sourced from
             # the raw capture (not the nodes) so it matches the person's language. Also skipped for
-            # an image capture (M9 T3): the "raw" here is a derived, fenced photo description, not
-            # the person's own words, so a nudge sourced from it would misfire (ADR-019 §1 intent).
-            if not organize.used_fallback and record.kind != KIND_IMAGE:
+            # an image capture (M9 T3) and a composite (M9.6): the assembled "raw" mixes derived,
+            # fenced photo descriptions with the person's words, so a nudge sourced from it would
+            # misfire (ADR-019 §1 intent).
+            if not organize.used_fallback and record.kind not in (KIND_IMAGE, KIND_COMPOSITE):
                 nudge_model = await self._generate_nudge(capture_id, transcript)
                 inter.nudge = {"model": nudge_model}
 
@@ -1234,6 +1446,50 @@ class CapturePipeline:
         else:
             inter.derive = detail
         return _render_media_text(media)
+
+    async def _assemble_composite(
+        self, capture_id: str, record: CaptureRecord, inter: _Interaction
+    ) -> str:
+        """Derive every part of a composite capture, then assemble the blended organize input
+        (M9.6, ADR-061 §4/§5).
+
+        The parts' raw files + rows were written at attach time (draft lifecycle, T1); here — at
+        Submit — each is driven to a terminal derivation state (``derive_until_settled``: a
+        persistent VLM/STT failure walks retry → ``unavailable`` → placeholder WITHOUT blocking).
+        The organize input is the person's ``text_body`` followed by each part in **ordinal order**,
+        rendered by :func:`_render_media_text` (photo fenced ``<photo: …>`` — shared material; voice
+        plain — the person's words). Returned and cached as ``raw_text`` so ``reprocess-all``
+        replays it byte-for-byte (P10).
+
+        T2 makes the per-part derivation concurrent (bounded) and swaps the plain join for indexed
+        part markers with per-part ``agent_runs`` detail; T3 adds per-node attribution. T1 derives
+        sequentially and joins plainly (all-to-all media linkage via the existing link-write)."""
+        if self._media_store is None or self._media_derivation is None:
+            raise CaptureError("composite capture requires the media substrate to be wired")
+        await self._store.mark_status(capture_id, DERIVING)
+        parts = await self._media_store.list_by_capture_id(capture_id)
+        t0 = time.monotonic()
+        part_details: list[dict[str, Any]] = []
+        rendered: list[str] = []
+        for media in parts:
+            await self._media_derivation.derive_until_settled(media.id)
+            media = await self._media_store.get(media.id) or media
+            rendered.append(_render_media_text(media))
+            part_details.append(
+                {
+                    "media_id": media.id,
+                    "kind": media.kind,
+                    "ordinal": media.part_ordinal,
+                    "status": media.status,
+                    "model": media.model_used,
+                    "attempts": media.attempts,
+                    "error": media.error,
+                }
+            )
+        inter.timings_ms["derive"] = int((time.monotonic() - t0) * 1000)
+        inter.derive = {"parts": part_details}
+        segments = [s for s in ((record.text_body or "").strip(), *rendered) if s]
+        return "\n\n".join(segments)
 
     async def _link_node_media(self, capture_id: str, content_node_ids: list[str]) -> None:
         """Rebuild this capture's derived-tier ``node_media`` links (ADR-060 §1/§3): attach the

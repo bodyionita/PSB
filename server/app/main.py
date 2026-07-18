@@ -487,8 +487,11 @@ async def lifespan(app: FastAPI):
     app.state.reprocess_service = reprocess_service
 
     await warn_if_behind_head(db)
-    # Boot recovery: any capture left in-flight by a restart is marked failed (retryable).
+    # Boot recovery: any capture left in-flight by a restart is marked failed (retryable). Drafts
+    # are skipped by the sweep (intentionally open — ADR-061 §9).
     await pipeline.sweep_orphans()
+    # Reclaim unsubmitted compose drafts older than the GC horizon (raw files + rows — ADR-061 §9).
+    await pipeline.gc_stale_drafts()
 
     # Pipeline scheduler (ADR-047): the in-process APScheduler running the `nightly`/`weekly`
     # pipelines — one cron per pipeline, steps sequential-on-completion (the ADR-010 window is now

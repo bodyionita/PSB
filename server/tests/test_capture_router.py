@@ -18,18 +18,24 @@ from app.dependencies import get_capture_pipeline, require_session
 from app.routers import capture
 from app.services.capture_pipeline import (
     CaptureNotFound,
+    DraftNotOpen,
+    EmptyDraft,
     FollowUpNotPending,
     NotRetryable,
     UnsupportedAudio,
     UnsupportedImage,
+    VoicePartLimit,
 )
 from app.services.capture_store import (
+    DRAFT,
+    KIND_COMPOSITE,
     KIND_TEXT,
     RECEIVED,
     CaptureMediaRef,
     CaptureNodeRef,
     CaptureRecord,
 )
+from app.services.media_store import MediaRecord
 
 PREFIX = "/api/v1"
 
@@ -50,6 +56,17 @@ class FakeCapturePipeline:
         self.image_error: Exception | None = None
         self.retry_error: Exception | None = None
         self.follow_up_error: Exception | None = None
+        # composite draft lifecycle (M9.6 T1)
+        self.draft_part_rows: list[MediaRecord] = []
+        self.part_calls: list[tuple[str, str, str]] = []
+        self.removed_parts: list[tuple[str, str]] = []
+        self.draft_texts: list[tuple[str, str]] = []
+        self.submitted: list[str] = []
+        self.discarded: list[str] = []
+        self.part_error: Exception | None = None
+        self.draft_text_error: Exception | None = None
+        self.submit_error: Exception | None = None
+        self.discard_error: Exception | None = None
 
     async def create_text_capture(self, text: str, *, created_at: datetime | None = None) -> str:
         self.text_calls.append((text, created_at))
@@ -87,6 +104,46 @@ class FakeCapturePipeline:
         if self.anchor_error is not None:
             raise self.anchor_error
         self.anchor_edits.append((capture_id, new_anchor))
+
+    # --- composite draft lifecycle (M9.6 T1) ---
+    async def open_or_resume_draft(self) -> CaptureRecord:
+        rec = CaptureRecord(id="cid-draft", kind=KIND_COMPOSITE, status=DRAFT, source="web")
+        self.records[rec.id] = rec
+        return rec
+
+    async def draft_parts(self, capture_id: str) -> list[MediaRecord]:
+        return list(self.draft_part_rows)
+
+    async def add_draft_part(
+        self, capture_id: str, data: bytes, *, filename: str, kind: str
+    ) -> MediaRecord:
+        if self.part_error is not None:
+            raise self.part_error
+        media = MediaRecord(
+            id="media-1", kind=kind, source="capture", status="pending", part_ordinal=0
+        )
+        self.part_calls.append((capture_id, filename, kind))
+        return media
+
+    async def remove_draft_part(self, capture_id: str, media_id: str) -> None:
+        if self.part_error is not None:
+            raise self.part_error
+        self.removed_parts.append((capture_id, media_id))
+
+    async def set_draft_text(self, capture_id: str, text: str) -> None:
+        if self.draft_text_error is not None:
+            raise self.draft_text_error
+        self.draft_texts.append((capture_id, text))
+
+    async def submit_draft(self, capture_id: str) -> None:
+        if self.submit_error is not None:
+            raise self.submit_error
+        self.submitted.append(capture_id)
+
+    async def discard_draft(self, capture_id: str) -> None:
+        if self.discard_error is not None:
+            raise self.discard_error
+        self.discarded.append(capture_id)
 
 
 def _record(capture_id: str, **over) -> CaptureRecord:
@@ -338,3 +395,100 @@ def test_capture_endpoints_require_session():
     client = TestClient(app)
     assert client.get(f"{PREFIX}/captures").status_code == 401
     assert client.post(f"{PREFIX}/capture/text", json={"text": "hi"}).status_code == 401
+
+
+# --- Composite draft lifecycle (M9.6 T1, ADR-061 §3) ---
+def test_open_draft_returns_draft_view(client_and_pipeline):
+    client, _ = client_and_pipeline
+    resp = client.post(f"{PREFIX}/capture/draft")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["capture_id"] == "cid-draft"
+    assert body["status"] == "draft"
+    assert body["parts"] == []
+
+
+def test_add_part_returns_part_view(client_and_pipeline):
+    client, fake = client_and_pipeline
+    resp = client.post(
+        f"{PREFIX}/capture/cid-draft/part",
+        data={"kind": "photo"},
+        files={"file": ("p.png", b"img", "image/png")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "photo"
+    assert fake.part_calls == [("cid-draft", "p.png", "photo")]
+
+
+def test_add_part_voice_limit_maps_to_409(client_and_pipeline):
+    client, fake = client_and_pipeline
+    fake.part_error = VoicePartLimit("cid-draft")
+    resp = client.post(
+        f"{PREFIX}/capture/cid-draft/part",
+        data={"kind": "voice"},
+        files={"file": ("v.m4a", b"a", "audio/m4a")},
+    )
+    assert resp.status_code == 409
+
+
+def test_add_part_bad_type_maps_to_400(client_and_pipeline):
+    client, fake = client_and_pipeline
+    fake.part_error = UnsupportedImage("nope")
+    resp = client.post(
+        f"{PREFIX}/capture/cid-draft/part",
+        data={"kind": "photo"},
+        files={"file": ("p.gif", b"a", "image/gif")},
+    )
+    assert resp.status_code == 400
+
+
+def test_remove_part_returns_204(client_and_pipeline):
+    client, fake = client_and_pipeline
+    resp = client.delete(f"{PREFIX}/capture/cid-draft/part/media-1")
+    assert resp.status_code == 204
+    assert fake.removed_parts == [("cid-draft", "media-1")]
+
+
+def test_remove_part_not_draft_maps_to_409(client_and_pipeline):
+    client, fake = client_and_pipeline
+    fake.part_error = DraftNotOpen("cid-draft")
+    resp = client.delete(f"{PREFIX}/capture/cid-draft/part/media-1")
+    assert resp.status_code == 409
+
+
+def test_edit_text_returns_draft_view(client_and_pipeline):
+    client, fake = client_and_pipeline
+    fake.records["cid-draft"] = CaptureRecord(
+        id="cid-draft", kind=KIND_COMPOSITE, status=DRAFT, text_body="hi", source="web"
+    )
+    resp = client.put(f"{PREFIX}/capture/cid-draft/text", json={"text": "hi"})
+    assert resp.status_code == 200
+    assert fake.draft_texts == [("cid-draft", "hi")]
+
+
+def test_submit_returns_202(client_and_pipeline):
+    client, fake = client_and_pipeline
+    resp = client.post(f"{PREFIX}/capture/cid-draft/submit")
+    assert resp.status_code == 202
+    assert fake.submitted == ["cid-draft"]
+
+
+def test_submit_empty_maps_to_400(client_and_pipeline):
+    client, fake = client_and_pipeline
+    fake.submit_error = EmptyDraft("cid-draft")
+    resp = client.post(f"{PREFIX}/capture/cid-draft/submit")
+    assert resp.status_code == 400
+
+
+def test_submit_non_draft_maps_to_409(client_and_pipeline):
+    client, fake = client_and_pipeline
+    fake.submit_error = DraftNotOpen("cid-draft")
+    resp = client.post(f"{PREFIX}/capture/cid-draft/submit")
+    assert resp.status_code == 409
+
+
+def test_discard_returns_204(client_and_pipeline):
+    client, fake = client_and_pipeline
+    resp = client.delete(f"{PREFIX}/capture/cid-draft/draft")
+    assert resp.status_code == 204
+    assert fake.discarded == ["cid-draft"]

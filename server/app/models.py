@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from .services.agent_runs import RunChild
 from .services.capture_store import CaptureMediaRef, CaptureNodeRef, CaptureRecord
+from .services.media_store import MediaRecord
 
 
 # --- Auth ---
@@ -54,6 +55,59 @@ class CaptureAcceptedResponse(BaseModel):
 
     capture_id: str
     status: str = "received"
+
+
+class DraftTextRequest(BaseModel):
+    """Body for ``PUT /capture/{id}/text`` — edit a composite draft's typed text body (M9.6 T1,
+    ADR-061 §3). Empty string is allowed (clears the body); the ``>=1 part`` Send gate lives on
+    submit, not here."""
+
+    text: str
+
+
+class DraftPartView(BaseModel):
+    """One media part on a composite draft (M9.6 T1, ADR-061 §3). ``kind`` is ``photo``/``voice``;
+    ``status`` is the derivation lifecycle (``pending`` until Submit derives it); ``part_ordinal``
+    is the stable 0-based position; the web renders the thumbnail/player via ``GET /media/{id}``."""
+
+    id: str
+    kind: str
+    status: str
+    part_ordinal: int | None = None
+    mime_type: str | None = None
+
+    @classmethod
+    def from_record(cls, media: MediaRecord) -> DraftPartView:
+        return cls(
+            id=media.id,
+            kind=media.kind,
+            status=media.status,
+            part_ordinal=media.part_ordinal,
+            mime_type=media.mime_type,
+        )
+
+
+class DraftView(BaseModel):
+    """A composite draft for the compose surface (M9.6 T1, ADR-061 §3): the resume payload —
+    ``text_body`` + the ordinal-ordered media parts — so the client rebuilds the compose screen
+    after app-close. Distinct from ``CaptureView`` (the committed-capture read; T4 generalizes its
+    ``media`` to a list)."""
+
+    capture_id: str
+    status: str
+    text_body: str | None = None
+    parts: list[DraftPartView] = Field(default_factory=list)
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_record(cls, record: CaptureRecord, parts: list[MediaRecord]) -> DraftView:
+        return cls(
+            capture_id=record.id,
+            status=record.status,
+            text_body=record.text_body,
+            parts=[DraftPartView.from_record(p) for p in parts],
+            created_at=record.created_at,
+        )
 
 
 class CaptureNodeRefModel(BaseModel):

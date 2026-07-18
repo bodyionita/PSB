@@ -16,6 +16,10 @@ from typing import Protocol
 from ..db import Database
 
 # --- Capture lifecycle statuses (02-data-model §3). ---
+# Pre-submit composite draft (M9.6 T1, ADR-061 §3): parts are attached incrementally and the draft
+# is resumable across app-close. A draft is NOT in-flight — the boot orphan-sweep skips it, and a
+# separate 7-day GC reclaims abandoned ones.
+DRAFT = "draft"
 RECEIVED = "received"
 TRANSCRIBING = "transcribing"
 # Image captures derive their text (photo → vision description, M9 T3 / ADR-057 §3) between
@@ -29,12 +33,20 @@ FAILED = "failed"
 # Terminal states: work is done (indexed) or explicitly stopped (failed). Everything else is
 # in-flight and, if found so at boot, was interrupted by a restart.
 TERMINAL_STATUSES = frozenset({INDEXED, FAILED})
+# Statuses the boot orphan-sweep must NOT flip to `failed` (ADR-061 §9): the terminal states plus
+# `draft` (a draft is intentionally open, not a crashed in-flight run — it is reclaimed by the 7-day
+# draft GC, never swept).
+NON_SWEEPABLE_STATUSES = TERMINAL_STATUSES | {DRAFT}
 
 KIND_TEXT = "text"
 KIND_VOICE = "voice"
 # Ad-hoc PWA photo capture (M9 T3, ADR-057 §6): raw image kept under the media substrate, its
 # vision description derived, then organized (fenced) exactly like a voice transcript.
 KIND_IMAGE = "image"
+# Composite multi-part capture (M9.6, ADR-061 §2): an optional typed text body + 0..N photos +
+# <=1 voice, composed on a draft and organized in one blended pass. The single-modality kinds are
+# the degenerate cases; a composite's node `source` is `web` (it has no single modality).
+KIND_COMPOSITE = "composite"
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,10 @@ class CaptureRecord:
     kind: str
     status: str
     raw_text: str | None = None
+    # The person's typed words on a composite capture (M9.6 T1, ADR-061 §5) — never-lose + the
+    # reassembly source. `raw_text` stays the cached assembled organize/replay source; `text_body`
+    # is one editable field on the draft, NULL for single-modality captures.
+    text_body: str | None = None
     audio_path: str | None = None
     node_paths: list[str] = field(default_factory=list)
     # Id-resolved projection of `node_paths` (M8.1 T4, ADR-054 §5 replan) — see `CaptureNodeRef`.
@@ -113,11 +129,17 @@ class CaptureStore(Protocol):
         kind: str,
         status: str,
         raw_text: str | None = None,
+        text_body: str | None = None,
         audio_path: str | None = None,
         created_at: datetime | None = None,
         source: str | None = None,
         source_ref: str | None = None,
     ) -> CaptureRecord: ...
+
+    async def get_active_draft(self) -> CaptureRecord | None:
+        """The single open composite draft, if any (M9.6 T1, ADR-061 §3 — one active draft). The
+        partial unique index guarantees at most one; opening the compose screen resumes it."""
+        ...
 
     async def get(self, capture_id: str) -> CaptureRecord | None:
         """A single capture, its ``node_refs`` (M8.1 T4) resolved via the ``node_paths -> nodes.id``
@@ -142,6 +164,10 @@ class CaptureStore(Protocol):
 
     async def set_raw_text(self, capture_id: str, raw_text: str) -> None: ...
 
+    async def set_text_body(self, capture_id: str, text_body: str) -> None:
+        """Edit a composite draft's typed text body (M9.6 T1, ADR-061 §3/§5)."""
+        ...
+
     async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None: ...
 
     async def set_follow_up_question(self, capture_id: str, question: str) -> None: ...
@@ -159,12 +185,23 @@ class CaptureStore(Protocol):
         ...
 
     async def sweep_orphans(self, error: str) -> int:
-        """Mark every non-terminal capture as failed (boot recovery). Returns the count."""
+        """Mark every non-terminal, non-draft capture as failed (boot recovery). A ``draft`` is
+        intentionally open, not a crashed run, so the sweep skips it (ADR-061 §9). Returns the
+        count."""
+        ...
+
+    async def delete(self, capture_id: str) -> None:
+        """Hard-delete a capture row (M9.6 T1, ADR-061 §3/§9 — discard / draft GC). Its ``media``
+        rows cascade (fk ``ON DELETE CASCADE``); the caller removes the raw files first."""
+        ...
+
+    async def list_drafts_created_before(self, cutoff: datetime) -> list[CaptureRecord]:
+        """Open drafts created before ``cutoff`` — the 7-day draft GC scan (ADR-061 §9)."""
         ...
 
 
 _COLUMNS = (
-    "id, kind, status, raw_text, audio_path, node_paths, "
+    "id, kind, status, raw_text, text_body, audio_path, node_paths, "
     "follow_up_question, follow_up_answer, error, created_at, updated_at, source, source_ref, "
     "removed_at"
 )
@@ -241,6 +278,7 @@ def _record(
         kind=row["kind"],
         status=row["status"],
         raw_text=row["raw_text"],
+        text_body=row["text_body"],
         audio_path=row["audio_path"],
         node_paths=list(row["node_paths"] or []),
         node_refs=node_refs or [],
@@ -269,6 +307,7 @@ class PgCaptureStore:
         kind: str,
         status: str,
         raw_text: str | None = None,
+        text_body: str | None = None,
         audio_path: str | None = None,
         created_at: datetime | None = None,
         source: str | None = None,
@@ -278,20 +317,31 @@ class PgCaptureStore:
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO captures
-                    (id, kind, status, raw_text, audio_path, created_at, source, source_ref)
-                VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7, $8)
+                    (id, kind, status, raw_text, text_body, audio_path, created_at, source,
+                     source_ref)
+                VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()), $8, $9)
                 RETURNING {_COLUMNS}
                 """,
                 capture_id,
                 kind,
                 status,
                 raw_text,
+                text_body,
                 audio_path,
                 created_at,
                 source,
                 source_ref,
             )
         return _record(row)
+
+    async def get_active_draft(self) -> CaptureRecord | None:
+        async with self._db.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT {_COLUMNS} FROM captures WHERE status = $1 "
+                f"ORDER BY created_at DESC LIMIT 1",
+                DRAFT,
+            )
+        return _record(row) if row is not None else None
 
     async def get(self, capture_id: str) -> CaptureRecord | None:
         async with self._db.acquire() as conn:
@@ -367,6 +417,9 @@ class PgCaptureStore:
     async def set_raw_text(self, capture_id: str, raw_text: str) -> None:
         await self._set(capture_id, "raw_text = $2", raw_text)
 
+    async def set_text_body(self, capture_id: str, text_body: str) -> None:
+        await self._set(capture_id, "text_body = $2", text_body)
+
     async def set_node_paths(self, capture_id: str, node_paths: list[str]) -> None:
         await self._set(capture_id, "node_paths = $2", node_paths)
 
@@ -392,10 +445,26 @@ class PgCaptureStore:
                 """,
                 FAILED,
                 error,
-                list(TERMINAL_STATUSES),
+                # Excludes the terminal states AND `draft` (ADR-061 §9): a draft is intentionally
+                # open, not a crashed in-flight run — it is reclaimed by the 7-day GC, never swept.
+                list(NON_SWEEPABLE_STATUSES),
             )
         # asyncpg returns e.g. "UPDATE 3"
         try:
             return int(result.split()[-1])
         except (ValueError, IndexError):
             return 0
+
+    async def delete(self, capture_id: str) -> None:
+        async with self._db.acquire() as conn:
+            await conn.execute("DELETE FROM captures WHERE id = $1", capture_id)
+
+    async def list_drafts_created_before(self, cutoff: datetime) -> list[CaptureRecord]:
+        async with self._db.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT {_COLUMNS} FROM captures "
+                f"WHERE status = $1 AND created_at < $2 ORDER BY created_at ASC",
+                DRAFT,
+                cutoff,
+            )
+        return [_record(r) for r in rows]

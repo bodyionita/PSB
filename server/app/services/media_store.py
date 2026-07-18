@@ -53,6 +53,11 @@ class MediaRecord:
     source: str
     status: str
     capture_id: str | None = None
+    # The item's position within its capture (M9.6 T1, ADR-061 §6): a stable 0-based ordinal so
+    # composite assembly is deterministic across reprocess and the §7 attribution indices map to the
+    # right row even after a draft-time delete + re-add. NULL for non-part media (connector media)
+    # and legacy single-part capture media (which order by `created_at`).
+    part_ordinal: int | None = None
     file_path: str | None = None
     thumb_path: str | None = None
     mime_type: str | None = None
@@ -73,6 +78,7 @@ class MediaStore(Protocol):
         kind: str,
         source: str,
         capture_id: str | None = None,
+        part_ordinal: int | None = None,
         file_path: str | None = None,
         thumb_path: str | None = None,
         mime_type: str | None = None,
@@ -82,6 +88,11 @@ class MediaStore(Protocol):
     ) -> MediaRecord: ...
 
     async def get(self, media_id: str) -> MediaRecord | None: ...
+
+    async def delete(self, media_id: str) -> None:
+        """Hard-delete a media row (M9.6 T1, ADR-061 §3): removing a draft part (the 'x'). A
+        user-initiated pre-commit edit — the caller removes the raw file first."""
+        ...
 
     async def get_by_capture_id(self, capture_id: str) -> MediaRecord | None:
         """The media item backing an ad-hoc image capture (M9 T3): its ``media.capture_id`` fk row,
@@ -125,7 +136,7 @@ class MediaStore(Protocol):
 
 
 _COLUMNS = (
-    "id, kind, source, capture_id, file_path, thumb_path, mime_type, status, "
+    "id, kind, source, capture_id, part_ordinal, file_path, thumb_path, mime_type, status, "
     "derived_text, model_used, attempts, error, created_at, updated_at"
 )
 
@@ -137,6 +148,7 @@ def _record(row) -> MediaRecord:
         source=row["source"],
         status=row["status"],
         capture_id=str(row["capture_id"]) if row["capture_id"] is not None else None,
+        part_ordinal=row["part_ordinal"],
         file_path=row["file_path"],
         thumb_path=row["thumb_path"],
         mime_type=row["mime_type"],
@@ -161,6 +173,7 @@ class PgMediaStore:
         kind: str,
         source: str,
         capture_id: str | None = None,
+        part_ordinal: int | None = None,
         file_path: str | None = None,
         thumb_path: str | None = None,
         mime_type: str | None = None,
@@ -172,14 +185,15 @@ class PgMediaStore:
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO media
-                    (kind, source, capture_id, file_path, thumb_path, mime_type,
+                    (kind, source, capture_id, part_ordinal, file_path, thumb_path, mime_type,
                      status, derived_text, model_used)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING {_COLUMNS}
                 """,
                 kind,
                 source,
                 capture_id,
+                part_ordinal,
                 file_path,
                 thumb_path,
                 mime_type,
@@ -193,6 +207,10 @@ class PgMediaStore:
         async with self._db.acquire() as conn:
             row = await conn.fetchrow(f"SELECT {_COLUMNS} FROM media WHERE id = $1", media_id)
         return _record(row) if row is not None else None
+
+    async def delete(self, media_id: str) -> None:
+        async with self._db.acquire() as conn:
+            await conn.execute("DELETE FROM media WHERE id = $1", media_id)
 
     async def get_by_capture_id(self, capture_id: str) -> MediaRecord | None:
         async with self._db.acquire() as conn:
@@ -213,7 +231,7 @@ class PgMediaStore:
                 f"""
                 SELECT {_COLUMNS} FROM media
                  WHERE capture_id = $1
-                 ORDER BY created_at ASC, id
+                 ORDER BY part_ordinal ASC NULLS LAST, created_at ASC, id
                 """,
                 capture_id,
             )
@@ -325,6 +343,14 @@ class MediaFiles:
 
     async def write_async(self, relative_path: str, data: bytes) -> None:
         await asyncio.to_thread(self.write, relative_path, data)
+
+    def delete(self, relative_path: str) -> None:
+        """Remove a raw media file (M9.6 T1, ADR-061 §3/§9 — draft part removal / discard / GC).
+        Missing-ok: a re-run or a partial write leaving no file must not raise."""
+        self.absolute(relative_path).unlink(missing_ok=True)
+
+    async def delete_async(self, relative_path: str) -> None:
+        await asyncio.to_thread(self.delete, relative_path)
 
 
 def build_media_files(settings: Settings) -> MediaFiles:
