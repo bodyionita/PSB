@@ -184,6 +184,11 @@ class Settings(BaseSettings):
     # periodic draft GC — a draft is intentionally open (never orphan-swept), but an abandoned one
     # must not linger forever. The orphan-sweep never touches a draft (§9).
     draft_gc_max_age_days: int = 7
+    # At Submit a composite's parts derive **concurrently under this bound** (ADR-061 §4):
+    # multi-photo is the headline case, but an unbounded fan-out would stampede the VLM/STT
+    # providers, so the Nth+1 part waits for a slot. Submit is 202 + background, so this bounds
+    # provider load, not user wait.
+    composite_derive_max_concurrency: int = 4
     # Bounds on a single organize result, enforced by validate_organizer_output.
     organizer_max_nodes: int = 8
     organizer_max_tags: int = 12

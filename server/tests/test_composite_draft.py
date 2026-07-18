@@ -8,6 +8,7 @@ Reuses ``_make_pipeline`` from the pipeline suite for identical wiring.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,8 +20,10 @@ from app.services.capture_pipeline import (
     VoicePartLimit,
 )
 from app.services.capture_store import DRAFT, INDEXED, KIND_COMPOSITE, RECEIVED
-from app.services.media_store import KIND_PHOTO, KIND_VOICE
+from app.services.media_derivation import placeholder
+from app.services.media_store import DERIVED, KIND_PHOTO, KIND_VOICE, UNAVAILABLE
 
+from .fakes import FakeChatProvider, FakeSTTProvider
 from .test_capture_pipeline import _make_pipeline
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
@@ -126,9 +129,10 @@ async def test_submit_with_photo_assembles_and_links_media(tmp_path: Path):
 
     rec = store.records[draft.id]
     assert rec.status == INDEXED
-    # Assembled raw_text is the caption + the fenced photo description (ADR-061 §5).
+    # Assembled raw_text is the caption + the indexed part marker + bare description (ADR-061 §7).
     assert "here is my caption" in rec.raw_text
-    assert "<photo:" in rec.raw_text
+    assert "[[part 1 · photo]]" in rec.raw_text
+    assert "<photo:" not in rec.raw_text  # the marker supersedes the fence format (T2)
     # The photo is linked to the content node(s) via node_media (T1 all-to-all; T3 attributes).
     assert any(m == part.id for (_n, m) in node_media.links)
 
@@ -214,3 +218,73 @@ async def test_gc_reclaims_stale_drafts_only(tmp_path: Path):
     assert not pipeline._media_files.absolute(old_part.file_path).exists()
     assert "fresh" in store.records  # within horizon
     assert "done" in store.records  # submitted — GC never touches it
+
+
+# --- T2: blended assembly + concurrent derivation + composite rederive (ADR-061 §4/§5/§7/§9) ---
+def _echo_responder(messages):
+    """Organizer echoes the assembled capture into the node body (marker format assertable)."""
+    system = messages[0].content
+    if "organize a person's raw capture" in system:
+        captured = messages[1].content
+        return json.dumps(
+            {
+                "nodes": [
+                    {
+                        "title": "Composite",
+                        "type": "memory",
+                        "plane": "Ideas",
+                        "planes": ["Ideas"],
+                        "tags": ["x"],
+                        "body": captured,
+                        "entities": [],
+                    }
+                ]
+            }
+        )
+    return "and then?"
+
+
+async def test_assembly_marker_format_and_order(tmp_path: Path):
+    chat = FakeChatProvider("fake-chat", responder=_echo_responder)
+    stt = FakeSTTProvider(transcript="my spoken note")
+    pipeline, store, _b, _r, _root = _make_pipeline(tmp_path, chat=chat, stt=stt)
+    draft = await pipeline.open_or_resume_draft()
+    await pipeline.set_draft_text(draft.id, "the caption")
+    await pipeline.add_draft_part(draft.id, PNG, filename="a.png", kind=KIND_PHOTO)
+    await pipeline.add_draft_part(draft.id, M4A, filename="v.m4a", kind=KIND_VOICE)
+    await pipeline.submit_draft(draft.id)
+    await pipeline.drain()
+
+    raw = store.records[draft.id].raw_text
+    # text body first, then ordinal-ordered indexed markers (ADR-061 §7).
+    assert raw.startswith("the caption")
+    assert "[[part 1 · photo]]" in raw
+    assert "[[part 2 · voice]] my spoken note" in raw
+    assert raw.index("[[part 1") < raw.index("[[part 2")
+    assert "<photo:" not in raw  # fence format superseded by the marker
+
+
+async def test_composite_rederive_recovers_after_stt_failure(tmp_path: Path):
+    # A voice part whose STT is down files a placeholder; once STT recovers, composite
+    # rederive_capture re-derives only the non-derived part, reassembles, and rebuilds the node.
+    chat = FakeChatProvider("fake-chat", responder=_echo_responder)
+    stt = FakeSTTProvider(transcript="the recovered words", available=False)
+    pipeline, store, _b, _r, root = _make_pipeline(tmp_path, chat=chat, stt=stt)
+    draft = await pipeline.open_or_resume_draft()
+    await pipeline.add_draft_part(draft.id, PNG, filename="a.png", kind=KIND_PHOTO)
+    voice = await pipeline.add_draft_part(draft.id, M4A, filename="v.m4a", kind=KIND_VOICE)
+    await pipeline.submit_draft(draft.id)
+    await pipeline.drain()
+    assert store.records[draft.id].status == INDEXED  # degraded, not failed
+    assert (await pipeline._media_store.get(voice.id)).status == UNAVAILABLE
+    assert placeholder("voice") in store.records[draft.id].raw_text
+
+    stt._available = True
+    await pipeline.rederive_capture(draft.id)
+    await pipeline.drain()
+
+    assert (await pipeline._media_store.get(voice.id)).status == DERIVED
+    raw = store.records[draft.id].raw_text
+    assert "the recovered words" in raw and placeholder("voice") not in raw
+    body = (root / store.records[draft.id].node_paths[0]).read_text(encoding="utf-8")
+    assert "the recovered words" in body

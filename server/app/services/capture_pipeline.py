@@ -769,12 +769,26 @@ class CapturePipeline:
         ``GET /media/{id}``. AWAITED (like :meth:`reorganize_capture_now`) so a drill / the M9.5
         re-derive trigger can report the outcome. Idempotent — a still-``unavailable`` re-derive
         just re-writes the placeholder (a no-op node). ``404`` when unknown; ``CaptureError`` if the
-        capture is not a media capture or its media row is missing."""
+        capture is not a media capture or its media row is missing.
+
+        **Composite (M9.6, ADR-061 §9):** generalized from 1 part to N — re-derive **only the
+        non-``derived`` parts** (never re-runs the VLM on an already-good photo), reassemble
+        ``raw_text`` from all parts (marker format), then reorganize so the recovered part reaches
+        its node."""
         if self._media_store is None or self._media_derivation is None:
             raise CaptureError("media capture requires the media substrate to be wired")
         record = await self._store.get(capture_id)
         if record is None:
             raise CaptureNotFound(capture_id)
+        if record.kind == KIND_COMPOSITE:
+            parts = await self._media_store.list_by_capture_id(capture_id)
+            non_derived = [p.id for p in parts if p.status != MEDIA_DERIVED]
+            if non_derived:
+                await self._media_derivation.rederive(media_ids=non_derived)
+            parts = await self._media_store.list_by_capture_id(capture_id)  # re-read settled state
+            await self._store.set_raw_text(capture_id, _compose_raw_text(record.text_body, parts))
+            await self._reorganize(capture_id)
+            return
         if record.kind not in (KIND_IMAGE, KIND_VOICE):
             raise CaptureError(f"capture {capture_id} is not a media capture")
         media = await self._media_store.get_by_capture_id(capture_id)
@@ -1450,46 +1464,52 @@ class CapturePipeline:
     async def _assemble_composite(
         self, capture_id: str, record: CaptureRecord, inter: _Interaction
     ) -> str:
-        """Derive every part of a composite capture, then assemble the blended organize input
-        (M9.6, ADR-061 §4/§5).
+        """Derive every part of a composite capture (concurrent-bounded), then assemble the blended
+        organize input (M9.6, ADR-061 §4/§5/§7).
 
         The parts' raw files + rows were written at attach time (draft lifecycle, T1); here — at
         Submit — each is driven to a terminal derivation state (``derive_until_settled``: a
         persistent VLM/STT failure walks retry → ``unavailable`` → placeholder WITHOUT blocking).
-        The organize input is the person's ``text_body`` followed by each part in **ordinal order**,
-        rendered by :func:`_render_media_text` (photo fenced ``<photo: …>`` — shared material; voice
-        plain — the person's words). Returned and cached as ``raw_text`` so ``reprocess-all``
-        replays it byte-for-byte (P10).
-
-        T2 makes the per-part derivation concurrent (bounded) and swaps the plain join for indexed
-        part markers with per-part ``agent_runs`` detail; T3 adds per-node attribution. T1 derives
-        sequentially and joins plainly (all-to-all media linkage via the existing link-write)."""
+        Derivation runs **concurrently under a config-bounded semaphore** (``§4`` — multi-photo is
+        the headline case) while assembly order stays by **part ordinal** (independent of completion
+        order). The organize input is the person's ``text_body`` followed by each part introduced by
+        an **indexed marker** ``[[part N · kind]]`` (§7) + its bare derived body (photo desc =
+        shared material; voice transcript = the person's words — the marker carries the two-layer
+        semantic that the ``<photo: …>`` fence used to, superseded here). Returned and cached as
+        ``raw_text`` so ``reprocess-all`` replays it byte-for-byte (P10). Per-part derivation detail
+        rides ``inter`` (``agent_runs``, rule 7). T3 wires the organizer to consume the markers +
+        emit per-node ``parts:[…]`` attribution."""
         if self._media_store is None or self._media_derivation is None:
             raise CaptureError("composite capture requires the media substrate to be wired")
         await self._store.mark_status(capture_id, DERIVING)
         parts = await self._media_store.list_by_capture_id(capture_id)
         t0 = time.monotonic()
-        part_details: list[dict[str, Any]] = []
-        rendered: list[str] = []
-        for media in parts:
-            await self._media_derivation.derive_until_settled(media.id)
-            media = await self._media_store.get(media.id) or media
-            rendered.append(_render_media_text(media))
-            part_details.append(
-                {
-                    "media_id": media.id,
-                    "kind": media.kind,
-                    "ordinal": media.part_ordinal,
-                    "status": media.status,
-                    "model": media.model_used,
-                    "attempts": media.attempts,
-                    "error": media.error,
-                }
-            )
+        sem = asyncio.Semaphore(max(1, self._settings.composite_derive_max_concurrency))
+
+        async def _settle(media: MediaRecord) -> MediaRecord:
+            async with sem:
+                await self._media_derivation.derive_until_settled(media.id)
+            return await self._media_store.get(media.id) or media
+
+        # Concurrent derivation, but `gather` preserves input (ordinal) order in the result.
+        settled = await asyncio.gather(*(_settle(m) for m in parts)) if parts else []
         inter.timings_ms["derive"] = int((time.monotonic() - t0) * 1000)
-        inter.derive = {"parts": part_details}
-        segments = [s for s in ((record.text_body or "").strip(), *rendered) if s]
-        return "\n\n".join(segments)
+        inter.derive = {
+            "parts": [
+                {
+                    "media_id": m.id,
+                    "kind": m.kind,
+                    "ordinal": m.part_ordinal,
+                    "marker_index": i,
+                    "status": m.status,
+                    "model": m.model_used,
+                    "attempts": m.attempts,
+                    "error": m.error,
+                }
+                for i, m in enumerate(settled, start=1)
+            ]
+        }
+        return _compose_raw_text(record.text_body, settled)
 
     async def _link_node_media(self, capture_id: str, content_node_ids: list[str]) -> None:
         """Rebuild this capture's derived-tier ``node_media`` links (ADR-060 §1/§3): attach the
@@ -1596,12 +1616,48 @@ def _render_media_text(media: MediaRecord) -> str:
     """The organizer-facing replay text for a derived media item (M9 T4, ADR-060 §5). A **photo**
     is fenced ``<photo: …>`` (shared material — never the person's words); a **voice** transcript is
     **plain/unfenced** (the person's OWN words, so the organizer treats it like any spoken capture).
-    An ``unavailable`` item renders the kind's self-describing placeholder."""
+    An ``unavailable`` item renders the kind's self-describing placeholder.
+
+    Single-part captures (voice/image) keep this fenced format; composite parts use the marker-based
+    :func:`_compose_raw_text` (ADR-061 §7 supersedes the fence *format*, semantic preserved)."""
     if media.kind == KIND_PHOTO:
         return _fence_photo(media)
     if media.status == MEDIA_DERIVED and (media.derived_text or "").strip():
         return media.derived_text.strip()
     return placeholder(media.kind)
+
+
+def _part_marker(index: int, kind: str) -> str:
+    """The structural index marker introducing one composite part in the organize input (M9.6,
+    ADR-061 §7): ``[[part N · kind]]``, ``N`` a **1-based** position in ordinal order (stable across
+    a draft-time delete + re-add). The organizer references it back per node as a bounds-checked
+    ``parts:[…]`` index (T3)."""
+    return f"[[part {index} · {kind}]]"
+
+
+def _render_part_body(media: MediaRecord) -> str:
+    """A composite part's **bare** derived body for the marker-based organize input (M9.6, ADR-061
+    §7): the photo description / voice transcript plain (no ``<photo: …>`` fence — the ``[[part N ·
+    kind]]`` marker carries the two-layer semantic now), or the kind's ``unavailable`` placeholder.
+    """
+    if media.status == MEDIA_DERIVED and (media.derived_text or "").strip():
+        return media.derived_text.strip()
+    return placeholder(media.kind)
+
+
+def _compose_raw_text(text_body: str | None, ordered_parts: list[MediaRecord]) -> str:
+    """Assemble a composite capture's cached ``raw_text`` (M9.6, ADR-061 §5/§7): the person's
+    ``text_body`` (if any) followed by each part in ordinal order, introduced by its 1-based
+    ``[[part N · kind]]`` marker + bare body. Deterministic given the ordered parts — the shared
+    core of both the Submit assembly and ``rederive_capture`` reassembly, so replay is byte-stable.
+    """
+    segments: list[str] = []
+    tb = (text_body or "").strip()
+    if tb:
+        segments.append(tb)
+    for index, media in enumerate(ordered_parts, start=1):
+        segments.append(f"{_part_marker(index, media.kind)} {_render_part_body(media)}")
+    return "\n\n".join(segments)
 
 
 def _chat_capture_id(session_id: str, text: str) -> str:
