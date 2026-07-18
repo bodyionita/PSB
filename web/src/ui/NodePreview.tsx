@@ -16,6 +16,7 @@ import {
 import { HoverTip } from './HoverTip';
 import { InteriorityBadge } from './InteriorityBadge';
 import { baseName, useNode } from './nodeDetail';
+import { MediaStrip } from './media/MediaStrip';
 import { edgeLabel, typeIcon } from './nodeTypes';
 
 const FAIL_COLOR = '#ff6b6b';
@@ -216,6 +217,11 @@ export function NodePreview({
             {data.aliases.length > 0 && <span>also known as {data.aliases.join(', ')}</span>}
           </p>
         )}
+
+        {/* Media strip (M9 T5, ADR-060 §7) — the node's photos/voice notes between header and body,
+            with lightbox + "see raw capture". Content nodes only (§2), so it never collides with the
+            entity profile below. Renders nothing when the node has no media. */}
+        <MediaStrip media={data.media} />
 
         {/* Derived entity profile (ADR-030) — categorized observation lines, entity nodes only. */}
         {data.profile && (

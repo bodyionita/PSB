@@ -1,7 +1,8 @@
 import { AnimatePresence, motion, useReducedMotion, useTransform } from 'framer-motion';
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { RecentCaptures } from './RecentCaptures';
-import { useCaptureText, useCaptureVoice } from './useCaptures';
+import { toUploadable } from './heicConvert';
+import { useCaptureImage, useCaptureText, useCaptureVoice } from './useCaptures';
 import { useRecorder } from './useRecorder';
 
 const FAIL_COLOR = '#ff6b6b';
@@ -13,6 +14,14 @@ export function CaptureScreen() {
   const recorder = useRecorder();
   const voice = useCaptureVoice();
   const textCapture = useCaptureText();
+  const image = useCaptureImage();
+
+  // Photo capture (M9 T5, ADR-057 §6 / ADR-060 §8): a hidden file input opened by the photo button.
+  // `converting` covers the lazy HEIC→JPEG step; `imageError` surfaces a conversion/upload failure.
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const [converting, setConverting] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const uploadingImage = image.isPending || converting;
 
   const recording = recorder.state === 'recording';
   const uploading = voice.isPending;
@@ -45,6 +54,28 @@ export function CaptureScreen() {
     }
     void recorder.start();
   }, [flashCaptured, recorder, recording, uploading, voice]);
+
+  const pickImage = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = ''; // let the same file be re-picked after an error
+      if (!file) return;
+      setImageError(null);
+      setConverting(true);
+      try {
+        const upload = await toUploadable(file);
+        setConverting(false);
+        image.mutate(upload, {
+          onSuccess: flashCaptured,
+          onError: () => setImageError('Couldn’t send that photo — try again.'),
+        });
+      } catch {
+        setConverting(false);
+        setImageError('Couldn’t read that photo — try a different one.');
+      }
+    },
+    [flashCaptured, image],
+  );
 
   const [text, setText] = useState('');
   const submitText = (e: FormEvent) => {
@@ -174,8 +205,36 @@ export function CaptureScreen() {
         </p>
       )}
 
-      {/* Quick text capture */}
+      {/* Quick text capture + a photo affordance (M9 T5, ADR-057 §6). */}
       <form onSubmit={submitText} style={{ display: 'flex', gap: 8, width: '100%', maxWidth: 480 }}>
+        <input
+          ref={fileInput}
+          type="file"
+          accept="image/*,.heic,.heif"
+          onChange={pickImage}
+          style={{ display: 'none' }}
+        />
+        <motion.button
+          type="button"
+          onClick={() => fileInput.current?.click()}
+          whileTap={{ scale: 0.95 }}
+          disabled={uploadingImage}
+          aria-label="Add a photo"
+          style={{
+            flexShrink: 0,
+            width: 48,
+            padding: 0,
+            borderRadius: 'var(--radius)',
+            border: '1px solid var(--surface-border)',
+            background: 'var(--surface)',
+            color: 'var(--text)',
+            fontSize: 18,
+            opacity: uploadingImage ? 0.5 : 1,
+            cursor: uploadingImage ? 'default' : 'pointer',
+          }}
+        >
+          {uploadingImage ? '◌' : '❏'}
+        </motion.button>
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -214,6 +273,12 @@ export function CaptureScreen() {
       {textCapture.isError && (
         <p style={{ margin: '-16px 0 0', fontSize: 13, color: FAIL_COLOR }}>
           Couldn’t save that — try again.
+        </p>
+      )}
+
+      {imageError && (
+        <p style={{ margin: '-16px 0 0', fontSize: 13, color: FAIL_COLOR, textAlign: 'center', maxWidth: 320 }}>
+          {imageError}
         </p>
       )}
 

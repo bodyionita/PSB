@@ -1,13 +1,15 @@
 import type { CSSProperties } from 'react';
-import type { CaptureNodeRef } from '../../api/types';
-import { NodeChip } from '../../ui/NodeChip';
-import { typeIcon } from '../../ui/nodeTypes';
+import type { CaptureNodeRef } from '../api/types';
+import { NodeChip } from './NodeChip';
+import { typeIcon } from './nodeTypes';
 
 // Renders a capture's resulting nodes as clickable `NodeChip`s (M8.1, ADR-054 §5 replan): `refs` is
 // the server's id-resolved projection of `paths` (a store path alone can't open `NodePreview` —
 // uuid-keyed, 02-data-model §Identity: "paths are projections"). A path with no resolved ref yet
 // (not indexed, or tombstoned) degrades to the old static pill rather than silently disappearing.
-// Shared by the Capture-tab Recents strip and the Activity Captures-tab row detail.
+// Shared by the Capture-tab Recents strip, the Activity Captures-tab row detail, and the M9 T5
+// "see raw capture" sheet (a ui/ primitive — depends only on ui/ + api, so ui and features can both
+// use it without a cross-layer import).
 
 const STATIC_PILL: CSSProperties = {
   display: 'inline-flex',

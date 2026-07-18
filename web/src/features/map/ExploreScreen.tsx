@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { ApiError, api } from '../../api/client';
 import type { MapNeighborItem, NeighborCenter, SearchResultItem } from '../../api/types';
 import { NodePreview, PlaneBadge } from '../../ui/NodePreview';
+import { MediaGlyphs } from '../../ui/media/MediaGlyphs';
 import { baseName } from '../../ui/nodeDetail';
 import { Surface } from '../../ui/Surface';
 import { typeIcon, typeLabel } from '../../ui/nodeTypes';
@@ -149,6 +150,7 @@ function NodeCard({ hit, onCenter }: { hit: SearchResultItem; onCenter: (nodeId:
               </span>
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <MediaGlyphs kinds={hit.media_kinds} />
               <PlaneBadge plane={hit.plane} />
               <ScorePill score={hit.score} />
             </div>

@@ -1,9 +1,9 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useMemo, useState } from 'react';
 import type { ActivityCategory, ActivityFeedItem, CaptureView, RunChildItem } from '../../api/types';
-import { NodeRefChips } from '../capture/NodeRefChips';
 import { useCapture, useEditCaptureAnchor } from '../capture/useCaptures';
 import { Button } from '../../ui/Button';
+import { CaptureDetailBody } from '../../ui/media/CaptureDetail';
 import { TimeAgo } from '../../ui/TimeAgo';
 import { StatusBadge } from './runStatus';
 import { FAIL_COLOR } from './statusColors';
@@ -317,35 +317,13 @@ function CaptureDetail({ captureId }: { captureId: string }) {
   if (capture.isError || !capture.data)
     return <span style={{ fontSize: 12, color: FAIL_COLOR }}>Couldn’t load this capture.</span>;
   const c = capture.data;
+  // The shared capture-detail body (M9 T5, ADR-060 §7) — the SAME component the "see raw capture"
+  // sheet renders (source badge, status, the capture's media, raw text, node chips). Activity adds the
+  // anchor editor on top (its own affordance, not part of the shared traceability surface).
   return (
     <div style={{ display: 'grid', gap: 10 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <SourceBadge source={c.source ?? c.kind} />
-        <span style={{ fontSize: 11, color: 'var(--muted)' }}>{c.status}</span>
-      </div>
-      {c.raw_text && (
-        <p
-          style={{
-            margin: 0,
-            minWidth: 0,
-            fontSize: 13,
-            color: 'var(--text)',
-            lineHeight: 1.5,
-            whiteSpace: 'pre-wrap',
-            // Break long unbroken tokens (URLs, long strings) so the raw text can't run under the
-            // card edge on a narrow phone (the grid item's default min-width: auto would let it).
-            overflowWrap: 'anywhere',
-            wordBreak: 'break-word',
-          }}
-        >
-          {c.raw_text}
-        </p>
-      )}
-      <NodeRefChips paths={c.node_paths} refs={c.node_refs} />
+      <CaptureDetailBody capture={c} />
       <AnchorEditor capture={c} />
-      {c.error && (
-        <p style={{ margin: 0, fontSize: 12, color: FAIL_COLOR }}>{c.error}</p>
-      )}
     </div>
   );
 }

@@ -46,6 +46,11 @@ import type {
   VocabConsolidateProposeResponse,
 } from './types';
 
+// The absolute URL of a stored media file (M9 T5, ADR-060 §7). Same-origin under Caddy, so a plain
+// `<img src>`/`<audio src>` sends the session cookie automatically — `GET /media/{id}` is
+// session-gated and streams Range/206 for voice scrubbing. The one place that knows this URL shape.
+export const mediaUrl = (id: string) => `${API_BASE}/media/${encodeURIComponent(id)}`;
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -103,6 +108,14 @@ export const api = {
     const form = new FormData();
     form.append('file', blob, filename);
     return request<CaptureAcceptedResponse>('/capture/voice', { method: 'POST', body: form });
+  },
+  // Ad-hoc PWA photo capture (M9 T3/T5, ADR-057 §6). The server derives the mime from the
+  // filename extension (jpg/png/webp/heic/heif) and rejects a bare/extensionless blob — the caller
+  // must send a real filename (HEIC is converted to a synthetic `photo.jpg` client-side first).
+  captureImage: (blob: Blob, filename: string) => {
+    const form = new FormData();
+    form.append('file', blob, filename);
+    return request<CaptureAcceptedResponse>('/capture/image', { method: 'POST', body: form });
   },
   listCaptures: (limit = 20) => request<CaptureView[]>(`/captures?limit=${limit}`),
   // Full pipeline state for one capture (03-api.md) — the Activity Captures-tab row expand + any

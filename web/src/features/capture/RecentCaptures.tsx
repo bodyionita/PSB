@@ -4,7 +4,8 @@ import type { CaptureStatus, CaptureView } from '../../api/types';
 import { Surface } from '../../ui/Surface';
 import { TimeAgo } from '../../ui/TimeAgo';
 import { useActivityNav } from '../activity/activityNav';
-import { NodeRefChips } from './NodeRefChips';
+import { NodeRefChips } from '../../ui/NodeRefChips';
+import { CaptureMediaBlock } from '../../ui/media/CaptureMediaBlock';
 import { useCaptures, useRetryCapture, useSubmitFollowUp } from './useCaptures';
 
 // Recent captures strip with live pipeline status (06 §Capture). Polling lives in useCaptures.
@@ -18,6 +19,7 @@ type Tone = 'progress' | 'done' | 'fail';
 const STATUS_META: Record<CaptureStatus, { label: string; tone: Tone }> = {
   received: { label: 'Received', tone: 'progress' },
   transcribing: { label: 'Transcribing', tone: 'progress' },
+  deriving: { label: 'Reading photo', tone: 'progress' },
   organizing: { label: 'Organizing', tone: 'progress' },
   written: { label: 'Writing nodes', tone: 'progress' },
   indexed: { label: 'Saved', tone: 'done' },
@@ -146,9 +148,16 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
   const retry = useRetryCapture();
   const [expanded, setExpanded] = useState(false);
   const isVoice = capture.kind === 'voice';
+  const isImage = capture.kind === 'image';
   const hasText = capture.raw_text != null && capture.raw_text.trim() !== '';
-  // Status is conveyed by the pill; the snippet just labels a not-yet-transcribed voice note.
-  const snippet = hasText ? capture.raw_text : isVoice ? 'Voice note' : '…';
+  // Status is conveyed by the pill; the snippet just labels a not-yet-derived voice/photo capture.
+  const snippet = hasText
+    ? capture.raw_text
+    : isVoice
+      ? 'Voice note'
+      : isImage
+        ? 'Photo'
+        : '…';
   const expandable = hasText && (capture.raw_text as string).length > EXPAND_THRESHOLD;
   const showNudge =
     capture.follow_up_question != null && capture.follow_up_answer == null;
@@ -165,7 +174,7 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
             <span aria-hidden style={{ fontSize: 15, color: 'var(--muted)' }}>
-              {isVoice ? '◉' : '✎'}
+              {isVoice ? '◉' : isImage ? '❏' : '✎'}
             </span>
             <StatusPill status={capture.status} />
           </div>
@@ -174,6 +183,13 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
             style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}
           />
         </div>
+
+        {/* The capture's photo/voice (M9 T5, ADR-060 §7) — thumbnail → lightbox, or inline player. */}
+        {capture.media && (
+          <div style={{ marginTop: 12 }}>
+            <CaptureMediaBlock media={capture.media} />
+          </div>
+        )}
 
         <p
           style={{

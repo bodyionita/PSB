@@ -20,7 +20,12 @@ const GROUP_META: Record<string, { label: string; blurb: string }> = {
   chat: { label: 'Chat', blurb: 'Answers in the Chat tab.' },
   conspect: { label: 'Conspect', blurb: 'Organizing and distilling your captures.' },
   quick: { label: 'Quick', blurb: 'Fast, cheap tasks like naming chat sessions.' },
+  // M9 (ADR-057 §4): the VLM chain that describes captured photos. Effort is N/A (empty
+  // effort_by_model), so no effort selector renders. Groq-VLM primary / Nebius fallback by seed.
+  vision: { label: 'Vision', blurb: 'Describing photos and other images you capture.' },
 };
+
+const WARN_COLOR = '#f5a623';
 
 const selectStyle: CSSProperties = {
   appearance: 'none',
@@ -160,6 +165,13 @@ function GroupCard({ group }: { group: GroupRoutingModel }) {
     fallback !== group.fallback ||
     !recordsEqual(payload, group.effort_by_model);
 
+  // Vision → Claude guard (M9 T5, ADR-057 §4): Claude has no vision path in this stack, so routing the
+  // `vision` group (active or fallback) to a Claude model would silently drop every image. Warn inline
+  // — the model list is one shared catalog (ADR-045), so Claude legitimately appears in the dropdowns.
+  const claudeVisionRoute =
+    group.group === 'vision' &&
+    (byId.get(active)?.provider === 'claude' || byId.get(fallback)?.provider === 'claude');
+
   // The distinct selected models that carry an effort selector (usually just the active model;
   // the fallback appears too when it's a second effort-capable model like claude-sonnet-4-6).
   const effortModels = dedup([active, fallback])
@@ -237,6 +249,25 @@ function GroupCard({ group }: { group: GroupRoutingModel }) {
           </select>
         </div>
       </div>
+
+      {claudeVisionRoute && (
+        <p
+          style={{
+            margin: 0,
+            fontSize: 12.5,
+            color: WARN_COLOR,
+            lineHeight: 1.5,
+            display: 'flex',
+            gap: 8,
+          }}
+        >
+          <span aria-hidden>⚠</span>
+          <span>
+            Claude has no vision path here — images routed to it are silently dropped. Pick a
+            vision-capable model (Groq or Nebius).
+          </span>
+        </p>
+      )}
 
       {effortModels.length > 0 && (
         <div style={{ display: 'grid', gap: 10 }}>

@@ -2,6 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import type { ChatSessionItem, ChatSourceItem } from '../../api/types';
 import { NodePreview, PlaneBadge } from '../../ui/NodePreview';
+import { MediaGlyphs } from '../../ui/media/MediaGlyphs';
 import { baseName } from '../../ui/nodeDetail';
 import { Surface } from '../../ui/Surface';
 import { useMapNav } from '../map/mapNav';
@@ -217,6 +218,7 @@ function SourceCard({
             >
               {title}
             </span>
+            <MediaGlyphs kinds={source.media_kinds} />
             <PlaneBadge plane={plane} />
           </div>
           <p

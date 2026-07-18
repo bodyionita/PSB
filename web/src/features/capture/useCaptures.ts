@@ -74,6 +74,16 @@ export function useCaptureVoice() {
   });
 }
 
+// Ad-hoc photo capture (M9 T5, ADR-057 §6 / ADR-060 §8). The caller normalizes the pick first
+// (`toUploadable` — HEIC→JPEG) so this only ever ships a browser-renderable blob + a real filename.
+export function useCaptureImage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { blob: Blob; filename: string }) => api.captureImage(v.blob, v.filename),
+    onSuccess: () => qc.invalidateQueries({ queryKey: CAPTURES_KEY }),
+  });
+}
+
 export function useRetryCapture() {
   const qc = useQueryClient();
   return useMutation({

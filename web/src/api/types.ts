@@ -18,14 +18,27 @@ export interface HealthResponse {
   backups: boolean;
 }
 
-// --- Capture (03-api.md §Capture, M1 / ADR-019) ---
-export type CaptureKind = 'text' | 'voice';
+// --- Media (M9 T4/T5, ADR-057 / ADR-060 §7) ---
+// A stored media item's derivation lifecycle: `pending` = still deriving (shimmer tile),
+// `derived` = its description/transcript landed, `unavailable` = derivation gave up (explicit
+// broken-media tile). The raw file is servable via `GET /media/{id}` at every status.
+export type MediaStatus = 'pending' | 'derived' | 'unavailable';
+
+// A media item's kind (ADR-060 §7): the value carried by `node_media` / `media_kinds`. `photo` and
+// `voice` are produced now (image/voice captures); `video` is an M9.5 connector kind. Kept a plain
+// string on the wire — the renderer treats an unknown kind as a generic attachment.
+export type MediaKind = 'photo' | 'voice' | 'video';
+
+export type CaptureKind = 'text' | 'voice' | 'image';
 
 // Pipeline lifecycle (02-data-model §3). Terminal = indexed | failed; everything else is
 // in-flight and drives the strip's polling.
 export type CaptureStatus =
   | 'received'
   | 'transcribing'
+  // Image captures derive their vision description between `received` and `organizing` — the
+  // sibling of `transcribing` for the photo leg (M9 T3, ADR-057 §3).
+  | 'deriving'
   | 'organizing'
   | 'written'
   | 'indexed'
@@ -41,6 +54,16 @@ export interface CaptureNodeRef {
   store_path: string;
   type: string | null;
   title: string | null;
+}
+
+// The media item backing an image OR voice capture (M9 T3/T4, ADR-057 §6 / ADR-060 §5): the web
+// renders the photo / voice player via `GET /media/{id}` and a derivation-status badge, straight off
+// the capture. Null for text/mcp/chat captures. `kind` is `photo`/`voice`. Unlike a node's media
+// item this carries no `capture_id` — it *is* this capture's media.
+export interface CaptureMedia {
+  id: string;
+  kind: MediaKind;
+  status: MediaStatus;
 }
 
 export interface CaptureView {
@@ -61,6 +84,9 @@ export interface CaptureView {
   // The capture's origin (M8.1, ADR-054 §4): `mcp`/`chat`, or null for a web capture (falls back
   // to `kind` for the source badge).
   source: string | null;
+  // The backing media for an image OR voice capture (M9 T3/T4) — the photo/audio + its derivation
+  // status; null for text/mcp/chat captures. Rendered via `GET /media/{media.id}` (ADR-060 §7).
+  media: CaptureMedia | null;
 }
 
 // 202 body shared by text/voice/retry/follow-up. The real status is polled via GET /captures.
@@ -105,6 +131,9 @@ export interface SearchResultItem {
   tags: string[];
   snippet: string;
   score: number;
+  // Distinct media kinds the node carries (M9 T4, ADR-060 §7), off the `node_media` link. Drives a
+  // tiny 📷/🎙 glyph on the result card — no thumbnails in lists. Empty when the node has no media.
+  media_kinds: MediaKind[];
 }
 
 // One edge of a node (GET /nodes/{id}): the *other* endpoint + edge metadata. `dir` = out (this
@@ -122,8 +151,20 @@ export interface NodeEdgeItem {
   until: string | null;
 }
 
+// One media item a node carries (GET /nodes/{id}.media[], M9 T4 / ADR-060 §1). Rendered via
+// `GET /media/{id}`: `kind` (photo/voice/video) picks the tile/player, `status` the shimmer/broken
+// state, and `capture_id` opens the "see raw capture" detail sheet (ADR-060 §7). A media attachment,
+// not a graph edge — it never appears in `edges`.
+export interface NodeMediaItem {
+  id: string;
+  kind: MediaKind;
+  status: MediaStatus;
+  capture_id: string | null;
+}
+
 // Read-only node detail (GET /nodes/{id}) — body read live from the graph store, plus the derived
-// entity `profile` (null for content nodes) and canonical + derived edges (both directions).
+// entity `profile` (null for content nodes), canonical + derived edges (both directions), and the
+// node's attached `media` (M9 T4, ADR-060 §1 — the NodePreview media strip).
 export interface NodeDetailResponse {
   node_id: string;
   store_path: string;
@@ -141,6 +182,7 @@ export interface NodeDetailResponse {
   body: string;
   profile: string | null;
   edges: NodeEdgeItem[];
+  media: NodeMediaItem[];
 }
 
 // --- Map / neighbors (03-api.md §Search & graph, M7 / ADR-051 + ADR-052) ---
@@ -234,6 +276,8 @@ export interface ChatSourceItem {
   snippet: string;
   score: number;
   planes: string[];
+  // Distinct media kinds the cited node carries (M9 T4, ADR-060 §7) — the source card's glyph.
+  media_kinds: MediaKind[];
 }
 
 // POST /chat request. `session_id` omitted ⇒ implicit session creation; `model` = the composer's
@@ -358,7 +402,7 @@ export interface SettingsResponse {
 // model ids (ADR-045; was `effort_by_provider`/provider ids). `fallback` "" = none; `effort_by_model`
 // must carry a valid level for each effort-supporting model in {active, fallback} (422 otherwise).
 export interface ModelRoutingUpdate {
-  group: 'chat' | 'conspect' | 'quick';
+  group: 'chat' | 'conspect' | 'quick' | 'vision';
   active: string;
   fallback: string;
   effort_by_model: Record<string, string>;
