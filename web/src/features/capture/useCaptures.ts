@@ -58,29 +58,67 @@ export function useCapture(id: string | null) {
   });
 }
 
-export function useCaptureText() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (text: string) => api.captureText(text),
-    onSuccess: () => qc.invalidateQueries({ queryKey: CAPTURES_KEY }),
+// --- Composite compose draft (M9.6 T5, ADR-061 §3) ---
+// The draft is server-held state keyed on the single active draft. `useDraft` fetches/resumes it;
+// the part/text/submit/discard mutations invalidate it (and the captures list on submit). The
+// compose screen owns the draft id and threads it into each mutation.
+const DRAFT_KEY = ['capture', 'draft'] as const;
+
+export function useDraft(enabled: boolean) {
+  return useQuery({
+    queryKey: DRAFT_KEY,
+    // POST opens-or-resumes (idempotent, one active draft); we treat it as the draft "read".
+    queryFn: () => api.openDraft(),
+    enabled,
+    staleTime: Infinity, // the draft only changes via the mutations below, which set it directly
+    gcTime: 0,
   });
 }
 
-export function useCaptureVoice() {
+export function useAddDraftPart() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { blob: Blob; filename: string }) => api.captureVoice(v.blob, v.filename),
-    onSuccess: () => qc.invalidateQueries({ queryKey: CAPTURES_KEY }),
+    mutationFn: (v: { id: string; blob: Blob; filename: string; kind: 'photo' | 'voice' }) =>
+      api.addDraftPart(v.id, v.blob, v.filename, v.kind),
+    onSuccess: () => qc.invalidateQueries({ queryKey: DRAFT_KEY }),
   });
 }
 
-// Ad-hoc photo capture (M9 T5, ADR-057 §6 / ADR-060 §8). The caller normalizes the pick first
-// (`toUploadable` — HEIC→JPEG) so this only ever ships a browser-renderable blob + a real filename.
-export function useCaptureImage() {
+export function useRemoveDraftPart() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { blob: Blob; filename: string }) => api.captureImage(v.blob, v.filename),
-    onSuccess: () => qc.invalidateQueries({ queryKey: CAPTURES_KEY }),
+    mutationFn: (v: { id: string; mediaId: string }) => api.removeDraftPart(v.id, v.mediaId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: DRAFT_KEY }),
+  });
+}
+
+export function useEditDraftText() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; text: string }) => api.editDraftText(v.id, v.text),
+    // The PUT returns the fresh draft — seed it directly so the field doesn't flicker on refetch.
+    onSuccess: (draft) => qc.setQueryData(DRAFT_KEY, draft),
+  });
+}
+
+export function useSubmitDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.submitDraft(id),
+    onSuccess: () => {
+      // The draft became a committed capture — drop the draft cache (a fresh openDraft opens a new
+      // one) and refresh the captures strip so the new capture appears + polls.
+      qc.removeQueries({ queryKey: DRAFT_KEY });
+      qc.invalidateQueries({ queryKey: CAPTURES_KEY });
+    },
+  });
+}
+
+export function useDiscardDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.discardDraft(id),
+    onSuccess: () => qc.removeQueries({ queryKey: DRAFT_KEY }),
   });
 }
 

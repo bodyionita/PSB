@@ -10,6 +10,10 @@ import { createContext, useContext } from 'react';
 // (small, isomorphic-to-openReviewItem) wiring AppShell still needs.
 export interface ActivityNav {
   openCaptures: () => void;
+  // Deep-link to one processing run's Activity view (M9.6 T5, ADR-061 §10) — the capture row's
+  // "See processing" link. Optional so a provider that only wires `openCaptures` still type-checks;
+  // consumers guard on its presence (same degrade convention as the whole hook being null).
+  openRun?: (runId: string) => void;
 }
 
 export const ActivityNavContext = createContext<ActivityNav | null>(null);

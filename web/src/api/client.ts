@@ -12,6 +12,8 @@ import type {
   EntityMergeProposeResponse,
   CaptureAcceptedResponse,
   CaptureView,
+  DraftPart,
+  DraftView,
   ChatModelsResponse,
   ChatRequest,
   ChatResponse,
@@ -98,25 +100,38 @@ export const api = {
     }),
   logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
 
-  // --- Capture (03-api.md §Capture) ---
-  captureText: (text: string, createdAt?: string) =>
-    request<CaptureAcceptedResponse>('/capture/text', {
+  // --- Composite capture draft (03-api.md §Capture, M9.6 / ADR-061 §3) ---
+  // Every web capture goes through the draft flow (the one-shot text/voice/image endpoints are gone,
+  // ADR-061 §8). Open resumes the one active draft; a part attaches raw immediately (derivation runs
+  // at submit); submit spawns the blended organize.
+  openDraft: () => request<DraftView>('/capture/draft', { method: 'POST' }),
+  addDraftPart: (id: string, blob: Blob, filename: string, kind: 'photo' | 'voice') => {
+    const form = new FormData();
+    form.append('kind', kind);
+    form.append('file', blob, filename);
+    return request<DraftPart>(`/capture/${encodeURIComponent(id)}/part`, {
       method: 'POST',
-      body: JSON.stringify(createdAt ? { text, created_at: createdAt } : { text }),
+      body: form,
+    });
+  },
+  removeDraftPart: (id: string, mediaId: string) =>
+    request<void>(
+      `/capture/${encodeURIComponent(id)}/part/${encodeURIComponent(mediaId)}`,
+      { method: 'DELETE' },
+    ),
+  editDraftText: (id: string, text: string) =>
+    request<DraftView>(`/capture/${encodeURIComponent(id)}/text`, {
+      method: 'PUT',
+      body: JSON.stringify({ text }),
     }),
-  captureVoice: (blob: Blob, filename: string) => {
-    const form = new FormData();
-    form.append('file', blob, filename);
-    return request<CaptureAcceptedResponse>('/capture/voice', { method: 'POST', body: form });
-  },
-  // Ad-hoc PWA photo capture (M9 T3/T5, ADR-057 §6). The server derives the mime from the
-  // filename extension (jpg/png/webp/heic/heif) and rejects a bare/extensionless blob — the caller
-  // must send a real filename (HEIC is converted to a synthetic `photo.jpg` client-side first).
-  captureImage: (blob: Blob, filename: string) => {
-    const form = new FormData();
-    form.append('file', blob, filename);
-    return request<CaptureAcceptedResponse>('/capture/image', { method: 'POST', body: form });
-  },
+  submitDraft: (id: string) =>
+    request<CaptureAcceptedResponse>(`/capture/${encodeURIComponent(id)}/submit`, {
+      method: 'POST',
+    }),
+  discardDraft: (id: string) =>
+    request<void>(`/capture/${encodeURIComponent(id)}/draft`, { method: 'DELETE' }),
+
+  // --- Capture read (03-api.md §Capture) ---
   listCaptures: (limit = 20) => request<CaptureView[]>(`/captures?limit=${limit}`),
   // Full pipeline state for one capture (03-api.md) — the Activity Captures-tab row expand + any
   // in-place detail fetch (M8.1, ADR-054 §4): raw text, node_refs, status, source badge.

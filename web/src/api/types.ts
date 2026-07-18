@@ -29,7 +29,10 @@ export type MediaStatus = 'pending' | 'derived' | 'unavailable';
 // string on the wire — the renderer treats an unknown kind as a generic attachment.
 export type MediaKind = 'photo' | 'voice' | 'video';
 
-export type CaptureKind = 'text' | 'voice' | 'image';
+// `composite` (M9.6, ADR-061 §2) is the web compose kind: text + 0..N photos + <=1 voice organized
+// in one blended pass. `text`/`voice`/`image` remain for legacy captures + internal (mcp/chat/reprocess)
+// producers.
+export type CaptureKind = 'text' | 'voice' | 'image' | 'composite';
 
 // Pipeline lifecycle (02-data-model §3). Terminal = indexed | failed; everything else is
 // in-flight and drives the strip's polling.
@@ -64,6 +67,9 @@ export interface CaptureMedia {
   id: string;
   kind: MediaKind;
   status: MediaStatus;
+  // Stable 0-based position within the capture (M9.6 T4, ADR-061 §11); null for legacy single-part
+  // media. Drives the render order of the media list.
+  part_ordinal: number | null;
 }
 
 export interface CaptureView {
@@ -71,6 +77,8 @@ export interface CaptureView {
   kind: CaptureKind;
   status: CaptureStatus;
   raw_text: string | null;
+  // The person's typed words on a composite capture (M9.6 T4, ADR-061 §5); null otherwise.
+  text_body: string | null;
   node_paths: string[];
   // Id-resolved projection of `node_paths` (M8.1 T4) — see `CaptureNodeRef`. May be shorter than
   // `node_paths` (an unresolved path is simply absent); the client falls back to a plain path pill
@@ -84,15 +92,38 @@ export interface CaptureView {
   // The capture's origin (M8.1, ADR-054 §4): `mcp`/`chat`, or null for a web capture (falls back
   // to `kind` for the source badge).
   source: string | null;
-  // The backing media for an image OR voice capture (M9 T3/T4) — the photo/audio + its derivation
-  // status; null for text/mcp/chat captures. Rendered via `GET /media/{media.id}` (ADR-060 §7).
-  media: CaptureMedia | null;
+  // The capture's media parts (M9.6 T4, ADR-061 §11 — singular → list): 0..N photos + <=1 voice,
+  // ordered by part_ordinal. Empty for text/mcp/chat captures. Each rendered via `GET /media/{id}`.
+  media: CaptureMedia[];
+  // The capture's most recent processing `agent_runs` id (M9.6 T4, ADR-061 §10) — the Activity-tab
+  // deep-link so the user can follow the (per-part) processing. Null until a run starts.
+  run_id: string | null;
 }
 
-// 202 body shared by text/voice/retry/follow-up. The real status is polled via GET /captures.
+// 202 body shared by submit/retry/follow-up. The real status is polled via GET /captures.
 export interface CaptureAcceptedResponse {
   capture_id: string;
   status: string;
+}
+
+// --- Composite draft (M9.6 T1, ADR-061 §3) ---
+// One media part on an open draft — the compose surface renders its thumbnail/player + an 'x'.
+export interface DraftPart {
+  id: string;
+  kind: MediaKind;
+  status: MediaStatus;
+  part_ordinal: number | null;
+  mime_type: string | null;
+}
+
+// The active compose draft (POST /capture/draft): the resume payload — text body + ordinal-ordered
+// parts — so the compose screen rebuilds after app-close.
+export interface DraftView {
+  capture_id: string;
+  status: string;
+  text_body: string | null;
+  parts: DraftPart[];
+  created_at: string | null;
 }
 
 // --- Meta (03-api.md §Meta, M2) ---

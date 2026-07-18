@@ -41,7 +41,9 @@ export function CaptureDetailBody({ capture }: { capture: CaptureView }) {
         <SourceBadge source={capture.source ?? capture.kind} />
         <span style={{ fontSize: 11, color: 'var(--muted)' }}>{capture.status}</span>
       </div>
-      {capture.media && <CaptureMediaBlock media={capture.media} />}
+      {capture.media.map((m) => (
+        <CaptureMediaBlock key={m.id} media={m} />
+      ))}
       {capture.raw_text && (
         <p
           style={{

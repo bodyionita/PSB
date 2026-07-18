@@ -146,19 +146,25 @@ const EXPAND_THRESHOLD = 180;
 
 function CaptureRow({ capture }: { capture: CaptureView }) {
   const retry = useRetryCapture();
+  const activityNav = useActivityNav();
   const [expanded, setExpanded] = useState(false);
   const isVoice = capture.kind === 'voice';
   const isImage = capture.kind === 'image';
-  const hasText = capture.raw_text != null && capture.raw_text.trim() !== '';
+  const isComposite = capture.kind === 'composite';
+  // A composite shows the person's typed words (text_body); other kinds show the raw/derived text.
+  const bodyText = isComposite ? capture.text_body : capture.raw_text;
+  const hasText = bodyText != null && bodyText.trim() !== '';
   // Status is conveyed by the pill; the snippet just labels a not-yet-derived voice/photo capture.
   const snippet = hasText
-    ? capture.raw_text
+    ? bodyText
     : isVoice
       ? 'Voice note'
       : isImage
         ? 'Photo'
-        : '…';
-  const expandable = hasText && (capture.raw_text as string).length > EXPAND_THRESHOLD;
+        : isComposite
+          ? `${capture.media.length} attachment${capture.media.length === 1 ? '' : 's'}`
+          : '…';
+  const expandable = hasText && (bodyText as string).length > EXPAND_THRESHOLD;
   const showNudge =
     capture.follow_up_question != null && capture.follow_up_answer == null;
 
@@ -174,7 +180,7 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
             <span aria-hidden style={{ fontSize: 15, color: 'var(--muted)' }}>
-              {isVoice ? '◉' : isImage ? '❏' : '✎'}
+              {isVoice ? '◉' : isImage ? '❏' : isComposite ? '◆' : '✎'}
             </span>
             <StatusPill status={capture.status} />
           </div>
@@ -184,10 +190,13 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
           />
         </div>
 
-        {/* The capture's photo/voice (M9 T5, ADR-060 §7) — thumbnail → lightbox, or inline player. */}
-        {capture.media && (
-          <div style={{ marginTop: 12 }}>
-            <CaptureMediaBlock media={capture.media} />
+        {/* The capture's media parts (M9.6 T4, ADR-061 §11 — singular → list): each photo is a
+            thumbnail → lightbox, each voice an inline player, in part order. */}
+        {capture.media.length > 0 && (
+          <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {capture.media.map((m) => (
+              <CaptureMediaBlock key={m.id} media={m} />
+            ))}
           </div>
         )}
 
@@ -237,6 +246,28 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
           <div style={{ marginTop: 10 }}>
             <NodeRefChips paths={capture.node_paths} refs={capture.node_refs} />
           </div>
+        )}
+
+        {/* Deep-link into the capture's Activity run (M9.6 T5, ADR-061 §10) so the user can follow
+            the per-part processing. Rendered only when the run is known AND the nav provides
+            `openRun` (degrades to nothing otherwise — same convention as the rest of activityNav). */}
+        {capture.run_id && activityNav?.openRun && (
+          <button
+            type="button"
+            onClick={() => activityNav.openRun?.(capture.run_id as string)}
+            style={{
+              marginTop: 10,
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--accent)',
+              cursor: 'pointer',
+            }}
+          >
+            See processing →
+          </button>
         )}
 
         {capture.status === 'failed' && (
