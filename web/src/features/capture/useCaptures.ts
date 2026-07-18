@@ -72,6 +72,9 @@ export function useDraft(enabled: boolean) {
     enabled,
     staleTime: Infinity, // the draft only changes via the mutations below, which set it directly
     gcTime: 0,
+    // Don't re-POST open-draft on every window/tab focus — it would resume the same draft, but a
+    // background write for a passive read is wasteful; the mutations invalidate when it matters.
+    refetchOnWindowFocus: false,
   });
 }
 
