@@ -687,7 +687,10 @@ class CapturePipeline:
         try:
             inter = _Interaction(capture_id=capture_id, kind=f"{record.kind}-reprocess")
             created_local = self._local(record.created_at)
-            organize = await self._organize(self._combined_text(record), anchor=created_local)
+            num_parts = await self._composite_part_count(record)
+            organize = await self._organize(
+                self._combined_text(record), anchor=created_local, num_parts=num_parts
+            )
             paths, content_ids = await self._resolve_and_write(
                 organize,
                 capture_id=capture_id,
@@ -699,7 +702,10 @@ class CapturePipeline:
             await self._index_nodes(paths)
             # Rebuild the derived-tier `node_media` link off the replayed content nodes (ADR-060 §3:
             # it falls out of reprocess like the search index does — no independent durability).
-            await self._link_node_media(capture_id, content_ids)
+            # Composite: per-node attribution from the replayed markers (ADR-061 §7).
+            await self._link_node_media(
+                capture_id, content_ids, node_parts=self._node_parts(organize, record)
+            )
             await self._store.mark_status(capture_id, INDEXED)
             await self._backup.request_commit(f"reprocess {capture_id}")
             # Per-capture heal detail (ADR-042 auditability): coercions (ADR-039) come off the
@@ -884,7 +890,8 @@ class CapturePipeline:
             await self._store.mark_status(capture_id, ORGANIZING)
             t1 = time.monotonic()
             created_local = self._local(record.created_at)
-            organize = await self._organize(transcript, anchor=created_local)
+            num_parts = await self._composite_part_count(record)
+            organize = await self._organize(transcript, anchor=created_local, num_parts=num_parts)
             inter.timings_ms["organize"] = int((time.monotonic() - t1) * 1000)
             inter.organize = {
                 "model": organize.model_used or None,
@@ -912,7 +919,10 @@ class CapturePipeline:
             inter.index = await self._index_nodes(paths)
             # Derived-tier `node_media` link (ADR-060 §3): recompute this capture's node↔media links
             # against the freshly-indexed content nodes. AFTER indexing (the fk needs the row).
-            await self._link_node_media(capture_id, content_ids)
+            # Composite: per-node attribution from the organizer's `parts` (ADR-061 §7).
+            await self._link_node_media(
+                capture_id, content_ids, node_parts=self._node_parts(organize, record)
+            )
             await self._store.mark_status(capture_id, INDEXED)
             await self._backup.request_commit(f"capture {capture_id}")
 
@@ -1007,7 +1017,10 @@ class CapturePipeline:
             await self._store.mark_status(capture_id, ORGANIZING)
             t0 = time.monotonic()
             created_local = self._local(record.created_at)
-            organize = await self._organize(text_of(record), anchor=created_local)
+            num_parts = await self._composite_part_count(record)
+            organize = await self._organize(
+                text_of(record), anchor=created_local, num_parts=num_parts
+            )
             inter.timings_ms["organize"] = int((time.monotonic() - t0) * 1000)
             inter.organize = {
                 "model": organize.model_used or None,
@@ -1043,7 +1056,10 @@ class CapturePipeline:
             inter.index = await self._index_nodes(paths)
             # Rebuild the derived-tier `node_media` link against the fresh content nodes (ADR-060):
             # a reorganize/retry mints new content-node ids, so the media re-attaches to them here.
-            await self._link_node_media(capture_id, content_ids)
+            # Composite: per-node attribution from the re-organized markers (ADR-061 §7).
+            await self._link_node_media(
+                capture_id, content_ids, node_parts=self._node_parts(organize, record)
+            )
             await self._store.mark_status(capture_id, INDEXED)
             await self._backup.request_commit(commit_reason)
             await self._finish_run(
@@ -1069,7 +1085,7 @@ class CapturePipeline:
             logger.exception("indexing failed for capture nodes %s (ignored)", paths)
             return {"error": f"{type(exc).__name__}: {exc}"}
 
-    async def _organize(self, text: str, *, anchor: datetime) -> OrganizeResult:
+    async def _organize(self, text: str, *, anchor: datetime, num_parts: int = 0) -> OrganizeResult:
         """Run the organize chain and validate; unusable output → single ``inbox/`` node.
 
         The capture text is placed behind hard delimiters in a user message and the system prompt
@@ -1115,6 +1131,9 @@ class CapturePipeline:
             max_nodes=self._settings.organizer_max_nodes,
             max_tags=self._settings.organizer_max_tags,
             max_edges=self._settings.organizer_max_edges,
+            # Composite part count for per-node `parts:[…]` bounds-checking (M9.6, ADR-061 §7); 0
+            # for a non-composite capture, so `parts` is always empty there.
+            num_parts=num_parts,
         )
         if coerced:
             logger.info(
@@ -1511,25 +1530,72 @@ class CapturePipeline:
         }
         return _compose_raw_text(record.text_body, settled)
 
-    async def _link_node_media(self, capture_id: str, content_node_ids: list[str]) -> None:
-        """Rebuild this capture's derived-tier ``node_media`` links (ADR-060 §1/§3): attach the
-        capture's media to its just-written **content** nodes. Called AFTER indexing (the
+    async def _link_node_media(
+        self,
+        capture_id: str,
+        content_node_ids: list[str],
+        *,
+        node_parts: list[tuple[int, ...]] | None = None,
+    ) -> None:
+        """Rebuild this capture's derived-tier ``node_media`` links (ADR-060 §1/§3, ADR-061 §7):
+        attach the capture's media to its just-written **content** nodes. Called AFTER indexing (the
         ``node_id`` fk needs the ``nodes`` row). Best-effort (rule 7): the links are derived — a
         failure (e.g. indexing didn't materialize a node yet) leaves the nodes intact and the link
         rebuilds on the next reindex/reprocess, never failing an already-written capture. A pipeline
-        wired without the media substrate (some tests) simply skips it."""
+        wired without the media substrate (some tests) simply skips it.
+
+        ``node_parts`` (composite, aligned 1:1 with ``content_node_ids``) carries each node's
+        bounds-checked 1-based part indices for **per-node attribution** (ADR-061 §7): a media part
+        links only to the node(s) whose ``parts`` name it (its 1-based ordinal position). Two
+        fallbacks keep nothing stranded: an **unattributed** part (named by no node) links to
+        nothing — capture-only; **total attribution failure** (no node names any part — old model /
+        parse miss) → **all-to-all** (parity with the pre-M9.6 behaviour). ``node_parts`` None
+        (single-part voice/image, non-composite) is always all-to-all."""
         if self._media_store is None or self._node_media_store is None:
             return
         try:
-            media = await self._media_store.list_by_capture_id(capture_id)
+            media = await self._media_store.list_by_capture_id(capture_id)  # ordinal order
             media_ids = [m.id for m in media]
             if not media_ids:
                 return  # text/chat capture — nothing to link
-            await self._node_media_store.rebuild_for_media(
-                media_ids=media_ids, node_ids=content_node_ids
-            )
+            any_attribution = node_parts is not None and any(node_parts)
+            if not any_attribution:
+                # Non-composite, or total attribution failure → all-to-all (nothing stranded).
+                await self._node_media_store.rebuild_for_media(
+                    media_ids=media_ids, node_ids=content_node_ids
+                )
+                return
+            # Per-node attribution: map each part (by 1-based ordinal position) to the nodes that
+            # named it, then rebuild each media's links against exactly those nodes ([] = capture-
+            # only). Rebuild per media so an unattributed part is wiped to no links.
+            nodes_by_media: dict[str, list[str]] = {m.id: [] for m in media}
+            for node_id, parts in zip(content_node_ids, node_parts, strict=True):
+                for idx in parts:
+                    if 1 <= idx <= len(media):
+                        nodes_by_media[media[idx - 1].id].append(node_id)
+            for media_id, node_ids in nodes_by_media.items():
+                await self._node_media_store.rebuild_for_media(
+                    media_ids=[media_id], node_ids=node_ids
+                )
         except Exception:  # noqa: BLE001 — the link is derived-tier; never fail a written capture
             logger.exception("node_media link-write failed for capture %s (ignored)", capture_id)
+
+    @staticmethod
+    def _node_parts(
+        organize: OrganizeResult, record: CaptureRecord
+    ) -> list[tuple[int, ...]] | None:
+        """Per-node composite attribution indices aligned with the organize result's content nodes
+        (M9.6, ADR-061 §7), or ``None`` for a non-composite capture (all-to-all linkage)."""
+        if record.kind != KIND_COMPOSITE:
+            return None
+        return [n.parts for n in organize.nodes]
+
+    async def _composite_part_count(self, record: CaptureRecord) -> int:
+        """The number of media parts a composite capture carries (for organizer ``parts`` bounds-
+        checking); 0 for a non-composite capture or an unwired media substrate."""
+        if record.kind != KIND_COMPOSITE or self._media_store is None:
+            return 0
+        return len(await self._media_store.list_by_capture_id(record.id))
 
     # --- agent_runs interaction log (ADR-021) -------------------------------------------
 

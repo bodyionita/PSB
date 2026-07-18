@@ -27,11 +27,13 @@ from ..text import fold_diacritics
 
 # --- Versioned prompt constants (ADR-019 §4). Bump the suffix on any wording change. ---
 
-# v7 (M9 T3): the `<photo: …>` screenshot-attribution rule (ADR-057 §5 organizer layer) — a derived
-# photo description is shared material, its contained messages attributed to the people inside the
-# image, never the person who saved it. v6 (M8.2): symbolic time-references + code-computed
-# occurred/tokens (ADR-056) and the `interiority` stamp + inner-voice extraction (ADR-055).
-ORGANIZER_PROMPT_VERSION = "organizer-v7"
+# v8 (M9.6): composite indexed part markers `[[part N · kind]]` + per-node `parts:[…]` attribution
+# (ADR-061 §7), superseding the `<photo: …>` fence *format* while preserving its two-layer semantic
+# (photo = shared material; voice = the person's own words); the single-part `<photo: …>` rule stays
+# for legacy replay. v7 (M9 T3): the `<photo: …>` screenshot-attribution rule (ADR-057 §5 organizer
+# layer). v6 (M8.2): symbolic time-references + code-computed occurred/tokens (ADR-056) and the
+# `interiority` stamp + inner-voice extraction (ADR-055).
+ORGANIZER_PROMPT_VERSION = "organizer-v8"
 NUDGE_PROMPT_VERSION = "nudge-v2"  # v2: sourced from the raw capture; explicit language match
 
 # The inner-voice dimension every content node carries (ADR-055 §1). Orthogonal to `type`.
@@ -49,6 +51,7 @@ Return ONLY a JSON object, no prose, in exactly this shape:
 {"nodes": [{"title": str, "type": str, "plane": str|null, "planes": [str], "tags": [str],
             "body": str, "interiority": "internal"|"external"|"mixed",
             "time_refs": [{"phrase": str, "kind": str, ...}], "arose_from": int|null,
+            "parts": [int],
             "entities": [{"name": str, "type": str, "rel": str, "disambig": str|null}]}]}
 
 Rules:
@@ -99,14 +102,22 @@ Rules:
   from the existing vocabulary below when one genuinely fits.
 - "body" is the cleaned, lightly-structured node content in Markdown (do not invent facts). Keep
   every time expression as natural language — do not write dates as tokens or ISO strings yourself.
-- A capture may contain a photo the person saved, shown as a "<photo: ...>" placeholder holding a
-  vision description of that image (or "<photo — description unavailable>" if it could not be
-  derived — then just note that a photo was saved). Treat the description as SHARED MATERIAL — a
-  record of an image, not the person's own words. If it describes a screenshot of a conversation,
-  attribute the messages to the people named INSIDE the description (by name / bubble side), NEVER
-  to the person who saved the image and NEVER to "you"; the same holds for forwarded or quoted
-  content. Organize what the image shows into the fitting node(s); never copy the literal "<photo:"
-  wrapper into a title or body.
+- A capture may carry saved media, shown one of two ways:
+  (a) a single "<photo: ...>" placeholder holding a vision description of an image (or
+      "<photo — description unavailable>" if none could be derived);
+  (b) a multi-part capture, where each part is introduced by an indexed marker "[[part N · kind]]"
+      (N is 1-based; kind is "photo" or "voice") followed by that part's content, and the person's
+      own typed text (if any) leads before the markers.
+  A PHOTO's description is SHARED MATERIAL — a record of an image, NOT the person's own words: if it
+  is a screenshot of a conversation, attribute the messages to the people named INSIDE the
+  description (by name / bubble side), NEVER to the person who saved it and NEVER to "you"; the same
+  holds for forwarded or quoted content. A VOICE part's text is the person's OWN words (spoken) —
+  treat it like any spoken capture. Organize what the media shows/says into the fitting node(s);
+  never copy a literal "<photo:" or "[[part" wrapper into a title or body.
+- "parts": ONLY when the capture has "[[part N · kind]]" markers, set this to the list of 1-based
+  marker indices this node is ABOUT (a node reflecting a photo lists that photo's index; a voice
+  note narrating a photo may list both). A node about no specific part — or ANY capture with no
+  markers — omits "parts" or uses []. Never invent an index beyond the markers shown.
 - Write EVERY title, body, tag, and entity name in English. If the capture is in another language,
   translate its meaning into natural English — do not leave phrases in the original language.
 {tag_vocabulary}
@@ -182,6 +193,11 @@ class OrganizerNode:
     # list) of the sibling event node it arose from — the pipeline draws an event `led_to` internal
     # edge. None on any node with no such origin.
     arose_from: int | None = None
+    # Composite per-node media attribution (M9.6, ADR-061 §7): the **1-based** `[[part N · kind]]`
+    # marker indices this node is *about* — bounds-checked against the capture's part count (like
+    # `arose_from`). Empty for a non-composite capture or a node that references no part; the
+    # pipeline links each media part to only the node(s) whose `parts` name it.
+    parts: tuple[int, ...] = ()
     entities: tuple[OrganizerMention, ...] = ()
     in_inbox: bool = False
 
@@ -277,6 +293,7 @@ def validate_organizer_output(
     max_nodes: int,
     max_tags: int,
     max_edges: int,
+    num_parts: int = 0,
 ) -> tuple[tuple[OrganizerNode, ...], tuple[dict, ...], tuple[str, ...]]:
     """Pure validation of a parsed organize object into safe :class:`OrganizerNode`s + vocab
     proposals + the entity types coerced to ``memory`` (ADR-027/030/031/039/055/056).
@@ -298,6 +315,9 @@ def validate_organizer_output(
       date (fail-closed — the phrase stays prose).
     - ``arose_from`` (inner-voice extraction, ADR-055 §2) is remapped from the LLM's raw node index
       to the surviving node's result index; a dangling or self reference becomes ``None``.
+    - ``parts`` (composite attribution, ADR-061 §7) keeps only the **1-based** marker indices in
+      ``1..num_parts`` (deduped); out-of-range / non-int indices are dropped. Always empty when
+      ``num_parts == 0`` (a non-composite capture).
     - each entity mention keeps only a known ``entity_types`` type + a known ``edge_rels`` rel; an
       unknown one drops the mention and files a proposal.
     - a node with an empty title/body after stripping is dropped; at most ``max_nodes`` nodes,
@@ -378,6 +398,7 @@ def validate_organizer_output(
                 "occurred": occurred,
                 "occurred_end": occurred_end,
                 "interiority": _clean_interiority(raw.get("interiority")),
+                "parts": _clean_parts(raw.get("parts"), num_parts),
                 "entities": _clean_entities(
                     raw.get("entities"),
                     known_rels=known_rels,
@@ -412,6 +433,27 @@ def _clean_interiority(value: object) -> str:
     if isinstance(value, str) and value.strip().lower() in INTERIORITY_VALUES:
         return value.strip().lower()
     return _DEFAULT_INTERIORITY
+
+
+def _clean_parts(value: object, num_parts: int) -> tuple[int, ...]:
+    """The bounds-checked 1-based composite part indices a node is attributed to (M9.6, ADR-061 §7).
+    Keeps ints (or digit strings) in ``1..num_parts``, deduped in order; drops everything else.
+    Always empty when ``num_parts <= 0`` (a non-composite capture has no markers to attribute)."""
+    if num_parts <= 0 or not isinstance(value, list):
+        return ()
+    seen: list[int] = []
+    for item in value:
+        if isinstance(item, bool):  # bool is an int subclass — never a marker index
+            continue
+        if isinstance(item, int):
+            idx = item
+        elif isinstance(item, str) and item.strip().isdigit():
+            idx = int(item.strip())
+        else:
+            continue
+        if 1 <= idx <= num_parts and idx not in seen:
+            seen.append(idx)
+    return tuple(seen)
 
 
 def _clean_arose_from(value: object) -> int | None:

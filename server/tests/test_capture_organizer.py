@@ -36,7 +36,7 @@ EDGE_RELS = ["involves", "about", "part_of", "led_to", "follows", "at"]
 ENTITY_TYPES = ["person", "place", "topic", "event", "project"]
 
 
-def _validate(parsed, *, anchor=ANCHOR, max_nodes=8, max_tags=12, max_edges=12):
+def _validate(parsed, *, anchor=ANCHOR, max_nodes=8, max_tags=12, max_edges=12, num_parts=0):
     return validate_organizer_output(
         parsed,
         planes=PLANES,
@@ -47,7 +47,27 @@ def _validate(parsed, *, anchor=ANCHOR, max_nodes=8, max_tags=12, max_edges=12):
         max_nodes=max_nodes,
         max_tags=max_tags,
         max_edges=max_edges,
+        num_parts=num_parts,
     )
+
+
+def _one_node(**over):
+    node = {"title": "T", "type": "memory", "body": "b"}
+    node.update(over)
+    return {"nodes": [node]}
+
+
+def test_parts_bounds_checked_against_num_parts():
+    # M9.6 T3 (ADR-061 §7): `parts` keeps only in-range 1-based indices, deduped; out-of-range and
+    # non-int are dropped; a digit string is accepted.
+    nodes, _p, _c = _validate(_one_node(parts=[1, 3, 3, 0, 5, "2", "x", True]), num_parts=3)
+    assert nodes[0].parts == (1, 3, 2)
+
+
+def test_parts_empty_when_not_composite():
+    # num_parts=0 (a non-composite capture) → `parts` is always empty even if the model emits some.
+    nodes, _p, _c = _validate(_one_node(parts=[1, 2]), num_parts=0)
+    assert nodes[0].parts == ()
 
 
 # --- parse_organizer_json ---------------------------------------------------------------

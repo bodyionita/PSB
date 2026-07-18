@@ -288,3 +288,78 @@ async def test_composite_rederive_recovers_after_stt_failure(tmp_path: Path):
     assert "the recovered words" in raw and placeholder("voice") not in raw
     body = (root / store.records[draft.id].node_paths[0]).read_text(encoding="utf-8")
     assert "the recovered words" in body
+
+
+# --- T3: per-node media attribution (ADR-061 §7) ---
+def _parts_responder(node_parts: list[list[int]]):
+    """Organizer responder emitting one content node per entry, each with the given `parts` list."""
+
+    def responder(messages):
+        system = messages[0].content
+        if "organize a person's raw capture" in system:
+            nodes = [
+                {
+                    "title": f"Node {i}",
+                    "type": "memory",
+                    "plane": "Ideas",
+                    "planes": ["Ideas"],
+                    "tags": ["x"],
+                    "body": f"body {i}",
+                    "parts": parts,
+                    "entities": [],
+                }
+                for i, parts in enumerate(node_parts)
+            ]
+            return json.dumps({"nodes": nodes})
+        return "and then?"
+
+    return responder
+
+
+async def _submit_two_photo_composite(pipeline):
+    draft = await pipeline.open_or_resume_draft()
+    await pipeline.set_draft_text(draft.id, "caption")
+    m0 = await pipeline.add_draft_part(draft.id, PNG, filename="a.png", kind=KIND_PHOTO)
+    m1 = await pipeline.add_draft_part(draft.id, PNG, filename="b.png", kind=KIND_PHOTO)
+    await pipeline.submit_draft(draft.id)
+    await pipeline.drain()
+    return draft, m0, m1
+
+
+async def test_attribution_links_each_part_to_its_node(tmp_path: Path):
+    # node 0 → part 1, node 1 → part 2: each media links to exactly its one node (not all-to-all).
+    chat = FakeChatProvider("fake-chat", responder=_parts_responder([[1], [2]]))
+    pipeline, _s, _b, _r, _root = _make_pipeline(tmp_path, chat=chat)
+    nm = pipeline._node_media_store
+    _draft, m0, m1 = await _submit_two_photo_composite(pipeline)
+
+    m0_nodes = {n for (n, m) in nm.links if m == m0.id}
+    m1_nodes = {n for (n, m) in nm.links if m == m1.id}
+    assert len(m0_nodes) == 1 and len(m1_nodes) == 1
+    assert m0_nodes != m1_nodes  # attributed to different nodes
+    assert len(nm.links) == 2  # NOT the 4 of all-to-all
+
+
+async def test_unattributed_part_is_capture_only(tmp_path: Path):
+    # Only part 1 is referenced; part 2 (m1) is named by no node → links to nothing (capture-only).
+    chat = FakeChatProvider("fake-chat", responder=_parts_responder([[1], []]))
+    pipeline, _s, _b, _r, _root = _make_pipeline(tmp_path, chat=chat)
+    nm = pipeline._node_media_store
+    _draft, m0, m1 = await _submit_two_photo_composite(pipeline)
+
+    assert any(m == m0.id for (_n, m) in nm.links)
+    assert not any(m == m1.id for (_n, m) in nm.links)  # unattributed → no node link
+
+
+async def test_total_attribution_failure_falls_back_all_to_all(tmp_path: Path):
+    # No node names any part (older model / parse miss) → all-to-all fallback (nothing stranded).
+    chat = FakeChatProvider("fake-chat", responder=_parts_responder([[], []]))
+    pipeline, _s, _b, _r, _root = _make_pipeline(tmp_path, chat=chat)
+    nm = pipeline._node_media_store
+    _draft, m0, m1 = await _submit_two_photo_composite(pipeline)
+
+    m0_nodes = {n for (n, m) in nm.links if m == m0.id}
+    m1_nodes = {n for (n, m) in nm.links if m == m1.id}
+    # Both media link to both nodes (2 nodes × 2 media = 4 links).
+    assert len(m0_nodes) == 2 and m0_nodes == m1_nodes
+    assert len(nm.links) == 4
