@@ -12,6 +12,7 @@ from app.dependencies import (
     get_edge_consolidation_service,
     get_identity_capsule_service,
     get_merge_service,
+    get_node_delete_service,
     get_registry,
     get_reindex_service,
     get_reprocess_service,
@@ -24,6 +25,11 @@ from app.providers.base import ProviderUnavailable
 from app.providers.registry import ProviderReport
 from app.providers.status import ProviderError
 from app.routers import admin
+from app.services.node_delete import (
+    NodeDeleteIsContent,
+    NodeDeleteNotFound,
+    NodeDeleteNotOrphan,
+)
 from app.services.store_backup import BackupResult
 from app.tags.consolidation import TagMerge
 from app.tags.service import ConsolidationProposal
@@ -421,6 +427,59 @@ def test_entities_merge_400_bad_merge():
     client = _merge_client(FakeMerge(error=BadMerge("cannot merge a node into itself")))
     resp = client.post(f"{PREFIX}/admin/entities/merge", json={"loser": "x", "survivor": "x"})
     assert resp.status_code == 400
+
+
+# --- POST /admin/nodes/{id}/delete (ADR-064 §5, M9.8 T5) ---
+class FakeNodeDelete:
+    """delete returns a run_id, or raises the routing/validation error the router maps."""
+
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self._error = error
+        self.deleted: str | None = None
+
+    async def delete(self, node_id: str) -> str:
+        if self._error is not None:
+            raise self._error
+        self.deleted = node_id
+        return "run-del-1"
+
+
+def _node_delete_client(fake: FakeNodeDelete) -> TestClient:
+    app = FastAPI()
+    app.include_router(admin.router, prefix=PREFIX)
+    app.dependency_overrides[get_node_delete_service] = lambda: fake
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def test_node_delete_returns_202_run_id():
+    fake = FakeNodeDelete()
+    resp = _node_delete_client(fake).post(f"{PREFIX}/admin/nodes/hub-1/delete")
+    assert resp.status_code == 202
+    assert resp.json() == {"run_id": "run-del-1"}
+    assert fake.deleted == "hub-1"
+
+
+def test_node_delete_404_unknown():
+    resp = _node_delete_client(FakeNodeDelete(error=NodeDeleteNotFound("x"))).post(
+        f"{PREFIX}/admin/nodes/x/delete"
+    )
+    assert resp.status_code == 404
+
+
+def test_node_delete_400_content_node():
+    resp = _node_delete_client(FakeNodeDelete(error=NodeDeleteIsContent("m"))).post(
+        f"{PREFIX}/admin/nodes/m/delete"
+    )
+    assert resp.status_code == 400
+
+
+def test_node_delete_409_still_referenced():
+    resp = _node_delete_client(FakeNodeDelete(error=NodeDeleteNotOrphan(3))).post(
+        f"{PREFIX}/admin/nodes/hub-1/delete"
+    )
+    assert resp.status_code == 409
+    assert "3 canonical edge" in resp.json()["detail"]
 
 
 # --- GET /admin/providers (ADR-044, M4 follow-up) ---

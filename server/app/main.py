@@ -77,6 +77,7 @@ from .services.media_derivation import build_media_derivation_service
 from .services.media_store import MediaFiles, PgMediaStore
 from .services.model_routing import build_model_routing
 from .services.nl_time import NlTimeClassifier
+from .services.node_delete import NodeDeleteService
 from .services.node_media_store import PgNodeMediaStore
 from .services.node_time_edit import NodeTimeEditService
 from .services.occurred_enrichment import build_occurred_enrichment_service
@@ -319,6 +320,18 @@ async def lifespan(app: FastAPI):
         run_store=run_store,
         vocab=vocabulary_service,
         decisions=merge_decision_store,
+    )
+    # Orphan-hub delete (ADR-064 §5, M9.8 T5): the net-new node-delete path graph-health's orphan
+    # GC routes a zero-degree entity hub to — git-rm the file + prune its index rows + force-commit,
+    # under an `agent_runs` row (P8). Content orphans route to capture-remove instead (rejected).
+    app.state.node_delete_service = NodeDeleteService(
+        settings=settings,
+        entity_store=entity_store,
+        node_writer=node_writer,
+        index_store=index_store,
+        store_backup=store_backup,
+        run_store=run_store,
+        vocab=vocabulary_service,
     )
     # Nightly dedup sweep (M6 task 5, ADR-049): near-duplicate content nodes file a dedup-proposal
     # the user resolves (merge/keep/link) via the Review surface below. DB-only (candidate reads +
@@ -580,6 +593,7 @@ async def lifespan(app: FastAPI):
             await app.state.tag_consolidation_service.drain()
             await app.state.edge_consolidation_service.drain()
             await app.state.merge_service.drain()
+            await app.state.node_delete_service.drain()
             await app.state.chat_service.drain()
             await app.state.identity_capsule_service.drain()
             await pipeline.drain()

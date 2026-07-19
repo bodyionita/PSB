@@ -26,6 +26,7 @@ from .services.capture_removal import CaptureRemovalService
 from .services.media_derivation import MediaDerivationService
 from .services.media_store import MediaFiles, MediaStore
 from .services.model_routing import ModelRoutingService
+from .services.node_delete import NodeDeleteService
 from .services.node_time_edit import NodeTimeEditService
 from .services.reindex import ReindexService
 from .services.reprocess import ReprocessService
@@ -158,6 +159,10 @@ def get_node_time_edit_service(request: Request) -> NodeTimeEditService:
 
 def get_merge_service(request: Request) -> MergeService:
     return request.app.state.merge_service
+
+
+def get_node_delete_service(request: Request) -> NodeDeleteService:
+    return request.app.state.node_delete_service
 
 
 def get_vocabulary_service(request: Request) -> VocabularyService:

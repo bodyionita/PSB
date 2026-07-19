@@ -777,6 +777,13 @@ class EntityMergeAcceptedResponse(BaseModel):
     run_id: str
 
 
+class NodeDeleteAcceptedResponse(BaseModel):
+    """202 body for the orphan-hub delete (ADR-064 §5) — the ``agent_runs`` id of the background
+    delete run (git-rm + index prune + commit)."""
+
+    run_id: str
+
+
 # --- Tag consolidation (03-api §Agents & admin, M2 / ADR-024 §2) ---
 class TagMergeItem(BaseModel):
     """One merge group: fold ``variants`` into ``canonical`` (ADR-024). Wire shape for both the

@@ -19,6 +19,7 @@ from ..dependencies import (
     get_edge_consolidation_service,
     get_identity_capsule_service,
     get_merge_service,
+    get_node_delete_service,
     get_oauth_service,
     get_registry,
     get_reindex_service,
@@ -40,6 +41,7 @@ from ..models import (
     InboundEdgeModel,
     McpRevokeAllResponse,
     MergeSideModel,
+    NodeDeleteAcceptedResponse,
     ProviderErrorModel,
     ProvidersResponse,
     ProviderStatusItem,
@@ -59,6 +61,12 @@ from ..oauth.service import OAuthService
 from ..providers.base import ProviderUnavailable
 from ..providers.registry import ProviderRegistry
 from ..services.capture_pipeline import CaptureNotFound, CapturePipeline
+from ..services.node_delete import (
+    NodeDeleteIsContent,
+    NodeDeleteNotFound,
+    NodeDeleteNotOrphan,
+    NodeDeleteService,
+)
 from ..services.reindex import ReindexService
 from ..services.reprocess import ReprocessService
 from ..services.store_backup import StoreBackupService
@@ -270,6 +278,35 @@ async def merge_entities(
         inbound_count=proposal.inbound_count,
         inbound=[InboundEdgeModel(**vars(e)) for e in proposal.inbound],
     )
+
+
+@router.post(
+    "/nodes/{node_id}/delete",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=NodeDeleteAcceptedResponse,
+)
+async def delete_node(
+    node_id: str,
+    service: NodeDeleteService = Depends(get_node_delete_service),
+) -> NodeDeleteAcceptedResponse:
+    """Delete a zero-degree orphan **hub** (ADR-064 §5) — git-rm the file + prune its index rows +
+    force-commit in the background (``202 {run_id}``). ``404`` unknown/tombstone; ``400`` a content
+    node (route it to ``DELETE /captures/{id}`` — capture-remove, so a reprocess can't resurrect
+    it); ``409`` a still-referenced node (route it to Merge). Never auto-deletes (rule 2)."""
+    try:
+        run_id = await service.delete(node_id)
+    except NodeDeleteNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="node not found"
+        ) from None
+    except NodeDeleteIsContent:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="node is a content node — remove its capture instead (DELETE /captures/{id})",
+        ) from None
+    except NodeDeleteNotOrphan as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return NodeDeleteAcceptedResponse(run_id=run_id)
 
 
 @router.post(
