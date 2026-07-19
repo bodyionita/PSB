@@ -27,13 +27,18 @@ from ..text import fold_diacritics
 
 # --- Versioned prompt constants (ADR-019 §4). Bump the suffix on any wording change. ---
 
+# v9 (M9.7): chat-screenshot SELF-ATTRIBUTION (ADR-062 §3) — the vision layer now emits per-message
+# `[left · Name]` / `[right]` lines (ADR-062 §2), so the organizer maps `[right]` → the person's OWN
+# words (no self-entity, phantom-sender ban), `[left · Name]` → that named person, `quoting Name` →
+# the quoted party; own-chat by default, a "not mine" text note overriding. Replaces v7/v8's "never
+# you / attribute to the people inside" rule, which was wrong for the common own-chat case.
 # v8 (M9.6): composite indexed part markers `[[part N · kind]]` + per-node `parts:[…]` attribution
 # (ADR-061 §7), superseding the `<photo: …>` fence *format* while preserving its two-layer semantic
 # (photo = shared material; voice = the person's own words); the single-part `<photo: …>` rule stays
 # for legacy replay. v7 (M9 T3): the `<photo: …>` screenshot-attribution rule (ADR-057 §5 organizer
 # layer). v6 (M8.2): symbolic time-references + code-computed occurred/tokens (ADR-056) and the
 # `interiority` stamp + inner-voice extraction (ADR-055).
-ORGANIZER_PROMPT_VERSION = "organizer-v8"
+ORGANIZER_PROMPT_VERSION = "organizer-v9"
 NUDGE_PROMPT_VERSION = "nudge-v2"  # v2: sourced from the raw capture; explicit language match
 
 # The inner-voice dimension every content node carries (ADR-055 §1). Orthogonal to `type`.
@@ -108,12 +113,27 @@ Rules:
   (b) a multi-part capture, where each part is introduced by an indexed marker "[[part N · kind]]"
       (N is 1-based; kind is "photo" or "voice") followed by that part's content, and the person's
       own typed text (if any) leads before the markers.
-  A PHOTO's description is SHARED MATERIAL — a record of an image, NOT the person's own words: if it
-  is a screenshot of a conversation, attribute the messages to the people named INSIDE the
-  description (by name / bubble side), NEVER to the person who saved it and NEVER to "you"; the same
-  holds for forwarded or quoted content. A VOICE part's text is the person's OWN words (spoken) —
-  treat it like any spoken capture. Organize what the media shows/says into the fitting node(s);
-  never copy a literal "<photo:" or "[[part" wrapper into a title or body.
+  A VOICE part's text is the person's OWN words (spoken) — treat it like any spoken capture. A
+  non-chat PHOTO's description is a record of an image the person saved — organize what it shows
+  into the fitting node(s). Never copy a literal "<photo:" or "[[part" wrapper into a title or body.
+- CHAT SCREENSHOTS — a photo whose description begins "Chat screenshot" and lists per-message lines
+  tagged by bubble side. By default this is a screenshot of the PERSON'S OWN conversation. Map the
+  tags exactly like this:
+    - "[right]" lines (right-hand bubbles) are the PERSON'S OWN words — organize them first-person,
+      exactly like any note or voice memo they wrote. NEVER mint a person/entity for the person
+      themselves, and NEVER invent a "sender" / "unknown" / nameless person for the right side. The
+      right side is simply the person; a phantom third-party sender is forbidden.
+    - "[left · Name]" lines are that NAMED person — add them as a "person" entity and attribute
+      those words to them. In a 1:1 chat the "Header:" line names the other party, so use that name
+      for the left side even when the left bubbles carry no per-line label. In a group chat each
+      distinct left label is its own person.
+    - a "[... · quoting Name]" line is a reply-quote inset: attribute that quoted text to Name (the
+      quoted party), NOT to the bubble that contains it.
+  So a screenshot of the person and P1 becomes the person's own memory of that exchange (P1 an
+  "involves" person entity) — never "an unnamed sender", never "you said X to a sender". OVERRIDE:
+  if the person's OWN typed text says the chat is not theirs (e.g. "this is P1 and P2's chat, not
+  mine"), attribute every message purely by the on-screen names/sides and never as the person's own
+  words.
 - "parts": ONLY when the capture has "[[part N · kind]]" markers, set this to the list of 1-based
   marker indices this node is ABOUT (a node reflecting a photo lists that photo's index; a voice
   note narrating a photo may list both). A node about no specific part — or ANY capture with no

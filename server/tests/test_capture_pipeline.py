@@ -1029,11 +1029,12 @@ async def test_image_capture_happy_path(tmp_path: Path):
 
 
 async def test_image_screenshot_description_is_fenced_into_organize(tmp_path: Path):
-    # ADR-057 §5: a chat-screenshot description reaches organize wrapped as `<photo: …>` so the
-    # organizer treats the contained messages as shared material, not the person's own words. We
-    # assert the wiring (fence + the binding rule in the organizer prompt); LLM behaviour is not
-    # under test.
-    desc = 'Screenshot of a chat. Alex (left): "Friday?" Sam (right): "Yes, 7pm."'
+    # A single-image screenshot description reaches organize wrapped as `<photo: …>` (the fence
+    # wiring is unchanged). The organizer's INTERPRETATION of a chat screenshot is now the ADR-062
+    # §3 self-attribution mapping (own-chat by default: `[right]` → the person's own words), which
+    # replaces the ADR-057 §5 "never the sharer" rule. We assert the fence wiring + that the prompt
+    # carries the self-attribution mapping; LLM behaviour is not under test.
+    desc = "Chat screenshot. Header: Alex. [left · Alex] Friday? [right] Yes, 7pm."
     vlm = FakeChatProvider("fake-vlm", responder=_image_responder(desc))
     pipeline, store, _media, _runs, _vlm, _root = _make_image_pipeline(tmp_path, vlm=vlm)
 
@@ -1043,11 +1044,12 @@ async def test_image_screenshot_description_is_fenced_into_organize(tmp_path: Pa
     assert store.records[cid].raw_text == f"<photo: {desc}>"
     organize_user = vlm.last_messages[1].content
     assert desc in organize_user and "<photo:" in organize_user
-    # The organizer system prompt carries the screenshot-attribution rule (ADR-057 §5 org layer).
+    # The organizer system prompt carries the chat-screenshot self-attribution mapping (ADR-062 §3).
     from app.capture.organizer import ORGANIZER_SYSTEM_PROMPT
 
     assert '"<photo: ...>"' in ORGANIZER_SYSTEM_PROMPT
-    assert "never to" in ORGANIZER_SYSTEM_PROMPT.lower()
+    assert "chat screenshot" in ORGANIZER_SYSTEM_PROMPT.lower()
+    assert "[right]" in ORGANIZER_SYSTEM_PROMPT
 
 
 async def test_image_derivation_failure_walks_to_placeholder(tmp_path: Path):

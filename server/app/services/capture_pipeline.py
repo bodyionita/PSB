@@ -150,9 +150,10 @@ _IMAGE_MIME = {
 ALLOWED_IMAGE_EXTS = frozenset(_IMAGE_MIME)
 
 # The organizer-facing fence for a derived photo description (ADR-057 §5 second bullet / §6): the
-# description enters organize wrapped as `<photo: …>` so the organizer treats it as shared material
-# (a record of an image the person saved), never the person's own words — the binding
-# screenshot-attribution rule. An `unavailable` photo uses the self-describing placeholder as-is.
+# description enters organize wrapped as `<photo: …>` so the organizer knows it is a saved image (a
+# record of one), not the person's typed/spoken words. How a *chat screenshot* inside that fence is
+# attributed is the organizer prompt's job — ADR-062 §3 (v9): own-chat by default, `[right]` → the
+# person's own words. An `unavailable` photo uses the self-describing placeholder as-is.
 _PHOTO_FENCE = "<photo: {description}>"
 
 _ORPHAN_ERROR = "interrupted by restart"
