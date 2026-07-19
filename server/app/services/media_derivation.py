@@ -14,10 +14,13 @@ list) to ``pending`` and try again, e.g. after the VLM improves.
 Idempotent (rule 6): a ``derived`` item is skipped. Best-effort/visible (rule 7): a bad item never
 crashes a batch; the failure is recorded on the row (``error``) and in the run.
 
-One description contract (ADR-057 §5, binding): compact + factual, transcribe legible text
-**verbatim**, and — for a chat screenshot — use the screenshot's **own internal attribution**
-(names + bubble alignment), never presenting contained messages as the sharer's own words. That is
-the *vision layer*; the distiller/organizer layer (§5 second bullet) lives in the ingest prompts.
+One description contract (ADR-057 §5, refined by ADR-062 §2): compact + factual, transcribe legible
+text **verbatim**, and — for a chat screenshot — emit **disciplined per-message lines** tagged by
+bubble **side** (`[left · <name>]` / `[right]`) with reply-quote insets on their own `quoting`
+lines. The vision layer stays **identity-agnostic** (never says "you" — it cannot know whose chat
+it is); the organizer layer (v8, ADR-062 §3) owns mapping `[right]` → the user's own words. That
+split is the *vision layer*; the distiller/organizer layer (§5 2nd bullet) lives in the ingest
+prompts.
 """
 
 from __future__ import annotations
@@ -68,22 +71,44 @@ def placeholder(kind: str) -> str:
     return _PLACEHOLDERS.get(kind, "<media — unavailable>")
 
 
-# The photo description contract (ADR-057 §5 — vision layer). Binding: compact + factual, verbatim
-# legible text, and the two-part screenshot rule (say it's a screenshot; attribute contained
-# messages by the SCREENSHOT's own names + bubble alignment, never as the sharer's words).
+# The photo description contract (ADR-057 §5 — vision layer, refined by ADR-062 §2). Binding:
+# compact + factual, verbatim legible text; a chat screenshot emits disciplined **per-message
+# lines** tagged by bubble side + any visible sender label, with reply-quote insets on their own
+# attributed lines. The layer stays IDENTITY-AGNOSTIC — it never says "you" and never guesses whose
+# chat it is; mapping `[right]` → the user's own words is the organizer's job (v8, ADR-062 §3).
+# Non-chat images keep the one-paragraph description contract unchanged.
 MEDIA_DESCRIPTION_SYSTEM_PROMPT = """\
-You describe an image for a personal knowledge base. Output ONE compact, factual description of
-what the image literally shows — no preamble, no markdown, no guessing who unlabeled people are.
+You describe an image for a personal knowledge base. Output plain text only — no preamble, no
+markdown, no guessing who unlabeled people are.
 
 Rules:
-- Be concise and concrete. Describe only what is visible.
 - Transcribe ANY legible text in the image VERBATIM — many images are screenshots and the text is
   the whole point. Preserve wording, names and numbers exactly. If text is cut off or illegible,
   say so; never invent it.
-- If the image is a screenshot of a chat or messaging conversation, state that it is a screenshot,
-  and transcribe the messages using the SCREENSHOT'S OWN attribution: the names shown in the image
-  and the left/right bubble alignment. NEVER present those messages as the words of whoever shared
-  or sent the screenshot — they belong to the people inside the image.
+
+If the image is NOT a chat/messaging screenshot:
+- Output ONE compact, factual paragraph describing only what is visible. Be concise and concrete.
+
+If the image IS a screenshot of a chat or messaging conversation, use this exact structured format
+instead of a paragraph:
+- First line: `Chat screenshot (<app name>). Header: <the contact name or group title shown at the
+  top, or "unknown" if none is visible>.` — drop the `(<app name>)` parentheses entirely if the app
+  is not identifiable.
+- Then ONE line per message bubble, top-to-bottom, prefixed with a side tag:
+    - `[left · <name>] <message text>` for a bubble on the LEFT — include the sender's shown name
+      after `·` when a label is visible, else just `[left]`.
+    - `[right] <message text>` for a bubble on the RIGHT — add `· <name>` only if that side carries
+      a visible sender label.
+- Attribute STRICTLY by on-screen position and visible labels. Do NOT decide who "you" is, who
+  saved the screenshot, or who any unlabeled side really is — that is not your job. Never write
+  "you".
+- A reply bubble that inlines a QUOTED earlier message (recognizable by faded/recolored/inset
+  styling) is TWO lines: first the quoted inset on its own line attributed to the QUOTED party —
+  `[<side> · quoting <name>] <the quoted text>`, where `<side>` is the reply bubble's own side —
+  then the reply's own text on the next line for that same side. Never fold a quoted inset into the
+  replier's line.
+- Transcribe message text verbatim; keep it to the visible bubbles (skip UI chrome like timestamps
+  and read receipts unless they are the only content).
 """
 
 _DESCRIBE_INSTRUCTION = "Describe this image following the rules above."
