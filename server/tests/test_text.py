@@ -30,5 +30,5 @@ def test_ascii_and_empty_are_unchanged():
 
 
 def test_folding_is_idempotent():
-    once = fold_diacritics("Mădălina Ștefan")
+    once = fold_diacritics("Mădălina Cole")
     assert fold_diacritics(once) == once == "Madalina Cole"

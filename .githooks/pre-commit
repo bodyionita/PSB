@@ -66,9 +66,33 @@ if [ -n "$dburl" ]; then
   fail=1
 fi
 
+# 1d) PII guard — real contacts' FULL names (first + last) must never enter these public repos
+# (ADR-064 redaction; the graph's real people are referred to by placeholder/first-name only). Only
+# full-name combos are blocked — lone first or last names are fine (a bare surname like "Soare" also
+# means "sun"). Fabricated illustrative names (Diana Vance, Horia Fenwick, …) are the intended
+# stand-ins. The denylist is stored as SHA-256 of the diacritic-folded, lower-cased name, so the real
+# names themselves NEVER appear in this public repo (a plaintext denylist would re-leak them).
+if command -v python >/dev/null 2>&1; then _py=python
+elif command -v python3 >/dev/null 2>&1; then _py=python3
+else _py=; fi
+if [ -n "$_py" ]; then
+  # Pipe the staged additions to the hashed scanner (.githooks/pii_scan.py holds only SHA-256
+  # digests, never the names). Exclude the hook dir itself from the scan.
+  names=$(git diff --cached -U0 --no-color -- . ':!.githooks/' \
+    | grep -E '^\+' | grep -Ev '^\+\+\+' | "$_py" .githooks/pii_scan.py)
+  if [ -n "$names" ]; then
+    red "BLOCKED (real contact full name in staged changes — use a placeholder/first-name only):"
+    printf '%s\n' "$names" >&2
+    fail=1
+  fi
+else
+  yell "PII name-guard skipped: no python on PATH (history is already redacted; install python to re-enable)."
+fi
+
 if [ "$fail" -ne 0 ]; then
   red ""
-  red "Commit refused: credentials must never enter git (09-session-protocol.md)."
+  red "Commit refused: credentials + real personal names must never enter git"
+  red "(09-session-protocol.md security discipline; ADR-064 PII redaction)."
   red "Real secrets belong only in deploy/.env on the VPS (gitignored), the process"
   red "environment, or GitHub Actions secrets — never in a tracked file."
 fi
