@@ -1,12 +1,19 @@
 import { AnimatePresence, motion } from 'framer-motion';
-import { useMemo, useState } from 'react';
-import type { ActivityCategory, ActivityFeedItem, CaptureView, RunChildItem } from '../../api/types';
+import { useEffect, useMemo, useState } from 'react';
+import type {
+  ActivityCategory,
+  ActivityFeedItem,
+  CaptureView,
+  RunChildItem,
+  RunDerivePart,
+} from '../../api/types';
 import { useCapture, useEditCaptureAnchor } from '../capture/useCaptures';
 import { Button } from '../../ui/Button';
 import { CaptureDetailBody } from '../../ui/media/CaptureDetail';
 import { TimeAgo } from '../../ui/TimeAgo';
+import { RunLogTail } from './RunLogTail';
 import { StatusBadge } from './runStatus';
-import { FAIL_COLOR } from './statusColors';
+import { FAIL_COLOR, WARN_COLOR } from './statusColors';
 import {
   useActivityFeed,
   usePipelines,
@@ -104,14 +111,94 @@ function RunChildRow({ child, depth }: { child: RunChildItem; depth: number }) {
   );
 }
 
+// The per-part derivation records off an agent run's opaque `details.derive.parts[]` (M9.7 C,
+// ADR-061 §7/§10) — present for a composite capture, absent otherwise. Narrowed defensively: any
+// non-array (a single image/voice's scalar `derive` blob, an old run, a missing key) → [].
+function deriveParts(details: Record<string, unknown>): RunDerivePart[] {
+  const derive = details.derive as { parts?: unknown } | null | undefined;
+  const parts = derive?.parts;
+  return Array.isArray(parts) ? (parts as RunDerivePart[]) : [];
+}
+
+function derivePartColor(status: string | undefined): string {
+  if (status === 'unavailable') return FAIL_COLOR;
+  if (status === 'pending') return WARN_COLOR;
+  return 'var(--muted)'; // derived / unknown
+}
+
+// The structured per-part block (M9.7 C): each composite part's terminal derivation — its 1-based
+// position, kind, status, model, retry count, and any error — rendered after the run finishes (the
+// live `RunLogTail` above streams the same milestones while it runs).
+function DerivePartsBlock({ parts }: { parts: RunDerivePart[] }) {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gap: 6,
+        paddingTop: 8,
+        borderTop: '1px solid var(--surface-border)',
+      }}
+    >
+      <span
+        style={{
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: 0.3,
+          textTransform: 'uppercase',
+          color: 'var(--muted)',
+        }}
+      >
+        Parts
+      </span>
+      {parts.map((p, i) => (
+        <div
+          key={p.media_id ?? i}
+          style={{
+            display: 'flex',
+            gap: 8,
+            alignItems: 'baseline',
+            flexWrap: 'wrap',
+            fontSize: 12,
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          <span style={{ fontWeight: 600, color: 'var(--text)' }}>
+            {p.marker_index ?? i + 1} · {p.kind ?? 'part'}
+          </span>
+          <span style={{ fontWeight: 600, color: derivePartColor(p.status) }}>{p.status ?? '—'}</span>
+          {p.model && <span style={{ color: 'var(--muted)' }}>via {p.model}</span>}
+          {typeof p.attempts === 'number' && p.attempts > 1 && (
+            <span style={{ color: 'var(--muted)' }}>{p.attempts} attempts</span>
+          )}
+          {p.error && (
+            <span style={{ color: FAIL_COLOR, minWidth: 0, overflowWrap: 'anywhere' }}>
+              {p.error}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RunDetail({ runId }: { runId: string }) {
   const run = useRun(runId);
+  // Latch the live log tail (M9.7 C, ADR-061 §10) on once the run is seen running, and keep it
+  // mounted after it finishes so `RunLogTail` can drain the async on-finish flush (ADR-053 §2 — the
+  // OpsView pattern). A terminal run opened cold (an old feed row) never latches, so historical
+  // rows stay quiet — the tail is for a run followed live.
+  const [showTail, setShowTail] = useState(false);
+  useEffect(() => {
+    if (run.data?.status === 'running') setShowTail(true);
+  }, [run.data?.status]);
+
   if (run.isLoading) return <span style={{ fontSize: 12, color: 'var(--muted)' }}>Loading…</span>;
   if (run.isError || !run.data)
     return <span style={{ fontSize: 12, color: FAIL_COLOR }}>Couldn’t load run detail.</span>;
   const pills = Object.entries(run.data.details).filter(
     ([, v]) => typeof v === 'number' || v === true,
   );
+  const parts = deriveParts(run.data.details);
   return (
     <div style={{ display: 'grid', gap: 8 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -161,6 +248,8 @@ function RunDetail({ runId }: { runId: string }) {
           ))}
         </div>
       )}
+      {showTail && <RunLogTail runId={runId} />}
+      {parts.length > 0 && <DerivePartsBlock parts={parts} />}
       {run.data.children.length > 0 && (
         <div
           style={{

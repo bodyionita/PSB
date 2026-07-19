@@ -550,6 +550,22 @@ export interface AgentRunResponse {
   children: RunChildItem[];
 }
 
+// One derived media part inside an agent run's opaque `details.derive.parts[]` (M9.7 C, ADR-061
+// §7/§10): the per-part derivation record the openRun RunDetail renders as a structured block after
+// a composite capture finishes. `marker_index` is the 1-based part position the organizer attributes
+// against; `status` is the media row's terminal derivation state (`derived`/`unavailable`/`pending`).
+// All fields optional — `details` is an untyped blob, narrowed defensively at the render seam.
+export interface RunDerivePart {
+  media_id?: string;
+  kind?: string;
+  ordinal?: number | null;
+  marker_index?: number;
+  status?: string;
+  model?: string | null;
+  attempts?: number;
+  error?: string | null;
+}
+
 // --- Activity feed + ops console (03-api.md §Activity & ops, M8 / ADR-053; M8.1 ADR-054 §4) ---
 // The three feed categories, by *origin* (a hand-run job → manual_actions via agent_runs.trigger).
 // `captures` (M8.1, was `conversations`) carries all captures regardless of source, not chat-only.
