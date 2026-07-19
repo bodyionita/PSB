@@ -3,12 +3,14 @@ import { useState, type CSSProperties } from 'react';
 import { ApiError } from '../../api/client';
 import type {
   AgentRunResponse,
+  EntityBrowseItem,
   EntityMergeProposeResponse,
   ReprocessPreview,
   TagMergeItem,
   VocabConsolidateProposeResponse,
 } from '../../api/types';
 import { Button } from '../../ui/Button';
+import { EntityPicker } from '../../ui/EntityPicker';
 import { Surface } from '../../ui/Surface';
 import { RunLogTail } from './RunLogTail';
 import { StatusBadge } from './runStatus';
@@ -343,42 +345,73 @@ function MergeSideBox({ label, side }: { label: string; side: { title: string | 
   );
 }
 
+function PickerLabel({ children }: { children: string }) {
+  return (
+    <span
+      style={{
+        display: 'block',
+        marginBottom: 6,
+        fontSize: 11,
+        fontWeight: 700,
+        textTransform: 'uppercase',
+        letterSpacing: 0.4,
+        color: 'var(--muted)',
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
 function EntityMergeCard() {
   const propose = useMergeEntitiesPropose();
   const apply = useMergeEntitiesApply();
-  const [loser, setLoser] = useState('');
-  const [survivor, setSurvivor] = useState('');
+  const [loser, setLoser] = useState<EntityBrowseItem | null>(null);
+  const [survivor, setSurvivor] = useState<EntityBrowseItem | null>(null);
   const [plan, setPlan] = useState<EntityMergeProposeResponse | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const run = useRun(runId);
-  const canPropose = loser.trim() !== '' && survivor.trim() !== '' && loser.trim() !== survivor.trim();
+  const canPropose = loser != null && survivor != null && loser.id !== survivor.id;
 
   return (
     <OpCard
       title="Merge entities"
-      description="Fold one entity node (the loser) into another (the survivor): retarget its inbound edges, union aliases, and tombstone it. Enter the two node ids, review the inbound-edge inventory, then apply."
+      description="Fold one entity (the loser) into another (the survivor): retarget its inbound edges, union aliases, and tombstone it. Search each entity by name, review the inbound-edge inventory, then apply."
     >
-      <div style={{ display: 'grid', gap: 10 }}>
-        <input
-          style={inputStyle}
-          placeholder="Loser node id (folded away)"
-          value={loser}
-          onChange={(e) => setLoser(e.target.value)}
-        />
-        <input
-          style={inputStyle}
-          placeholder="Survivor node id (kept)"
-          value={survivor}
-          onChange={(e) => setSurvivor(e.target.value)}
-        />
+      <div style={{ display: 'grid', gap: 12 }}>
+        <div>
+          <PickerLabel>Loser (folded away)</PickerLabel>
+          <EntityPicker
+            value={loser}
+            onChange={(v) => {
+              setLoser(v);
+              setPlan(null);
+            }}
+            excludeId={survivor?.id}
+            placeholder="Search the entity to fold away…"
+          />
+        </div>
+        <div>
+          <PickerLabel>Survivor (kept)</PickerLabel>
+          <EntityPicker
+            value={survivor}
+            onChange={(v) => {
+              setSurvivor(v);
+              setPlan(null);
+            }}
+            excludeId={loser?.id}
+            placeholder="Search the entity to keep…"
+          />
+        </div>
       </div>
       <div style={{ marginTop: 12 }}>
         <Button
           variant="ghost"
           onClick={() => {
+            if (!canPropose) return;
             setRunId(null);
             propose.mutate(
-              { loser: loser.trim(), survivor: survivor.trim() },
+              { loser: loser.id, survivor: survivor.id },
               { onSuccess: (p) => setPlan(p) },
             );
           }}
@@ -390,7 +423,7 @@ function EntityMergeCard() {
       {propose.isError && (
         <p style={{ margin: '12px 0 0', fontSize: 13, color: FAIL_COLOR }}>
           {propose.error instanceof ApiError && propose.error.status === 404
-            ? 'One of those node ids was not found.'
+            ? 'One of those entities was not found.'
             : errorText(propose.error, 'Couldn’t preview the merge.')}
         </p>
       )}

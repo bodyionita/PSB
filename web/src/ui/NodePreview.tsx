@@ -15,7 +15,9 @@ import {
 } from './dateToken';
 import { HoverTip } from './HoverTip';
 import { InteriorityBadge } from './InteriorityBadge';
+import { MergeIntoPanel } from './MergeIntoPanel';
 import { baseName, useNode } from './nodeDetail';
+import { useEntityLikeTypes } from './useEntityLikeTypes';
 import { MediaStrip } from './media/MediaStrip';
 import { edgeLabel, typeIcon } from './nodeTypes';
 
@@ -177,6 +179,7 @@ export function NodePreview({
   onOpenNode?: (nodeId: string) => void;
 }) {
   const { data, isLoading, isError } = useNode(nodeId);
+  const entityLikeTypes = useEntityLikeTypes();
 
   if (isLoading) {
     return <p style={{ margin: '12px 0 0', fontSize: 13, color: 'var(--muted)' }}>Loading node…</p>;
@@ -283,6 +286,12 @@ export function NodePreview({
               ))}
             </div>
           </div>
+        )}
+
+        {/* Merge affordance — entity hubs only (ADR-064 §2a). Folds this entity into another the
+            user picks by name (no ids), via the same propose→apply the AdminOps card uses. */}
+        {entityLikeTypes.has(data.type) && (
+          <MergeIntoPanel loser={{ id: data.node_id, type: data.type, title: data.title }} />
         )}
       </div>
     </motion.div>
