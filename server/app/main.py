@@ -26,6 +26,8 @@ from .entities.backfill import BackfillService
 from .entities.entity_store import PgEntityStore
 from .entities.merge import MergeService
 from .entities.merge_core import MergeCore
+from .entities.merge_replay import MergeReplayService
+from .entities.merge_store import PgMergeDecisionStore
 from .entities.profile_refresh import ProfileRefreshService
 from .entities.profile_store import PgProfileStore
 from .entities.resolver import EntityResolver
@@ -299,6 +301,16 @@ async def lifespan(app: FastAPI):
         # inherits the loser's media.
         node_media=node_media_store,
     )
+    # Durable merge decisions (ADR-064 §1): every applied entity merge is recorded keyed on the
+    # loser's surface forms + type, and the reprocess replay re-folds it after a raw rebuild — so a
+    # merge done by name survives `reprocess-all` (fixes ADR-042 §4's "reported but dropped").
+    merge_decision_store = PgMergeDecisionStore(db)
+    merge_replay_service = MergeReplayService(
+        decision_store=merge_decision_store,
+        entity_store=entity_store,
+        merge_core=merge_core,
+        node_writer=node_writer,
+    )
     app.state.merge_service = MergeService(
         settings=settings,
         entity_store=entity_store,
@@ -306,6 +318,7 @@ async def lifespan(app: FastAPI):
         merge_core=merge_core,
         run_store=run_store,
         vocab=vocabulary_service,
+        decisions=merge_decision_store,
     )
     # Nightly dedup sweep (M6 task 5, ADR-049): near-duplicate content nodes file a dedup-proposal
     # the user resolves (merge/keep/link) via the Review surface below. DB-only (candidate reads +
@@ -499,6 +512,10 @@ async def lifespan(app: FastAPI):
         # Rebuild the derived profiles the reset truncates, so the profile search leg (ADR-037) is
         # live right after a reprocess instead of empty until the nightly job.
         profile_refresh=profile_refresh_service,
+        # Re-apply the durable standing merges after the raw rebuild (ADR-064 §1) — the fix that
+        # makes a name-merge (Diana Vance → Diana) survive a reprocess instead of silently
+        # reappearing.
+        merge_replay=merge_replay_service,
     )
     app.state.reprocess_service = reprocess_service
 

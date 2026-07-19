@@ -81,6 +81,10 @@ class EntityStore(Protocol):
 
     async def get_node(self, node_id: str) -> EntityNode | None: ...
 
+    async def find_entity_by_surface_forms(
+        self, forms: list[str], *, node_type: str
+    ) -> str | None: ...
+
     async def inbound_canonical_edges(self, node_id: str) -> list[InboundEdge]: ...
 
     async def list_entities(self, *, types: list[str]) -> list[EntityRef]: ...
@@ -121,6 +125,42 @@ class PgEntityStore:
             aliases=list(row["aliases"] or []),
             merged_into=str(row["merged_into"]) if row["merged_into"] else None,
         )
+
+    async def find_entity_by_surface_forms(self, forms: list[str], *, node_type: str) -> str | None:
+        # Resolve a durable merge decision's side to a live re-created hub (ADR-064 §1): a
+        # non-tombstone entity of `node_type` whose normalized title/alias matches one of `forms`
+        # (already normalized by `surface_forms`). The stored title/alias is normalized the same way
+        # inline (lower + collapse whitespace; diacritics already folded on write, ADR-041). The
+        # **title form ranks first** (`forms[0]` is the recorded title), so when survivor and loser
+        # share a short alias (both carry "diana") each still resolves to its own hub by title, not
+        # crossing. A tie (identical titles) returns one deterministically; the replay's
+        # survivor==loser guard then skips it (can't distinguish → don't merge). Cold, not hot path.
+        if not forms:
+            return None
+        primary = forms[0]
+        async with self._db.acquire() as conn:
+            row = await conn.fetchrow(
+                r"""
+                SELECT id
+                FROM nodes
+                WHERE type = $2 AND merged_into IS NULL
+                  AND (
+                        btrim(regexp_replace(lower(title), '\s+', ' ', 'g')) = ANY($1::text[])
+                     OR EXISTS (SELECT 1 FROM unnest(aliases) a
+                                WHERE btrim(regexp_replace(lower(a), '\s+', ' ', 'g'))
+                                      = ANY($1::text[]))
+                  )
+                ORDER BY
+                  (btrim(regexp_replace(lower(title), '\s+', ' ', 'g')) = $3) DESC,
+                  (btrim(regexp_replace(lower(title), '\s+', ' ', 'g')) = ANY($1::text[])) DESC,
+                  id
+                LIMIT 1
+                """,
+                forms,
+                node_type,
+                primary,
+            )
+        return str(row["id"]) if row is not None else None
 
     async def inbound_canonical_edges(self, node_id: str) -> list[InboundEdge]:
         # The reverse index (edges_dst_idx): canonical edges whose target is this node, joined to

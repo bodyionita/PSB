@@ -18,7 +18,13 @@ from app.entities.merge import BadMerge, MergeNodeNotFound, MergeService
 from app.entities.merge_core import MergeCore
 from app.graph.node_writer import NodeDocument, NodeEdge, NodeWriter
 from app.indexing.frontmatter import parse_node_metadata
-from tests.fakes import FakeAgentRunStore, FakeCommitBackup, FakeEntityStore, FakeIndexer
+from tests.fakes import (
+    FakeAgentRunStore,
+    FakeCommitBackup,
+    FakeEntityStore,
+    FakeIndexer,
+    FakeMergeDecisionStore,
+)
 
 CREATED = datetime(2026, 7, 12, 12, 0, 0)
 
@@ -61,7 +67,9 @@ def _write_memory(writer: NodeWriter, node_id: str, edges: tuple[NodeEdge, ...])
     return w.store_path
 
 
-def _service(tmp_path, entity_store, writer, indexer, backup, runs) -> MergeService:
+def _service(
+    tmp_path, entity_store, writer, indexer, backup, runs, *, decisions=None
+) -> MergeService:
     # The entity-merge composes the shared MergeCore (retarget → tombstone → reindex → commit) with
     # its alias-union (ADR-049 §1); build the core over the same fakes so the fold is exercised.
     core = MergeCore(
@@ -73,6 +81,7 @@ def _service(tmp_path, entity_store, writer, indexer, backup, runs) -> MergeServ
         node_writer=writer,
         merge_core=core,
         run_store=runs,
+        decisions=decisions,
     )
 
 
@@ -152,6 +161,61 @@ async def test_apply_retargets_unions_and_tombstones(tmp_path: Path):
     assert backup.reasons and "merge" in backup.reasons[0]
     assert runs.runs[run_id].status == "succeeded"
     assert runs.runs[run_id].details["edges_retargeted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_records_durable_decision_keyed_on_surface_forms(tmp_path: Path):
+    """A merge records a durable decision keyed on the loser's normalized surface forms + type
+    (ADR-064 §1), so `reprocess-all` can re-fold it after the rebuild mints fresh ids."""
+    writer = NodeWriter(str(tmp_path))
+    loser_path = _write_entity(writer, "loser-1", "Diana Vance", ("diana vance",))
+    surv_path = _write_entity(writer, "surv-2", "Diana", ("diana",))
+    store = FakeEntityStore(
+        nodes={
+            "loser-1": EntityNode(
+                "loser-1", "person", "Diana Vance", loser_path, ["diana vance"], None
+            ),
+            "surv-2": EntityNode("surv-2", "person", "Diana", surv_path, ["diana"], None),
+        }
+    )
+    decisions = FakeMergeDecisionStore()
+    service = _service(
+        tmp_path,
+        store,
+        writer,
+        FakeIndexer(),
+        FakeCommitBackup(),
+        FakeAgentRunStore(),
+        decisions=decisions,
+    )
+
+    run_id = await _drive(service, "loser-1", "surv-2")
+
+    [decision] = await decisions.all_decisions()
+    assert decision.loser_type == "person" and decision.survivor_type == "person"
+    assert decision.loser_forms == ["diana vance"]
+    assert decision.survivor_forms == ["diana"]
+    assert decision.loser_node_id == "loser-1" and decision.survivor_node_id == "surv-2"
+    assert service._runs.runs[run_id].details["durable"] is True
+
+
+@pytest.mark.asyncio
+async def test_apply_without_decision_store_still_merges(tmp_path: Path):
+    """No durable store wired (older callers) ⇒ the merge still applies; `durable` reports False."""
+    writer = NodeWriter(str(tmp_path))
+    loser_path = _write_entity(writer, "loser-1", "Alex", ("alex",))
+    surv_path = _write_entity(writer, "surv-2", "Alexandru", ("alexandru",))
+    store = FakeEntityStore(
+        nodes={
+            "loser-1": EntityNode("loser-1", "person", "Alex", loser_path, ["alex"], None),
+            "surv-2": EntityNode("surv-2", "person", "Alexandru", surv_path, ["alexandru"], None),
+        }
+    )
+    runs = FakeAgentRunStore()
+    service = _service(tmp_path, store, writer, FakeIndexer(), FakeCommitBackup(), runs)
+    run_id = await _drive(service, "loser-1", "surv-2")
+    assert runs.runs[run_id].status == "succeeded"
+    assert runs.runs[run_id].details["durable"] is False
 
 
 @pytest.mark.asyncio

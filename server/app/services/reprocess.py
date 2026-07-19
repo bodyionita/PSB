@@ -67,6 +67,14 @@ class ProfileRefresher(Protocol):
     async def run_scheduled(self) -> object | None: ...
 
 
+class MergeReplayer(Protocol):
+    """The durable-merge replay surface (:class:`~app.entities.merge_replay.MergeReplayService`) —
+    re-folds every recorded merge into its survivor by surface form after the raw rebuild (ADR-064
+    §1). ``replay`` never raises (rule 7); its outcome carries decisions/applied/skipped counts."""
+
+    async def replay(self) -> object: ...
+
+
 class ReprocessStore(Protocol):
     """The DB reset + capture-order reads the op relies on (plain SQL, ADR-011)."""
 
@@ -76,7 +84,8 @@ class ReprocessStore(Protocol):
         ...
 
     async def count_merges(self) -> int:
-        """Standing entity merges (tombstones) — reported, not silently dropped (ADR-042 §4)."""
+        """Durable standing merge decisions (``entity_merges``) — how many the replay will re-apply
+        after the raw rebuild (ADR-064 §1, supersedes ADR-042 §4's tombstone count)."""
         ...
 
     async def reset_derived_and_review(self) -> None:
@@ -115,6 +124,7 @@ class ReprocessService:
         run_store: AgentRunStore,
         graph: GraphRecomputer | None = None,
         profile_refresh: ProfileRefresher | None = None,
+        merge_replay: MergeReplayer | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -124,6 +134,9 @@ class ReprocessService:
         self._runs = run_store
         self._graph = graph
         self._profile_refresh = profile_refresh
+        # Durable merge replay (ADR-064 §1): re-fold standing merges after the raw rebuild. None ⇒
+        # no replay (older tests / a build without the store); merges just don't survive, as before.
+        self._merge_replay = merge_replay
         self._ignore = set(settings.store_ignore)
         self._running = False
         self._tasks: set[asyncio.Task] = set()
@@ -169,10 +182,9 @@ class ReprocessService:
         """reset → replay chronologically → recompute derived edges → force commit. A failure ends
         the run ``failed`` with context (rule 7); raw is truth, so a re-run recovers it."""
         try:
-            # Report (never silently drop) any standing merges the rebuild can't re-apply by id.
-            merges = await self._store.count_merges()
             # 1. Reset derived state (store files + DB index + capture/graph-derived review kinds).
-            #    Vocab + raw + `stance-candidate` items kept (ADR-048 §7).
+            #    Vocab + raw + `stance-candidate` items kept (ADR-048 §7). Durable merge decisions
+            #    (`entity_merges`) are also kept — they are replayed in step 2b below (ADR-064 §1).
             removed = await asyncio.to_thread(self._writer.remove_all_nodes, ignore=self._ignore)
             await self._store.reset_derived_and_review()
 
@@ -192,6 +204,12 @@ class ReprocessService:
                 else:
                     failed += 1
 
+            # 2b. Re-apply the durable standing merges (ADR-064 §1) now that every hub + its inbound
+            #     edges exist — matched by surface form + type, so a merge done by name survives the
+            #     id-churn of the rebuild (the Diana case). Before the derived recompute below, so
+            #     similarity/profiles reflect the merged graph. Best-effort (rule 7).
+            replay = await self._replay_merges()
+
             # 3. Recompute derived `similar` edges over the rebuilt vectors (search parity), then
             #    rebuild the derived entity profiles the reset truncated (node_profiles) so the
             #    profile search leg (ADR-037) is live immediately — not left empty until the nightly
@@ -208,12 +226,9 @@ class ReprocessService:
                 f"{inbox} inbox, {coerced} coerced, {accreted} accreted), {failed} failed; "
                 f"removed {removed} file(s); {profiles_refreshed} profile(s); push={backup.pushed}"
             )
-            if merges:
-                summary += f"; ⚠ {merges} standing merge(s) NOT re-applied (re-merge manually)"
-                logger.warning(
-                    "reprocess-all: %d standing merge(s) could not be re-applied by id "
-                    "(re-identify-and-re-apply is a documented follow-up, ADR-042 §4)",
-                    merges,
+            if replay is not None and replay.decisions:
+                summary += f"; {replay.applied}/{replay.decisions} standing merge(s) re-applied" + (
+                    f" ({replay.skipped} skipped)" if replay.skipped else ""
                 )
             logger.info("%s", summary)
             await self._runs.finish(
@@ -230,13 +245,28 @@ class ReprocessService:
                     "accreted": accreted,
                     "profiles_refreshed": profiles_refreshed,
                     "removed_files": removed,
-                    "standing_merges_not_reapplied": merges,
+                    "standing_merge_decisions": replay.decisions if replay else 0,
+                    "standing_merges_reapplied": replay.applied if replay else 0,
+                    "standing_merges_skipped": replay.skipped if replay else 0,
                     "pushed": backup.pushed,
                 },
             )
         except Exception as exc:  # noqa: BLE001 — end the run failed with context, never crash
             logger.exception("reprocess-all failed")
             await self._safe_finish(run_id, exc)
+
+    async def _replay_merges(self):
+        """Re-apply the durable standing merges after the raw rebuild (ADR-064 §1). Returns the
+        replay outcome (``.decisions``/``.applied``/``.skipped``) or ``None`` when no replayer is
+        wired. Best-effort: a replay failure is logged and the reprocess continues (the merges just
+        don't survive this run) — never aborts the pass (rule 7)."""
+        if self._merge_replay is None:
+            return None
+        try:
+            return await self._merge_replay.replay()
+        except Exception:  # noqa: BLE001 — a replay hiccup must not fail the whole reprocess
+            logger.exception("reprocess-all: durable merge replay failed (continuing)")
+            return None
 
     async def _refresh_profiles(self) -> int:
         """Rebuild the derived entity profiles the reset truncated. Returns how many were
@@ -280,8 +310,11 @@ class PgReprocessStore:
         return int(captures or 0), int(nodes or 0)
 
     async def count_merges(self) -> int:
+        # Durable standing merge decisions (ADR-064 §1) — how many the reprocess replay will
+        # re-apply after the rebuild (supersedes the old tombstone count, which was "not
+        # re-appliable"). A brand-new DB predating migration 021 has no table → 0 (defensive).
         async with self._db.acquire() as conn:
-            value = await conn.fetchval("SELECT count(*) FROM nodes WHERE merged_into IS NOT NULL")
+            value = await conn.fetchval("SELECT count(*) FROM entity_merges")
         return int(value or 0)
 
     async def reset_derived_and_review(self) -> None:
@@ -314,6 +347,7 @@ def build_reprocess_service(
     entrypoint (``python -m app.cli reprocess-all``). Mirrors the ``main.py`` wiring but assembles
     only what the op needs, so a fresh process can drive the pass without the HTTP app."""
     # Imported here (not at module top) so the CLI's minimal context builds these lazily.
+    from ..entities.merge_replay import build_merge_replay
     from ..entities.profile_refresh import build_profile_refresh_service
     from ..graph.service import DerivedEdgeGraph
     from ..graph.store import PgGraphStore
@@ -332,4 +366,7 @@ def build_reprocess_service(
         run_store=PgAgentRunStore(db),
         graph=DerivedEdgeGraph(settings=settings, store=PgGraphStore(db)),
         profile_refresh=build_profile_refresh_service(settings, db),
+        # Durable standing merges re-applied after the raw rebuild (ADR-064 §1), so a merge done by
+        # name survives a CLI `reprocess-all` exactly like the in-app path.
+        merge_replay=build_merge_replay(settings, db, store_backup),
     )

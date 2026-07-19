@@ -33,12 +33,53 @@ from ..graph.node_writer import NodeWriter, merged_alias_union
 from ..services.agent_runs import FAILED, SUCCEEDED, AgentRunStore
 from ..vocab.service import VocabularyProvider, effective_vocabulary
 from .entity_store import EntityNode, EntityStore
-from .merge_core import MergeCore, MergeTarget
+from .merge_core import MergeCore, MergeCoreResult, MergeTarget
+from .merge_store import MergeDecision, MergeDecisionStore, surface_forms
 
 logger = logging.getLogger(__name__)
 
 # agent_runs.agent name for the merge apply (visible in the activity feed, vision P8).
 AGENT = "entity-merge"
+
+
+@dataclass(frozen=True)
+class EntityFoldResult:
+    """The outcome of an entity fold: the shared-core result + the survivor's post-union aliases.
+    The caller reports the alias count in its summary; the reprocess replay ignores it."""
+
+    core: MergeCoreResult
+    survivor_aliases: list[str]
+
+
+async def fold_entities(
+    *,
+    loser: EntityNode,
+    survivor: EntityNode,
+    node_writer: NodeWriter,
+    merge_core: MergeCore,
+    reason: str,
+) -> EntityFoldResult:
+    """Fold ``loser`` into ``survivor`` with the entity alias-union on top (ADR-030 §5, ADR-049 §1).
+
+    The union writes the survivor's aliases (its own + the loser's name + aliases) first, then the
+    shared :class:`MergeCore` retargets inbound edges → tombstones the loser → reindexes → force
+    commits. Shared by the interactive entity merge (:class:`MergeService`) and the reprocess replay
+    (:class:`~app.entities.merge_replay.MergeReplayService`) so both fold identically (rule 10). A
+    vanished survivor file degrades to a fold with no union (rule 7) — never raises for that."""
+    new_aliases = merged_alias_union(survivor.aliases, survivor.title, loser.aliases, loser.title)
+    survivor_paths: list[str] = []
+    try:
+        await asyncio.to_thread(node_writer.set_aliases, survivor.store_path, new_aliases)
+        survivor_paths.append(survivor.store_path)
+    except FileNotFoundError:
+        logger.warning("merge: survivor file %s gone; aliases not unioned", survivor.store_path)
+    core = await merge_core.fold(
+        loser=_target(loser),
+        survivor=_target(survivor),
+        reason=reason,
+        survivor_extra_paths=survivor_paths,
+    )
+    return EntityFoldResult(core=core, survivor_aliases=new_aliases)
 
 
 class MergeError(Exception):
@@ -98,6 +139,7 @@ class MergeService:
         merge_core: MergeCore,
         run_store: AgentRunStore,
         vocab: VocabularyProvider | None = None,
+        decisions: MergeDecisionStore | None = None,
     ) -> None:
         self._settings = settings
         self._entities = entity_store
@@ -108,6 +150,10 @@ class MergeService:
         self._runs = run_store
         # Effective entity-like types (seeds ∪ approved additions — ADR-027/035); None ⇒ seeds.
         self._vocab = vocab
+        # Durable merge-decision store (ADR-064 §1): each applied merge is recorded keyed on the
+        # loser's surface forms + type, so `reprocess-all` re-applies it. None ⇒ not recorded (older
+        # tests without the store) — the merge still applies, it just won't survive a reprocess.
+        self._decisions = decisions
         self._tasks: set[asyncio.Task] = set()
 
     # --- propose ----------------------------------------------------------------------------
@@ -140,34 +186,28 @@ class MergeService:
         return run_id
 
     async def _run_apply(self, run_id: str, loser: EntityNode, survivor: EntityNode) -> None:
-        """Union aliases onto the survivor, then fold the loser into it via the shared MergeCore
-        (retarget inbound edges → tombstone loser → reindex → commit+push, ADR-049 §1).
+        """Union aliases onto the survivor, fold the loser into it via the shared MergeCore, then
+        record the durable merge decision (ADR-030 §5 / ADR-049 §1 / ADR-064 §1).
 
-        The alias write simply moves ahead of the retarget vs the pre-extraction service — both are
-        disjoint frontmatter regions, so the end state is identical (ADR-049 §1). Never raises (rule
-        7): the core skips a per-file miss; any unexpected failure ends the run ``failed`` with
-        context. Files are truth + git-revertible, so a partial apply is safe to re-drive."""
+        The union + fold are the shared :func:`fold_entities`; the durable record (keyed on surface
+        form, so ``reprocess-all`` re-applies it) is best-effort — a store hiccup logs and leaves
+        the merge applied+committed (it just won't survive a reprocess), never failing the run.
+        Never raises (rule 7): the core skips a per-file miss; any unexpected failure ends the run
+        ``failed`` with context. Files are truth + git-revertible, so a partial apply re-drivable.
+        """
         try:
-            # Union the survivor's aliases with the loser's surface forms (the entity-only half),
-            # then reindex that survivor file in the same fold pass via ``survivor_extra_paths``.
-            new_aliases = merged_alias_union(
-                survivor.aliases, survivor.title, loser.aliases, loser.title
-            )
-            survivor_paths: list[str] = []
-            try:
-                await asyncio.to_thread(self._writer.set_aliases, survivor.store_path, new_aliases)
-                survivor_paths.append(survivor.store_path)
-            except FileNotFoundError:
-                logger.warning(
-                    "merge: survivor file %s gone; aliases not unioned", survivor.store_path
-                )
-
-            result = await self._core.fold(
-                loser=_target(loser),
-                survivor=_target(survivor),
+            fold = await fold_entities(
+                loser=loser,
+                survivor=survivor,
+                node_writer=self._writer,
+                merge_core=self._core,
                 reason=f"merge {loser.id} → {survivor.id}",
-                survivor_extra_paths=survivor_paths,
             )
+            result = fold.core
+            new_aliases = fold.survivor_aliases
+            # Durable decision (ADR-064 §1) — recorded AFTER the fold committed, so a phantom record
+            # never outlives a failed merge; best-effort so a store hiccup can't undo the merge.
+            recorded = await self._record_decision(loser, survivor)
 
             summary = (
                 f"entity merge: {loser.title or loser.id} → {survivor.title or survivor.id} "
@@ -187,6 +227,7 @@ class MergeService:
                     "files_changed": result.files_changed,
                     "sources_skipped": result.sources_skipped,
                     "survivor_aliases": new_aliases,
+                    "durable": recorded,
                     "index": result.index,
                     "commit": {"committed": result.committed, "pushed": result.pushed},
                 },
@@ -194,6 +235,33 @@ class MergeService:
         except Exception as exc:  # noqa: BLE001 — end the run failed with context, never crash
             logger.exception("entity merge apply failed")
             await self._safe_finish(run_id, exc)
+
+    async def _record_decision(self, loser: EntityNode, survivor: EntityNode) -> bool:
+        """Record the durable merge decision (ADR-064 §1) keyed on the loser's surface forms + type,
+        so ``reprocess-all`` re-folds the loser back into the survivor after a raw rebuild. Returns
+        whether it was recorded. Best-effort (rule 7): no store wired, or a DB hiccup, logs and
+        returns ``False`` — the merge itself is already applied + git-committed."""
+        if self._decisions is None:
+            return False
+        try:
+            await self._decisions.record(
+                MergeDecision(
+                    survivor_type=survivor.type,
+                    survivor_forms=surface_forms(survivor.title, survivor.aliases),
+                    loser_type=loser.type,
+                    loser_forms=surface_forms(loser.title, loser.aliases),
+                    survivor_node_id=survivor.id,
+                    loser_node_id=loser.id,
+                )
+            )
+            return True
+        except Exception:  # noqa: BLE001 — a record hiccup must not undo a committed merge
+            logger.exception(
+                "merge: could not record durable decision %s → %s (merge still applied)",
+                loser.id,
+                survivor.id,
+            )
+            return False
 
     # --- helpers ----------------------------------------------------------------------------
 

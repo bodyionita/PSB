@@ -116,10 +116,10 @@ def test_production_rejects_insecure_default_secrets():
     Settings(environment="development")
 
 
-def test_compute_head_is_migration_020():
-    # M9.6 adds 019 (composite capture: captures.text_body, media.part_ordinal, one-active-draft
-    # index) then 020 (captures.run_id, the Activity deep-link — ADR-061); head advances to 020.
-    assert compute_head() == "020"
+def test_compute_head_is_migration_021():
+    # M9.6 adds 019/020 (composite capture; captures.run_id — ADR-061); M9.8 T1 adds 021
+    # (entity_merges — durable, replayable merges, ADR-064 §1); head advances to 021.
+    assert compute_head() == "021"
 
 
 def test_media_config_defaults():

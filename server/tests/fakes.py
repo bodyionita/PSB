@@ -502,6 +502,32 @@ class FakeEntityStore:
     async def get_node(self, node_id: str):
         return self.nodes.get(node_id)
 
+    async def find_entity_by_surface_forms(self, forms, *, node_type):
+        # Mirror PgEntityStore's ranked lookup (ADR-064 §1): a live hub of `node_type` whose
+        # normalized title/alias matches a recorded form, title-form (forms[0]) ranked first so a
+        # survivor/loser sharing a short alias each resolves to its own hub by title.
+        if not forms:
+            return None
+        fset = set(forms)
+        primary = forms[0]
+        best: tuple[int, str] | None = None  # (rank, id) — lower rank wins, then id
+        for nid, node in self.nodes.items():
+            if node.type != node_type or node.merged_into is not None:
+                continue
+            title_norm = normalize_alias(node.title) if node.title else ""
+            alias_norms = {normalize_alias(a) for a in node.aliases}
+            if title_norm == primary:
+                rank = 0
+            elif title_norm in fset:
+                rank = 1
+            elif alias_norms & fset:
+                rank = 2
+            else:
+                continue
+            if best is None or (rank, nid) < best:
+                best = (rank, nid)
+        return best[1] if best is not None else None
+
     async def inbound_canonical_edges(self, node_id: str):
         return list(self._inbound.get(node_id, []))
 
@@ -517,6 +543,26 @@ class FakeEntityStore:
 
     async def memory_nodes_matching_alias(self, alias, *, entity_id, window_start, limit):
         return list(self._alias_matches.get(alias.lower(), []))[:limit]
+
+
+class FakeMergeDecisionStore:
+    """In-memory durable-merge store (ADR-064 §1) — upsert on the loser identity key, mirroring
+    PgMergeDecisionStore so a merge-record + reprocess-replay test needs no live DB."""
+
+    def __init__(self, *, decisions=None) -> None:
+        # keyed by MergeDecision.key so `record` is idempotent (last survivor wins).
+        self._by_key: dict[str, object] = {}
+        for d in decisions or []:
+            self._by_key[d.key] = d
+
+    async def record(self, decision) -> None:
+        self._by_key[decision.key] = decision
+
+    async def all_decisions(self):
+        return list(self._by_key.values())
+
+    async def count(self) -> int:
+        return len(self._by_key)
 
 
 class FakeProfileStore:

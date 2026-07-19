@@ -82,6 +82,35 @@ class FakeGraph:
         return object()
 
 
+class _FakeReplayOutcome:
+    def __init__(self, *, decisions: int, applied: int, skipped: int) -> None:
+        self.decisions = decisions
+        self.applied = applied
+        self.skipped = skipped
+
+
+class FakeMergeReplay:
+    """Records the durable-merge replay call + its order vs the derived recompute (ADR-064 §1)."""
+
+    def __init__(
+        self,
+        *,
+        decisions: int = 0,
+        applied: int = 0,
+        skipped: int = 0,
+        marker: list[str] | None = None,
+    ) -> None:
+        self.calls = 0
+        self._outcome = _FakeReplayOutcome(decisions=decisions, applied=applied, skipped=skipped)
+        self._marker = marker
+
+    async def replay(self):
+        self.calls += 1
+        if self._marker is not None:
+            self._marker.append("merges")
+        return self._outcome
+
+
 class _FakeProfileOutcome:
     def __init__(self, refreshed: int) -> None:
         self.refreshed = refreshed
@@ -109,6 +138,7 @@ def _service(
     *,
     graph: FakeGraph | None = None,
     profile_refresh: FakeProfileRefresh | None = None,
+    merge_replay: FakeMergeReplay | None = None,
 ):
     settings = Settings(graph_store_path=str(tmp_path / "store"), scheduler_tz="UTC")
     return ReprocessService(
@@ -120,6 +150,7 @@ def _service(
         run_store=FakeAgentRunStore(),
         graph=graph,
         profile_refresh=profile_refresh,
+        merge_replay=merge_replay,
     ), settings
 
 
@@ -187,14 +218,37 @@ async def test_apply_is_single_flight(tmp_path: Path):
     assert await service.apply() is None  # 409 → None
 
 
-async def test_apply_reports_standing_merges(tmp_path: Path):
-    store = FakeReprocessStore(ids=["a"], merges=2)
-    service, _ = _service(tmp_path, store, FakeReprocessor())
+async def test_apply_replays_durable_merges_between_replay_and_recompute(tmp_path: Path):
+    """The durable standing merges (ADR-064 §1) are re-applied AFTER the capture replay and BEFORE
+    the derived recompute, so similarity/profiles reflect the merged graph; counts land in run."""
+    marker: list[str] = []
+    store = FakeReprocessStore(ids=["a", "b"])
+    reprocessor = FakeReprocessor()
+    graph = FakeGraph(marker=marker)
+    replay = FakeMergeReplay(decisions=3, applied=2, skipped=1, marker=marker)
+    service, _ = _service(tmp_path, store, reprocessor, graph=graph, merge_replay=replay)
+    await service.apply()
+    await service.drain()
+
+    assert replay.calls == 1
+    assert marker == ["merges", "graph"]  # merges re-applied before the derived recompute
+    run = next(iter(service._runs.runs.values()))
+    assert run.details["standing_merge_decisions"] == 3
+    assert run.details["standing_merges_reapplied"] == 2
+    assert run.details["standing_merges_skipped"] == 1
+    assert "2/3 standing merge(s) re-applied (1 skipped)" in run.summary
+
+
+async def test_apply_without_merge_replay_reports_zero(tmp_path: Path):
+    """No replayer wired (defensive default) ⇒ zero standing-merge counts, no crash + no mention."""
+    store = FakeReprocessStore(ids=["a"])
+    service, _ = _service(tmp_path, store, FakeReprocessor())  # merge_replay=None
     await service.apply()
     await service.drain()
     run = next(iter(service._runs.runs.values()))
-    assert run.details["standing_merges_not_reapplied"] == 2
-    assert "standing merge" in run.summary
+    assert run.details["standing_merge_decisions"] == 0
+    assert run.details["standing_merges_reapplied"] == 0
+    assert "standing merge" not in run.summary
 
 
 async def test_apply_rebuilds_profiles_after_derived_edges(tmp_path: Path):

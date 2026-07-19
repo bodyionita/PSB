@@ -704,7 +704,8 @@ class ReprocessRequest(BaseModel):
 
 class ReprocessPreviewResponse(BaseModel):
     """Preview (no writes): how many captures would replay + the current derived-node count, plus
-    any standing merges the rebuild cannot re-apply by id (reported, never silently dropped)."""
+    the count of **durable standing merges** the replay will re-apply after the rebuild (ADR-064 §1
+    — these now survive a reprocess instead of being dropped, superseding ADR-042 §4)."""
 
     captures: int
     nodes: int
