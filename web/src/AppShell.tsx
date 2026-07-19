@@ -23,6 +23,7 @@ interface TabCtx {
   clearSeed: () => void;
   reviewSeed: string | null;
   activityCategory: ActivityCategory | null;
+  activityRun: string | null;
 }
 
 // `wide` tabs opt out of the shell's 640px reading column to a full-viewport surface (ADR-051 §7 —
@@ -58,8 +59,11 @@ const TABS: Tab[] = [
     id: 'activity',
     label: 'Activity',
     icon: '≋',
-    render: ({ activityCategory }) => (
-      <ActivityScreen initialCategory={activityCategory ?? undefined} />
+    render: ({ activityCategory, activityRun }) => (
+      <ActivityScreen
+        initialCategory={activityCategory ?? undefined}
+        runSeed={activityRun ?? undefined}
+      />
     ),
   },
   { id: 'settings', label: 'Settings', icon: '⚙', render: () => <SettingsScreen /> },
@@ -77,6 +81,10 @@ export function AppShell() {
   // sets it to 'captures' via `openCaptures` (ADR-054 §4). Cleared on manual nav so a later direct
   // Activity tap doesn't re-force the Captures sub-tab.
   const [activityCategory, setActivityCategory] = useState<ActivityCategory | null>(null);
+  // One-shot deep-link into one processing run's detail (M9.6 T5/T6, ADR-061 §10): a capture row's
+  // "See processing →" sets it via `openRun`; Activity pins that run's detail atop the Feed so the
+  // user can follow the per-part processing without hunting the paginated list. Cleared on manual nav.
+  const [activityRun, setActivityRun] = useState<string | null>(null);
   // The single app-level NodePreview drawer's current target (ADR-054 §5): any NodeChip sets it via
   // `openNode`; the drawer renders it. Null = closed.
   const [previewTarget, setPreviewTarget] = useState<PreviewTarget | null>(null);
@@ -103,7 +111,12 @@ export function AppShell() {
     setActivityCategory('captures');
     setTab('activity');
   }, []);
-  const activityNav = useMemo(() => ({ openCaptures }), [openCaptures]);
+  const openRun = useCallback((runId: string) => {
+    setActivityRun(runId);
+    setActivityCategory('agents_jobs'); // land on the runs feed so the pinned run sits in context
+    setTab('activity');
+  }, []);
+  const activityNav = useMemo(() => ({ openCaptures, openRun }), [openCaptures, openRun]);
 
   const openNode = useCallback((nodeId: string, hint?: NodeHint) => {
     setPreviewTarget({ id: nodeId, hint: hint ?? null });
@@ -159,6 +172,7 @@ export function AppShell() {
             clearSeed: () => setMapSeed(null),
             reviewSeed,
             activityCategory,
+            activityRun,
           })}
         </motion.div>
       </main>
@@ -190,6 +204,7 @@ export function AppShell() {
               onClick={() => {
                 setReviewSeed(null);
                 setActivityCategory(null);
+                setActivityRun(null);
                 setTab(t.id);
               }}
               aria-current={selected ? 'page' : undefined}

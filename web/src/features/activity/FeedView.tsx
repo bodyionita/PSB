@@ -586,10 +586,57 @@ function FeedList({ category }: { category: ActivityCategory }) {
   );
 }
 
-export function FeedView({ initialCategory }: { initialCategory?: ActivityCategory } = {}) {
+export function FeedView({
+  initialCategory,
+  pinnedRun,
+  onDismissRun,
+}: {
+  initialCategory?: ActivityCategory;
+  // A capture's "See processing →" deep-link (activityNav's `openRun`, ADR-061 §10) pins that run's
+  // detail atop the Feed — pagination-proof (fetched by id via useRun inside RunDetail), so the user
+  // follows the per-part processing without hunting the keyset list. State is owned by ActivityScreen
+  // (survives the Feed↔Ops toggle); FeedView just renders it + reports Dismiss.
+  pinnedRun?: string | null;
+  onDismissRun?: () => void;
+} = {}) {
   const [category, setCategory] = useState<ActivityCategory>(initialCategory ?? 'agents_jobs');
   return (
     <div style={{ display: 'grid', gap: 12 }}>
+      {pinnedRun && (
+        <div
+          style={{
+            display: 'grid',
+            gap: 10,
+            padding: 14,
+            borderRadius: 'var(--radius)',
+            border: '1px solid var(--surface-border)',
+            borderLeft: '3px solid var(--accent)',
+            paddingLeft: 12,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+            <span style={{ fontSize: 14, fontWeight: 700 }}>Processing run</span>
+            <button
+              type="button"
+              onClick={onDismissRun}
+              aria-label="Dismiss run detail"
+              style={{
+                marginLeft: 'auto',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                fontSize: 12,
+                fontWeight: 600,
+                color: 'var(--muted)',
+                cursor: 'pointer',
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+          <RunDetail runId={pinnedRun} />
+        </div>
+      )}
       {/* No wrapping container — the active pill alone marks the selection (minimal chrome). */}
       <div style={{ display: 'flex', gap: 4 }}>
         {TABS.map((t) => {

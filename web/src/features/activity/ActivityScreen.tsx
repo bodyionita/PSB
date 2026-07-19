@@ -23,8 +23,15 @@ const SUBVIEWS: { id: SubView; label: string }[] = [
 // scroll-to-highlight, this is just a starting selection).
 export function ActivityScreen({
   initialCategory,
-}: { initialCategory?: ActivityCategory } = {}) {
+  runSeed,
+}: { initialCategory?: ActivityCategory; runSeed?: string } = {}) {
+  // A `runSeed` deep-link (activityNav's `openRun`) lands on the Feed, where the run detail pins.
+  // 'feed' is already the default, so no forcing is needed — this screen remounts fresh per tab visit.
   const [view, setView] = useState<SubView>('feed');
+  // The pinned-run state lives HERE, not in FeedView: FeedView unmounts on a Feed↔Ops toggle, so
+  // holding it there would let a Dismiss un-stick and the run re-pin on the next Feed remount (the
+  // seed prop is still set). ActivityScreen stays mounted across the toggle, so Dismiss sticks.
+  const [pinnedRun, setPinnedRun] = useState<string | null>(runSeed ?? null);
 
   return (
     <div style={{ display: 'grid', gap: 14 }}>
@@ -71,7 +78,15 @@ export function ActivityScreen({
         </div>
       </div>
 
-      {view === 'feed' ? <FeedView initialCategory={initialCategory} /> : <OpsView />}
+      {view === 'feed' ? (
+        <FeedView
+          initialCategory={initialCategory}
+          pinnedRun={pinnedRun}
+          onDismissRun={() => setPinnedRun(null)}
+        />
+      ) : (
+        <OpsView />
+      )}
     </div>
   );
 }
