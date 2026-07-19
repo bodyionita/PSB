@@ -24,7 +24,6 @@ collaborators the capture pipeline uses (the store is truth — rule 1).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,6 +31,7 @@ from typing import Protocol
 
 from ..config import Settings
 from ..graph.node_writer import NodeWriter
+from ..services.capture_removal import NodeDeleteStore, remove_content_nodes
 from ..services.capture_store import CaptureRecord
 from ..services.store_backup import StoreBackup
 from ..vocab.service import VocabularyProvider, effective_vocabulary
@@ -87,13 +87,6 @@ class CaptureLookup(Protocol):
     """The one capture read the remove op needs (its ``node_paths`` + tombstone state)."""
 
     async def get(self, capture_id: str) -> CaptureRecord | None: ...
-
-
-class NodeDeleteStore(Protocol):
-    """The index delete the remove op needs — DB rows for the removed node paths
-    (``chunks``/``edges`` cascade both directions, ADR-026)."""
-
-    async def delete_nodes(self, store_paths: list[str]) -> int: ...
 
 
 class AutoRecordNotFound(Exception):
@@ -155,18 +148,18 @@ class AutoRecordedService:
             # general removal stays backlog, ADR-048 §11).
             raise AutoRecordNotFound(capture_id)
 
-        # Preserve shared entity hubs (ADR-038): a hub this capture minted is substrate owned by the
-        # entity lifecycle, not this memory — deleting it would dangle every other node's edge into
-        # it. The content paths (node_paths minus hub folders) are what we git-rm + DB-delete; the
-        # folder=type predicate mirrors `NodeWriter.remove_nodes`'s keep_types skip.
-        keep = set((await effective_vocabulary(self._vocab, self._settings)).entity_like_types)
-        content_paths = [p for p in record.node_paths if p.split("/", 1)[0] not in keep]
-        if content_paths:
-            await asyncio.to_thread(self._writer.remove_nodes, content_paths)
-            # DB-delete is decoupled from the unlink result + unconditional: a retry after a crash
-            # between the unlink and here (files already gone) still prunes the orphaned index rows
-            # (delete is a no-op on absent paths), so no removed node lingers in search/chat.
-            await self._index.delete_nodes(content_paths)
+        # Preserve shared entity hubs (ADR-038) + prune the content nodes — the shared remove core
+        # (ADR-062 §R), so this path and the general `DELETE /captures/{id}` behave identically
+        # (hub preservation + the self-healing unlink→DB-delete order live in one place).
+        entity_types = list(
+            (await effective_vocabulary(self._vocab, self._settings)).entity_like_types
+        )
+        content_paths = await remove_content_nodes(
+            record,
+            entity_like_types=entity_types,
+            node_writer=self._writer,
+            index_store=self._index,
+        )
         await self._store.tombstone(capture_id)
         await self._backup.request_commit(f"remove chat memory {capture_id}")
         logger.info(

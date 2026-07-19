@@ -1080,8 +1080,12 @@ class FakeCaptureStore:
         return self.records.get(capture_id)
 
     async def list_recent(self, limit: int) -> list[CaptureRecord]:
+        # Excludes tombstoned captures (removed_at) — parity with the prod `WHERE removed_at IS
+        # NULL` so a removed capture vanishes from Recents/Captures (ADR-048 §11 / ADR-062 §R).
         ordered = sorted(
-            self.records.values(), key=lambda r: r.created_at or datetime.now(UTC), reverse=True
+            (r for r in self.records.values() if r.removed_at is None),
+            key=lambda r: r.created_at or datetime.now(UTC),
+            reverse=True,
         )
         return ordered[:limit]
 
@@ -1137,6 +1141,13 @@ class FakeCaptureStore:
 
     async def delete(self, capture_id: str) -> None:
         self.records.pop(capture_id, None)
+
+    async def tombstone(self, capture_id: str) -> bool:
+        rec = self.records.get(capture_id)
+        if rec is None or rec.removed_at is not None:
+            return False
+        rec.removed_at = datetime.now(UTC)
+        return True
 
     async def list_drafts_created_before(self, cutoff: datetime) -> list[CaptureRecord]:
         drafts = [

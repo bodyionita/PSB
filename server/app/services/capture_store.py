@@ -153,7 +153,9 @@ class CaptureStore(Protocol):
         ...
 
     async def list_recent(self, limit: int) -> list[CaptureRecord]:
-        """Newest-first, ``node_refs``-resolved like :meth:`get`."""
+        """Newest-first, ``node_refs``-resolved like :meth:`get`. One-tap/general-removed captures
+        (``removed_at``) are excluded — a removed capture must vanish from Recents/Captures
+        (ADR-048 §11 / ADR-062 §R)."""
         ...
 
     async def list_inbox_materialized(self, *, folder: str, limit: int) -> list[CaptureRecord]:
@@ -204,6 +206,12 @@ class CaptureStore(Protocol):
     async def delete(self, capture_id: str) -> None:
         """Hard-delete a capture row (M9.6 T1, ADR-061 §3/§9 — discard / draft GC). Its ``media``
         rows cascade (fk ``ON DELETE CASCADE``); the caller removes the raw files first."""
+        ...
+
+    async def tombstone(self, capture_id: str) -> bool:
+        """Soft-delete a capture: stamp ``removed_at`` (replay-excluded + audit trail, ADR-048 §11 /
+        ADR-062 §R). Scoped ``WHERE removed_at IS NULL`` so a double-remove is a no-op; returns
+        whether a *live* row was tombstoned. The general remove stamps this LAST (self-heal)."""
         ...
 
     async def list_drafts_created_before(self, cutoff: datetime) -> list[CaptureRecord]:
@@ -390,6 +398,7 @@ class PgCaptureStore:
                   FROM captures c
                 {_NODE_REFS_JOIN}
                 {_MEDIA_REF_JOIN}
+                 WHERE c.removed_at IS NULL
                  ORDER BY c.created_at DESC
                  LIMIT $1
                 """,
@@ -484,6 +493,18 @@ class PgCaptureStore:
     async def delete(self, capture_id: str) -> None:
         async with self._db.acquire() as conn:
             await conn.execute("DELETE FROM captures WHERE id = $1", capture_id)
+
+    async def tombstone(self, capture_id: str) -> bool:
+        async with self._db.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE captures SET removed_at = now(), updated_at = now() "
+                "WHERE id = $1 AND removed_at IS NULL",
+                capture_id,
+            )
+        try:
+            return int(result.split()[-1]) > 0
+        except (ValueError, IndexError):
+            return False
 
     async def list_drafts_created_before(self, cutoff: datetime) -> list[CaptureRecord]:
         async with self._db.acquire() as conn:

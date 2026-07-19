@@ -65,6 +65,7 @@ from .services.agent_runs import PgAgentRunStore, set_run_finish_hook
 from .services.auth_service import AuthService
 from .services.backup_jobs import build_backup_jobs
 from .services.capture_pipeline import CapturePipeline
+from .services.capture_removal import CaptureRemovalService
 from .services.capture_store import PgCaptureStore
 from .services.git_repo import GitRepo
 from .services.graph_health import build_graph_health_service
@@ -380,6 +381,21 @@ async def lifespan(app: FastAPI):
         node_media_store=node_media_store,
     )
     app.state.capture_pipeline = pipeline
+
+    # General capture remove (ADR-062 §R, DELETE /captures/{id}): entirely deletes a submitted
+    # capture — content nodes (hubs preserved) + media rows/raw files + tombstone. Shares the
+    # hub-preserving node-removal core with the chat one-tap remove (auto_recorded). Reuses the same
+    # capture store + index store + node writer + store backup + media substrate.
+    app.state.capture_removal_service = CaptureRemovalService(
+        settings=settings,
+        captures=capture_store,
+        index_store=index_store,
+        node_writer=node_writer,
+        store_backup=store_backup,
+        media_store=app.state.media_store,
+        media_files=app.state.media_files,
+        vocab=vocabulary_service,
+    )
 
     # Review read/resolve surface (ADR-030 §3, M3 task 4 + M6 task 2): lists decidable items and
     # resolves them — materializing a pending entity edge onto the store (write + reindex + commit),

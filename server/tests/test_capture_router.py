@@ -14,7 +14,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.dependencies import get_capture_pipeline, require_session
+from app.dependencies import (
+    get_capture_pipeline,
+    get_capture_removal_service,
+    require_session,
+)
 from app.routers import capture
 from app.services.capture_pipeline import (
     CaptureNotFound,
@@ -25,6 +29,7 @@ from app.services.capture_pipeline import (
     UnsupportedImage,
     VoicePartLimit,
 )
+from app.services.capture_removal import CaptureRemoveDraftOpen, CaptureRemoveNotFound
 from app.services.capture_store import (
     DRAFT,
     KIND_COMPOSITE,
@@ -168,6 +173,48 @@ def client_and_pipeline():
     app.dependency_overrides[get_capture_pipeline] = lambda: fake
     app.dependency_overrides[require_session] = lambda: None  # bypass auth for these tests
     return TestClient(app), fake
+
+
+class FakeRemovalService:
+    """Records DELETE /captures/{id} delegations and replays a canned error for the router test."""
+
+    def __init__(self) -> None:
+        self.removed: list[str] = []
+        self.error: Exception | None = None
+
+    async def remove_capture(self, capture_id: str) -> None:
+        if self.error is not None:
+            raise self.error
+        self.removed.append(capture_id)
+
+
+@pytest.fixture
+def client_and_removal():
+    app = FastAPI()
+    app.include_router(capture.router, prefix=PREFIX)
+    fake = FakeRemovalService()
+    app.dependency_overrides[get_capture_removal_service] = lambda: fake
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app), fake
+
+
+def test_remove_capture_204_delegates(client_and_removal):
+    client, removal = client_and_removal
+    resp = client.delete(f"{PREFIX}/captures/cap-1")
+    assert resp.status_code == 204
+    assert removal.removed == ["cap-1"]
+
+
+def test_remove_capture_unknown_is_404(client_and_removal):
+    client, removal = client_and_removal
+    removal.error = CaptureRemoveNotFound("cap-x")
+    assert client.delete(f"{PREFIX}/captures/cap-x").status_code == 404
+
+
+def test_remove_capture_open_draft_is_409(client_and_removal):
+    client, removal = client_and_removal
+    removal.error = CaptureRemoveDraftOpen("draft-1")
+    assert client.delete(f"{PREFIX}/captures/draft-1").status_code == 409
 
 
 # The three one-shot `POST /capture/{text,voice,image}` endpoints are removed in M9.6 (ADR-061 §8);

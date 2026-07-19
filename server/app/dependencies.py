@@ -22,6 +22,7 @@ from .search.service import SearchService
 from .services.agent_runs import AgentRunStore
 from .services.auth_service import AuthService, SessionInfo
 from .services.capture_pipeline import CapturePipeline
+from .services.capture_removal import CaptureRemovalService
 from .services.media_derivation import MediaDerivationService
 from .services.media_store import MediaFiles, MediaStore
 from .services.model_routing import ModelRoutingService
@@ -77,6 +78,10 @@ def get_oauth_service(request: Request) -> OAuthService:
 
 def get_capture_pipeline(request: Request) -> CapturePipeline:
     return request.app.state.capture_pipeline
+
+
+def get_capture_removal_service(request: Request) -> CaptureRemovalService:
+    return request.app.state.capture_removal_service
 
 
 def get_media_store(request: Request) -> MediaStore:

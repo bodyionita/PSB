@@ -13,7 +13,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
-from ..dependencies import get_capture_pipeline, require_session
+from ..dependencies import (
+    get_capture_pipeline,
+    get_capture_removal_service,
+    require_session,
+)
 from ..models import (
     CaptureAcceptedResponse,
     CaptureAnchorEditRequest,
@@ -33,6 +37,11 @@ from ..services.capture_pipeline import (
     UnsupportedAudio,
     UnsupportedImage,
     VoicePartLimit,
+)
+from ..services.capture_removal import (
+    CaptureRemovalService,
+    CaptureRemoveDraftOpen,
+    CaptureRemoveNotFound,
 )
 
 router = APIRouter(tags=["capture"], dependencies=[Depends(require_session)])
@@ -208,6 +217,28 @@ async def get_capture(
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="capture not found")
     return CaptureView.from_record(record)
+
+
+@router.delete("/captures/{capture_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_capture(
+    capture_id: str,
+    removal: CaptureRemovalService = Depends(get_capture_removal_service),
+) -> None:
+    """Entirely remove a submitted capture (ADR-062 §R): git-rm its content nodes (entity hubs
+    preserved), purge its media rows + raw files, then tombstone the capture (replay-excluded so
+    ``reprocess-all`` / a chat re-distill can't resurrect it). ``409`` for an open draft (use
+    Discard); ``404`` for an unknown or already-removed capture. Idempotent."""
+    try:
+        await removal.remove_capture(capture_id)
+    except CaptureRemoveNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="capture not found"
+        ) from None
+    except CaptureRemoveDraftOpen:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="capture is an open draft — discard it instead",
+        ) from None
 
 
 @router.post(
