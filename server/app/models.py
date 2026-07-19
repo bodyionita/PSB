@@ -797,6 +797,18 @@ class NodeDeleteAcceptedResponse(BaseModel):
     run_id: str
 
 
+class OrphanKeepItem(BaseModel):
+    """One kept orphan hub (ADR-064 §5, M9.8 T5.5) — the shape of both the ``POST
+    /admin/nodes/{id}/keep`` result and each row of ``GET /admin/orphan-keeps``. ``key`` is the
+    stable ``keep_key`` (surface-form + type identity) the web un-keeps on; ``label`` is the hub's
+    title form; ``kept_at`` is when it was (last) kept."""
+
+    key: str
+    type: str
+    label: str
+    kept_at: datetime | None = None
+
+
 # --- Tag consolidation (03-api §Agents & admin, M2 / ADR-024 §2) ---
 class TagMergeItem(BaseModel):
     """One merge group: fold ``variants`` into ``canonical`` (ADR-024). Wire shape for both the

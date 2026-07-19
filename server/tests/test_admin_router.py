@@ -13,6 +13,7 @@ from app.dependencies import (
     get_identity_capsule_service,
     get_merge_service,
     get_node_delete_service,
+    get_orphan_keep_service,
     get_registry,
     get_reindex_service,
     get_reprocess_service,
@@ -20,6 +21,7 @@ from app.dependencies import (
     get_tag_consolidation_service,
     require_session,
 )
+from app.entities.keep_store import KeepDecision
 from app.entities.merge import BadMerge, MergeNodeNotFound, MergeProposal, MergeSide
 from app.providers.base import ProviderUnavailable
 from app.providers.registry import ProviderReport
@@ -29,6 +31,11 @@ from app.services.node_delete import (
     NodeDeleteIsContent,
     NodeDeleteNotFound,
     NodeDeleteNotOrphan,
+)
+from app.services.orphan_keep import (
+    OrphanKeepIsContent,
+    OrphanKeepKeyNotFound,
+    OrphanKeepNotFound,
 )
 from app.services.store_backup import BackupResult
 from app.tags.consolidation import TagMerge
@@ -480,6 +487,91 @@ def test_node_delete_409_still_referenced():
     )
     assert resp.status_code == 409
     assert "3 canonical edge" in resp.json()["detail"]
+
+
+# --- orphan keep-list endpoints (ADR-064 §5, M9.8 T5.5) ---
+class FakeOrphanKeep:
+    """keep returns a KeepDecision (or raises); list returns keeps; unkeep raises on unknown."""
+
+    def __init__(self, *, keep_error=None, unkeep_error=None, keeps=None) -> None:
+        self._keep_error = keep_error
+        self._unkeep_error = unkeep_error
+        self._keeps = list(keeps or [])
+        self.kept: str | None = None
+        self.unkept: str | None = None
+
+    async def keep(self, node_id: str) -> KeepDecision:
+        if self._keep_error is not None:
+            raise self._keep_error
+        self.kept = node_id
+        return KeepDecision(node_type="person", forms=["father", "dad"], node_id=node_id)
+
+    async def list_keeps(self):
+        return self._keeps
+
+    async def unkeep(self, key: str) -> None:
+        if self._unkeep_error is not None:
+            raise self._unkeep_error
+        self.unkept = key
+
+
+def _orphan_keep_client(fake: FakeOrphanKeep) -> TestClient:
+    app = FastAPI()
+    app.include_router(admin.router, prefix=PREFIX)
+    app.dependency_overrides[get_orphan_keep_service] = lambda: fake
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def test_keep_node_returns_200_with_item():
+    fake = FakeOrphanKeep()
+    resp = _orphan_keep_client(fake).post(f"{PREFIX}/admin/nodes/hub-1/keep")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["type"] == "person"
+    assert body["label"] == "father"
+    assert body["key"]  # the stable keep_key
+    assert fake.kept == "hub-1"
+
+
+def test_keep_node_404_unknown():
+    resp = _orphan_keep_client(FakeOrphanKeep(keep_error=OrphanKeepNotFound("x"))).post(
+        f"{PREFIX}/admin/nodes/x/keep"
+    )
+    assert resp.status_code == 404
+
+
+def test_keep_node_400_content_node():
+    resp = _orphan_keep_client(FakeOrphanKeep(keep_error=OrphanKeepIsContent("m"))).post(
+        f"{PREFIX}/admin/nodes/m/keep"
+    )
+    assert resp.status_code == 400
+
+
+def test_list_orphan_keeps_maps_to_wire_shape():
+    at = datetime(2026, 7, 19, 9, 0, 0, tzinfo=UTC)
+    keeps = [KeepDecision(node_type="person", forms=["mother"], node_id="h2", created_at=at)]
+    resp = _orphan_keep_client(FakeOrphanKeep(keeps=keeps)).get(f"{PREFIX}/admin/orphan-keeps")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["type"] == "person"
+    assert body[0]["label"] == "mother"
+    assert body[0]["kept_at"] == "2026-07-19T09:00:00Z"
+
+
+def test_delete_orphan_keep_returns_204():
+    fake = FakeOrphanKeep()
+    resp = _orphan_keep_client(fake).delete(f"{PREFIX}/admin/orphan-keeps/some-key")
+    assert resp.status_code == 204
+    assert fake.unkept == "some-key"
+
+
+def test_delete_orphan_keep_404_unknown_key():
+    resp = _orphan_keep_client(FakeOrphanKeep(unkeep_error=OrphanKeepKeyNotFound("k"))).delete(
+        f"{PREFIX}/admin/orphan-keeps/k"
+    )
+    assert resp.status_code == 404
 
 
 # --- GET /admin/providers (ADR-044, M4 follow-up) ---

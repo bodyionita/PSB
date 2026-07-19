@@ -26,6 +26,7 @@ from .entities.backfill import BackfillService
 from .entities.entity_browse import EntityBrowseService
 from .entities.entity_dedup import EntityDedupService, PgEntityDedupStore
 from .entities.entity_store import PgEntityStore
+from .entities.keep_store import PgKeepStore
 from .entities.merge import MergeService
 from .entities.merge_core import MergeCore
 from .entities.merge_replay import MergeReplayService
@@ -83,6 +84,7 @@ from .services.node_delete import NodeDeleteService
 from .services.node_media_store import PgNodeMediaStore
 from .services.node_time_edit import NodeTimeEditService
 from .services.occurred_enrichment import build_occurred_enrichment_service
+from .services.orphan_keep import OrphanKeepService
 from .services.rate_limit import RateLimiter
 from .services.reindex import ReindexService
 from .services.reprocess import PgReprocessStore, ReprocessService
@@ -338,6 +340,17 @@ async def lifespan(app: FastAPI):
         index_store=index_store,
         store_backup=store_backup,
         run_store=run_store,
+        vocab=vocabulary_service,
+    )
+    # Orphan keep-list (ADR-064 §5, M9.8 T5.5): the durable whitelist that stops an intentionally-
+    # kept zero-degree hub (Father/Mother) from nagging the graph-health orphan check. Synchronous
+    # (no run) keep/list/un-keep, keyed on surface form + type so a keep survives `reprocess-all` as
+    # the read-time filter the in-app graph-health service (built below) applies. Hubs-only, like
+    # node-delete (shares the effective entity-like vocabulary).
+    app.state.orphan_keep_service = OrphanKeepService(
+        settings=settings,
+        entity_store=entity_store,
+        keeps=PgKeepStore(db),
         vocab=vocabulary_service,
     )
     # Nightly dedup sweep (M6 task 5, ADR-049): near-duplicate content nodes file a dedup-proposal

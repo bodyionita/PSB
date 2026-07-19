@@ -21,6 +21,7 @@ from ..dependencies import (
     get_merge_service,
     get_node_delete_service,
     get_oauth_service,
+    get_orphan_keep_service,
     get_registry,
     get_reindex_service,
     get_reprocess_service,
@@ -42,6 +43,7 @@ from ..models import (
     McpRevokeAllResponse,
     MergeSideModel,
     NodeDeleteAcceptedResponse,
+    OrphanKeepItem,
     ProviderErrorModel,
     ProvidersResponse,
     ProviderStatusItem,
@@ -66,6 +68,12 @@ from ..services.node_delete import (
     NodeDeleteNotFound,
     NodeDeleteNotOrphan,
     NodeDeleteService,
+)
+from ..services.orphan_keep import (
+    OrphanKeepIsContent,
+    OrphanKeepKeyNotFound,
+    OrphanKeepNotFound,
+    OrphanKeepService,
 )
 from ..services.reindex import ReindexService
 from ..services.reprocess import ReprocessService
@@ -307,6 +315,66 @@ async def delete_node(
     except NodeDeleteNotOrphan as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return NodeDeleteAcceptedResponse(run_id=run_id)
+
+
+@router.post("/nodes/{node_id}/keep", response_model=OrphanKeepItem)
+async def keep_node(
+    node_id: str,
+    service: OrphanKeepService = Depends(get_orphan_keep_service),
+) -> OrphanKeepItem:
+    """Keep (whitelist) a zero-degree orphan **hub** so the nightly graph-health orphan check stops
+    flagging it (ADR-064 §5 — e.g. the intentionally-kept Father/Mother hubs). **Synchronous**, no
+    ``agent_runs`` job (a config-like decision): the server resolves the hub's current surface forms
+    + type and upserts an ``orphan_keeps`` decision keyed on **surface form + type, not node id**
+    (survives ``reprocess-all`` as a read-time filter). Idempotent. ``404`` unknown/tombstone;
+    ``400`` a content node (Keep is hubs-only)."""
+    try:
+        decision = await service.keep(node_id)
+    except OrphanKeepNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="node not found"
+        ) from None
+    except OrphanKeepIsContent:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="node is a content node — Keep is for entity hubs only",
+        ) from None
+    return OrphanKeepItem(
+        key=decision.key,
+        type=decision.node_type,
+        label=decision.label,
+        kept_at=decision.created_at,
+    )
+
+
+@router.get("/orphan-keeps", response_model=list[OrphanKeepItem])
+async def list_orphan_keeps(
+    service: OrphanKeepService = Depends(get_orphan_keep_service),
+) -> list[OrphanKeepItem]:
+    """The kept-hub list backing the web "Kept (N)" strip (ADR-064 §5). ``key`` is the stable
+    ``keep_key`` used to un-keep; newest keep first."""
+    keeps = await service.list_keeps()
+    return [
+        OrphanKeepItem(key=k.key, type=k.node_type, label=k.label, kept_at=k.created_at)
+        for k in keeps
+    ]
+
+
+@router.delete("/orphan-keeps/{key}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_orphan_keep(
+    key: str,
+    service: OrphanKeepService = Depends(get_orphan_keep_service),
+) -> Response:
+    """Un-keep — remove the ``orphan_keeps`` decision by its stable ``keep_key`` (**not** node id: a
+    reprocess changes the id, the key persists). The hub reappears in the orphan check next run.
+    ``204``; ``404`` no such key (ADR-064 §5)."""
+    try:
+        await service.unkeep(key)
+    except OrphanKeepKeyNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="keep not found"
+        ) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

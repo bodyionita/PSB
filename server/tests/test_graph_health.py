@@ -16,6 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from app.config import Settings
+from app.entities.keep_store import KeepDecision
 from app.services.agent_runs import FAILED, SUCCEEDED
 from app.services.graph_health import (
     AGENT,
@@ -29,13 +30,15 @@ from app.services.graph_health import (
     CountSample,
     GraphHealthService,
     Offender,
+    OrphanCandidate,
     ProfileObservations,
     ReviewAgingRaw,
     _count_sample,
+    filter_kept_orphans,
     newest_as_of,
     stale_entity_profiles,
 )
-from tests.fakes import FakeAgentRunStore
+from tests.fakes import FakeAgentRunStore, FakeKeepStore
 
 
 class _FakeGraphHealthStore:
@@ -44,7 +47,7 @@ class _FakeGraphHealthStore:
     def __init__(
         self,
         *,
-        orphans: CountSample | None = None,
+        orphans: list[OrphanCandidate] | None = None,
         inbox: CountSample | None = None,
         aging: ReviewAgingRaw | None = None,
         missing: CountSample | None = None,
@@ -53,7 +56,7 @@ class _FakeGraphHealthStore:
         profiles: list[ProfileObservations] | None = None,
         boom: bool = False,
     ) -> None:
-        self._orphans = orphans or CountSample(0)
+        self._orphans = list(orphans or [])
         self._inbox = inbox or CountSample(0)
         self._aging = aging or ReviewAgingRaw(decidable=0, aged=0, oldest_created_at=None)
         self._missing = missing or CountSample(0)
@@ -62,7 +65,7 @@ class _FakeGraphHealthStore:
         self._profiles = profiles or []
         self._boom = boom
 
-    async def orphan_nodes(self, *, inbox_prefix, sample):
+    async def orphan_nodes(self, *, inbox_prefix):
         if self._boom:
             raise RuntimeError("db down")
         return self._orphans
@@ -86,8 +89,23 @@ class _FakeGraphHealthStore:
         return self._profiles
 
 
-def _service(store, runs, settings: Settings | None = None) -> GraphHealthService:
-    return GraphHealthService(settings=settings or Settings(), store=store, run_store=runs)
+def _service(store, runs, settings: Settings | None = None, keeps=None) -> GraphHealthService:
+    return GraphHealthService(
+        settings=settings or Settings(),
+        store=store,
+        run_store=runs,
+        keeps=keeps or FakeKeepStore(),
+    )
+
+
+def _orphan(node_id: str, title: str, node_type: str = "memory", aliases=()) -> OrphanCandidate:
+    return OrphanCandidate(
+        id=node_id,
+        title=title,
+        store_path=f"{node_type}/{title}--{node_id}.md",
+        type=node_type,
+        aliases=list(aliases),
+    )
 
 
 def _last_run(runs: FakeAgentRunStore):
@@ -103,7 +121,10 @@ def _checks_by_name(run) -> dict[str, dict]:
 async def test_seven_checks_fold_into_one_run():
     now = datetime.now(UTC)
     store = _FakeGraphHealthStore(
-        orphans=CountSample(2, [Offender("n1", "Orphan One"), Offender("n2", "Orphan Two")]),
+        orphans=[
+            _orphan("n1", "Orphan One", node_type="person"),
+            _orphan("n2", "Orphan Two", node_type="memory"),
+        ],
         inbox=CountSample(3, [Offender("i1", "inbox/x.md")]),
         aging=ReviewAgingRaw(
             decidable=5,
@@ -137,7 +158,13 @@ async def test_seven_checks_fold_into_one_run():
         CHECK_STALE_OBSERVATIONS,
     }
     assert checks[CHECK_ORPHAN_NODES]["count"] == 2
-    assert checks[CHECK_ORPHAN_NODES]["sample"][0] == {"id": "n1", "label": "Orphan One"}
+    # Each orphan offender now carries `type` (hub vs content — ADR-064 §5); the sample preserves
+    # the store's order (indexed_at DESC, id).
+    assert checks[CHECK_ORPHAN_NODES]["sample"][0] == {
+        "id": "n1",
+        "label": "Orphan One",
+        "type": "person",
+    }
     assert checks[CHECK_INBOX_DEPTH]["count"] == 3
     assert checks[CHECK_ALIAS_LESS]["count"] == 4
     assert checks[CHECK_TOMBSTONE_INTEGRITY]["count"] == 0
@@ -226,6 +253,80 @@ def test_count_sample_is_independent_of_sample_size():
     assert full_result.count == empty_result.count == 3
     assert len(full_result.offenders) == 2
     assert empty_result.offenders == []
+
+
+# --- orphan keep-list filter (ADR-064 §5, M9.8 T5.5) --------------------------------------------
+
+
+def _keep(node_type: str, *forms: str) -> KeepDecision:
+    return KeepDecision(node_type=node_type, forms=list(forms), node_id="kept")
+
+
+def test_filter_kept_orphans_excludes_kept_hub_from_count_and_sample():
+    # A hub kept by surface form + type is dropped from BOTH the count and the sample; the
+    # remaining orphans keep their order + carry `type`.
+    candidates = [
+        _orphan("h1", "Father", node_type="person"),  # kept
+        _orphan("h2", "Horia Fenwick", node_type="person"),
+        _orphan("m1", "an undated note", node_type="memory"),
+    ]
+    keeps = [_keep("person", "father")]  # normalized form of "Father"
+
+    result = filter_kept_orphans(candidates, keeps, sample=10)
+
+    assert result.count == 2  # Father excluded
+    assert [o.id for o in result.offenders] == ["h2", "m1"]
+    assert result.offenders[0].type == "person"
+    assert result.offenders[1].type == "memory"
+
+
+def test_filter_kept_orphans_is_type_scoped_and_folds_diacritics():
+    # A keep only suppresses a same-type hub, and the match is diacritic-folded (ADR-041): a keep of
+    # topic "Mădălina" does NOT suppress a person hub of the same name, but DOES suppress the topic.
+    candidates = [
+        _orphan("p1", "Madalina Fairfax", node_type="person"),
+        _orphan("t1", "Madalina", node_type="topic"),
+    ]
+    keeps = [_keep("topic", "madalina")]
+
+    result = filter_kept_orphans(candidates, keeps, sample=10)
+
+    assert result.count == 1
+    assert result.offenders[0].id == "p1"  # the person survives; the topic is kept
+
+
+def test_filter_kept_orphans_matches_on_an_alias_form():
+    # Surface forms include aliases, so a keep recorded under any of a hub's forms suppresses it.
+    candidates = [_orphan("h1", "Mother", node_type="person", aliases=["mom"])]
+    result = filter_kept_orphans(candidates, [_keep("person", "mom")], sample=10)
+    assert result.count == 0
+    assert result.offenders == []
+
+
+def test_filter_kept_orphans_bounds_sample_but_not_count():
+    candidates = [_orphan(f"m{i}", f"note {i}") for i in range(5)]
+    result = filter_kept_orphans(candidates, [], sample=2)
+    assert result.count == 5  # true count survives the sample bound
+    assert len(result.offenders) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_excludes_kept_hub_from_the_orphan_check():
+    # End-to-end through the service: a kept hub is gone from the orphan finding's count + sample.
+    store = _FakeGraphHealthStore(
+        orphans=[
+            _orphan("h1", "Father", node_type="person"),
+            _orphan("h2", "Diana Vance", node_type="person"),
+        ]
+    )
+    runs = FakeAgentRunStore()
+    keeps = FakeKeepStore(keeps=[_keep("person", "father")])
+
+    await _service(store, runs, keeps=keeps).run_scheduled()
+
+    orphan = _checks_by_name(_last_run(runs))[CHECK_ORPHAN_NODES]
+    assert orphan["count"] == 1
+    assert [o["id"] for o in orphan["sample"]] == ["h2"]
 
 
 # --- pure freshness logic -----------------------------------------------------------------------

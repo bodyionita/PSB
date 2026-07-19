@@ -565,6 +565,26 @@ class FakeMergeDecisionStore:
         return len(self._by_key)
 
 
+class FakeKeepStore:
+    """In-memory durable orphan-keep store (ADR-064 §5) — upsert on the keep identity key, mirroring
+    PgKeepStore so a keep-record / graph-health-filter test needs no live DB."""
+
+    def __init__(self, *, keeps=None) -> None:
+        # keyed by KeepDecision.key so `record` is idempotent (last keep wins).
+        self._by_key: dict[str, object] = {}
+        for k in keeps or []:
+            self._by_key[k.key] = k
+
+    async def record(self, decision) -> None:
+        self._by_key[decision.key] = decision
+
+    async def all_keeps(self):
+        return list(self._by_key.values())
+
+    async def remove(self, key: str) -> bool:
+        return self._by_key.pop(key, None) is not None
+
+
 class FakeProfileStore:
     """In-memory profile store — records upserts + returns preset current hashes (profile tests)."""
 

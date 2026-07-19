@@ -29,6 +29,7 @@ from .services.media_store import MediaFiles, MediaStore
 from .services.model_routing import ModelRoutingService
 from .services.node_delete import NodeDeleteService
 from .services.node_time_edit import NodeTimeEditService
+from .services.orphan_keep import OrphanKeepService
 from .services.reindex import ReindexService
 from .services.reprocess import ReprocessService
 from .services.review_service import ReviewService
@@ -168,6 +169,10 @@ def get_merge_service(request: Request) -> MergeService:
 
 def get_node_delete_service(request: Request) -> NodeDeleteService:
     return request.app.state.node_delete_service
+
+
+def get_orphan_keep_service(request: Request) -> OrphanKeepService:
+    return request.app.state.orphan_keep_service
 
 
 def get_vocabulary_service(request: Request) -> VocabularyService:

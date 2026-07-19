@@ -38,6 +38,7 @@ from typing import Any, Protocol
 
 from ..config import Settings
 from ..db import Database
+from ..entities.keep_store import KeepDecision, KeepStore, surface_forms
 from .agent_runs import FAILED, SUCCEEDED, AgentRunStore
 from .review_queue import DECIDABLE_STATUSES
 
@@ -61,13 +62,35 @@ CHECK_STALE_OBSERVATIONS = "stale-observations"
 
 @dataclass(frozen=True)
 class Offender:
-    """One flagged node/item: its id + a short human label (title, path, or a relation)."""
+    """One flagged node/item: its id + a short human label (title, path, or a relation), plus an
+    optional ``type``. The **orphan-nodes** check sets ``type`` (the node's entity/content type) so
+    the web card can tell **hubs** (get inline Keep/Merge) from **content** nodes (Delete →
+    capture-remove only, ADR-064 §5); the other six checks leave it ``None`` and the payload stays
+    ``{id, label}`` (03-api §graph-health addendum)."""
 
     id: str
     label: str
+    type: str | None = None
 
     def as_dict(self) -> dict[str, str]:
-        return {"id": self.id, "label": self.label}
+        out = {"id": self.id, "label": self.label}
+        if self.type is not None:
+            out["type"] = self.type
+        return out
+
+
+@dataclass(frozen=True)
+class OrphanCandidate:
+    """A live, non-``inbox/`` node with no canonical edge — one orphan-check candidate *before* the
+    kept-hub filter (ADR-064 §5). Carries the ``type`` + normalizable surface material (``title`` +
+    ``aliases``) the filter needs: :func:`filter_kept_orphans` drops any whose surface forms
+    intersect a kept entry of the same type, then counts + samples the remainder."""
+
+    id: str
+    title: str | None
+    store_path: str
+    type: str
+    aliases: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -102,7 +125,7 @@ class ProfileObservations:
 class GraphHealthStore(Protocol):
     """The narrow read surface the reporter runs its checks over (all read-only)."""
 
-    async def orphan_nodes(self, *, inbox_prefix: str, sample: int) -> CountSample: ...
+    async def orphan_nodes(self, *, inbox_prefix: str) -> list[OrphanCandidate]: ...
 
     async def inbox_depth(self, *, inbox_prefix: str, sample: int) -> CountSample: ...
 
@@ -210,6 +233,34 @@ def stale_entity_profiles(
     return CountSample(count=len(stale), offenders=offenders)
 
 
+def filter_kept_orphans(
+    candidates: list[OrphanCandidate], keeps: list[KeepDecision], *, sample: int
+) -> CountSample:
+    """Drop kept hubs from the orphan candidates, then count + sample the remainder (ADR-064 §5).
+
+    A candidate is excluded iff its normalized surface forms intersect a kept entry **of the same
+    type** — the diacritic-folded whitelist match SQL can't express, so it runs here in pure Python
+    (personal-scale, trivially cheap). Kept hubs are **fully excluded from both the count and the
+    sample** (a resolved keep must not leave the check amber). Content nodes are never affected:
+    keeps only exist for hub types (enforced at keep time), so no ``orphan_keeps`` entry carries a
+    content type to match. Candidate order (indexed_at DESC, id — set by the store) is preserved, so
+    the Python sample matches the old SQL-``LIMIT`` sample; ``type`` rides along on each offender so
+    the web tells hubs from content."""
+    kept_by_type: dict[str, set[str]] = {}
+    for keep in keeps:
+        kept_by_type.setdefault(keep.node_type, set()).update(keep.forms)
+    remaining: list[OrphanCandidate] = []
+    for candidate in candidates:
+        kept_forms = kept_by_type.get(candidate.type)
+        if kept_forms and set(surface_forms(candidate.title, candidate.aliases)) & kept_forms:
+            continue
+        remaining.append(candidate)
+    offenders = [
+        Offender(id=c.id, label=c.title or c.store_path, type=c.type) for c in remaining[:sample]
+    ]
+    return CountSample(count=len(remaining), offenders=offenders)
+
+
 # --- The reporter -------------------------------------------------------------------------------
 
 
@@ -222,10 +273,15 @@ class GraphHealthService:
         settings: Settings,
         store: GraphHealthStore,
         run_store: AgentRunStore,
+        keeps: KeepStore,
     ) -> None:
         self._settings = settings
         self._store = store
         self._runs = run_store
+        # Durable orphan keep-list (ADR-064 §5): the orphan check reads it and excludes any kept hub
+        # (surface-form + type match) from both its count and sample — a read-time filter, so a kept
+        # hub stays suppressed across a `reprocess-all` with no replay.
+        self._keeps = keeps
 
     async def run_scheduled(self) -> GraphHealthOutcome | None:
         """The scheduler/CLI/manual-trigger entry point. Opens the run, runs the checks, closes it;
@@ -258,7 +314,9 @@ class GraphHealthService:
 
         logger.info("graph-health: running %s checks", 7)
 
-        orphans = await self._store.orphan_nodes(inbox_prefix=inbox_prefix, sample=sample)
+        orphan_candidates = await self._store.orphan_nodes(inbox_prefix=inbox_prefix)
+        keeps = await self._keeps.all_keeps()
+        orphans = filter_kept_orphans(orphan_candidates, keeps, sample=sample)
         inbox = await self._store.inbox_depth(inbox_prefix=inbox_prefix, sample=sample)
         aging = await self._review_aging(now=now, sample=sample)
         missing = await self._store.memories_missing_occurred(sample=sample)
@@ -349,35 +407,42 @@ class PgGraphHealthStore:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    async def orphan_nodes(self, *, inbox_prefix: str, sample: int) -> CountSample:
+    async def orphan_nodes(self, *, inbox_prefix: str) -> list[OrphanCandidate]:
         # Live, non-`inbox/` nodes with no canonical edge either direction. Derived `similar` edges
         # are not asserted relationships, so origin='canonical' — a node reachable only by
         # similarity is still a graph orphan (ADR-053 §9). `inbox/` fallbacks are expected
         # edge-less, so they belong to the inbox-depth check, not here (no double-counting).
+        #
+        # Returns ALL candidates (no SQL LIMIT) with their `type` + surface material (title +
+        # aliases): the kept-hub filter (ADR-064 §5) must drop kept hubs from BOTH the count and the
+        # sample, and the diacritic-folded match can't be expressed in SQL, so counting + sampling
+        # move to `filter_kept_orphans` in pure code. Personal-scale, so the full read is cheap; the
+        # order (indexed_at DESC, id) is preserved so the Python sample matches the old SQL sample.
         async with self._db.acquire() as conn:
             rows = await conn.fetch(
                 """
-                WITH matched AS (
-                    SELECT n.id, n.title, n.store_path, n.indexed_at
-                      FROM nodes n
-                     WHERE n.merged_into IS NULL
-                       AND n.store_path NOT LIKE $1
-                       AND NOT EXISTS (
-                           SELECT 1 FROM edges e
-                            WHERE (e.src_id = n.id OR e.dst_id = n.id) AND e.origin = 'canonical'
-                       )
-                ),
-                sample AS (
-                    SELECT id, title, store_path FROM matched ORDER BY indexed_at DESC, id LIMIT $2
-                )
-                SELECT c.total, s.id, s.title, s.store_path
-                  FROM (SELECT count(*) AS total FROM matched) c
-                  LEFT JOIN sample s ON true
+                SELECT n.id, n.title, n.store_path, n.type, n.aliases
+                  FROM nodes n
+                 WHERE n.merged_into IS NULL
+                   AND n.store_path NOT LIKE $1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM edges e
+                        WHERE (e.src_id = n.id OR e.dst_id = n.id) AND e.origin = 'canonical'
+                   )
+                 ORDER BY n.indexed_at DESC, n.id
                 """,
                 inbox_prefix,
-                sample,
             )
-        return _count_sample(rows, label_key="title", fallback_key="store_path")
+        return [
+            OrphanCandidate(
+                id=str(r["id"]),
+                title=r["title"],
+                store_path=r["store_path"],
+                type=r["type"],
+                aliases=list(r["aliases"] or []),
+            )
+            for r in rows
+        ]
 
     async def inbox_depth(self, *, inbox_prefix: str, sample: int) -> CountSample:
         async with self._db.acquire() as conn:
@@ -570,10 +635,12 @@ def build_graph_health_service(settings: Settings, db: Database) -> GraphHealthS
     """Construct a standalone graph-health reporter for the nightly-tail pipeline step + the manual
     ``POST /agents/graph-health/run`` trigger (ADR-053 §8). DB-only (read-only checks + its own run
     row, no store git) — like the maybe-digest / dedup-sweep reporters."""
+    from ..entities.keep_store import PgKeepStore
     from .agent_runs import PgAgentRunStore
 
     return GraphHealthService(
         settings=settings,
         store=PgGraphHealthStore(db),
         run_store=PgAgentRunStore(db),
+        keeps=PgKeepStore(db),
     )
