@@ -172,21 +172,21 @@ async def test_complete_merges_provider_extra_body(monkeypatch):
         base_url="x",
         api_key="k",
         default_chat_model="vlm",
-        extra_body={"reasoning_format": "hidden"},
+        extra_body={"reasoning_effort": "none"},
     )
     await groq.complete([ChatMessage(role="user", content="hi")])
-    assert captured["json"]["reasoning_format"] == "hidden"
+    assert captured["json"]["reasoning_effort"] == "none"
 
     plain = OpenAICompatibleProvider(id="nebius", base_url="x", api_key="k", default_chat_model="m")
     await plain.complete([ChatMessage(role="user", content="hi")])
-    assert "reasoning_format" not in captured["json"]
+    assert "reasoning_effort" not in captured["json"]
 
 
-def test_build_registry_scopes_reasoning_format_to_groq_only():
+def test_build_registry_scopes_reasoning_effort_to_groq_only():
     # ADR-063: only the Groq provider carries the Qwen3 reasoning suppression; the Nebius VLM
     # fallback (a different endpoint) must not be handed the Groq-specific field.
     reg = build_registry(Settings())
-    assert reg._providers["groq"]._extra_body == {"reasoning_format": "hidden"}
+    assert reg._providers["groq"]._extra_body == {"reasoning_effort": "none"}
     assert reg._providers["nebius"]._extra_body == {}
 
 

@@ -105,9 +105,10 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         # skipped; availability is reachability, not credentials.
         self._requires_api_key = requires_api_key
         # Provider-static extra fields merged into every chat-completions payload. Empty for all
-        # providers except Groq, which needs `reasoning_format: hidden` so the Qwen3 vision VLM's
-        # thinking never lands in the response `content` we read (ADR-063 — that content is the
-        # derived text, the byte-parity reprocess replay source, so it must stay clean prose).
+        # providers except Groq, which sets `reasoning_effort: none` so the Qwen3 vision VLM runs in
+        # non-thinking mode — no reasoning tokens to leak into (or crowd out) the response `content`
+        # we read (ADR-063 — that content is the derived text, the byte-parity reprocess replay
+        # source, so it must stay clean prose and not truncate).
         self._extra_body = dict(extra_body or {})
 
     def chat_model_ids(self) -> tuple[str, ...]:

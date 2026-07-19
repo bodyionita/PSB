@@ -337,11 +337,14 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         default_chat_model=settings.groq_vision_model,
         stt_model=settings.groq_stt_model,
         provider_label="Groq",
-        # The Groq vision VLM is a Qwen3 reasoning model (qwen3.6-27b, ADR-063). Its default
-        # `reasoning_format: raw` inlines <think>…</think> into `content`, which would pollute the
-        # derived text (the reprocess replay source). `hidden` keeps thinking out of `content`;
-        # scoped to Groq only, so the Nebius 72B fallback never sees this Groq-specific field.
-        extra_body={"reasoning_format": "hidden"},
+        # The Groq vision VLM is a Qwen3 reasoning model (qwen3.6-27b, ADR-063). `reasoning_effort:
+        # none` puts it in non-thinking mode: no reasoning tokens are generated, so (1) no <think>
+        # preamble can leak into `content` — the derived text is the reprocess replay source and
+        # must stay clean prose — and (2) the full 32k output budget goes to the transcription
+        # instead of being eaten by variable-length hidden reasoning, which was truncating long
+        # screenshots non-deterministically. Scoped to Groq only, so the Nebius 72B fallback (a
+        # different endpoint) never sees this Groq-specific field.
+        extra_body={"reasoning_effort": "none"},
     )
     # ONE `claude` provider serving BOTH Opus + Sonnet over the same CLI via per-call `--model`
     # (ADR-045 — collapses the former two fake single-model provider ids). The `quick` group routes
