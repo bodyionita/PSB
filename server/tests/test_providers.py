@@ -138,6 +138,58 @@ async def test_complete_sends_image_parts_in_the_payload(monkeypatch):
     assert {"type": "image_url", "image_url": {"url": "data:image/png;base64,ZZZ"}} in content
 
 
+async def test_complete_merges_provider_extra_body(monkeypatch):
+    """`extra_body` (Groq reasoning controls — ADR-063) is merged into the chat payload; a
+    provider without it sends no such field, so the Nebius fallback is never handed a Groq-only
+    param. Captured at the HTTP boundary."""
+    captured: dict = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, *, headers, json):
+            captured["json"] = json
+            return _Resp()
+
+    monkeypatch.setattr("app.providers.openai_compatible.httpx.AsyncClient", _Client)
+
+    groq = OpenAICompatibleProvider(
+        id="groq",
+        base_url="x",
+        api_key="k",
+        default_chat_model="vlm",
+        extra_body={"reasoning_format": "hidden"},
+    )
+    await groq.complete([ChatMessage(role="user", content="hi")])
+    assert captured["json"]["reasoning_format"] == "hidden"
+
+    plain = OpenAICompatibleProvider(id="nebius", base_url="x", api_key="k", default_chat_model="m")
+    await plain.complete([ChatMessage(role="user", content="hi")])
+    assert "reasoning_format" not in captured["json"]
+
+
+def test_build_registry_scopes_reasoning_format_to_groq_only():
+    # ADR-063: only the Groq provider carries the Qwen3 reasoning suppression; the Nebius VLM
+    # fallback (a different endpoint) must not be handed the Groq-specific field.
+    reg = build_registry(Settings())
+    assert reg._providers["groq"]._extra_body == {"reasoning_format": "hidden"}
+    assert reg._providers["nebius"]._extra_body == {}
+
+
 def test_openai_compatible_serves_extra_chat_models():
     # One endpoint may serve N chat models (ADR-045 / ADR-057 §4 — a text model + a VLM).
     provider = OpenAICompatibleProvider(

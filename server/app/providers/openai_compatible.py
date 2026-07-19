@@ -75,6 +75,7 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         stt_model: str = "",
         provider_label: str = "",
         requires_api_key: bool = True,
+        extra_body: dict[str, object] | None = None,
     ) -> None:
         self.id = id
         # Friendly PROVIDER name for the ADR-044 Providers card (one row per provider — ADR-045 §6).
@@ -103,6 +104,11 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         # by network reachability — no key. When False, the key guard + Authorization header are
         # skipped; availability is reachability, not credentials.
         self._requires_api_key = requires_api_key
+        # Provider-static extra fields merged into every chat-completions payload. Empty for all
+        # providers except Groq, which needs `reasoning_format: hidden` so the Qwen3 vision VLM's
+        # thinking never lands in the response `content` we read (ADR-063 — that content is the
+        # derived text, the byte-parity reprocess replay source, so it must stay clean prose).
+        self._extra_body = dict(extra_body or {})
 
     def chat_model_ids(self) -> tuple[str, ...]:
         # One OpenAI-compatible endpoint may serve N chat models (ADR-045 / ADR-057 §4 — a text
@@ -140,10 +146,12 @@ class OpenAICompatibleProvider(ChatProvider, EmbeddingProvider, STTProvider):
         # False). ``images`` (M9, ADR-057 §4) are attached to the last user message as `image_url`
         # content parts for a `vision`-group VLM call; a plain text call passes none.
         self._require_available()
-        payload = {
+        payload: dict[str, object] = {
             "model": model or self._default_chat_model,
             "messages": _render_messages(messages, images),
         }
+        # Provider-static extras (Groq reasoning controls — ADR-063); absent/no-op elsewhere.
+        payload.update(self._extra_body)
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 resp = await client.post(
