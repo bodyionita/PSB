@@ -133,6 +133,21 @@ export function useRetryCapture() {
   });
 }
 
+// General capture remove (M9.7 T6, ADR-062 §R): entirely delete a submitted capture (nodes + media
+// + tombstone). On success invalidate the captures strip (the row animates out of Recents via the
+// list's AnimatePresence) AND the Activity namespace (the Captures feed tab / any run detail also
+// drop it). Double-confirmation lives in the UI (RecentCaptures) — this hook is the plain mutation.
+export function useDeleteCapture() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.removeCapture(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: CAPTURES_KEY });
+      qc.invalidateQueries({ queryKey: ['activity'] });
+    },
+  });
+}
+
 // The anchor edit (M8.2, ADR-056 §5): correct a capture's recorded-at, triggering a background
 // one-capture reorganize (202). Invalidate both the list and the capture's detail so the corrected
 // recorded-at + the re-cycling status render; polling re-engages via `isSettling`/`isInFlight` as

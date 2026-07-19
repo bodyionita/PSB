@@ -136,6 +136,10 @@ export const api = {
   // Full pipeline state for one capture (03-api.md) — the Activity Captures-tab row expand + any
   // in-place detail fetch (M8.1, ADR-054 §4): raw text, node_refs, status, source badge.
   getCapture: (id: string) => request<CaptureView>(`/captures/${encodeURIComponent(id)}`),
+  // General capture remove (ADR-062 §R): entirely delete a submitted capture — nodes (hubs
+  // preserved), media, tombstone. 204; 409 = open draft (discard it instead); 404 = unknown/removed.
+  removeCapture: (id: string) =>
+    request<void>(`/captures/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   retryCapture: (id: string) =>
     request<CaptureAcceptedResponse>(`/captures/${encodeURIComponent(id)}/retry`, {
       method: 'POST',

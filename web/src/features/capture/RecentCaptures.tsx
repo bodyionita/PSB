@@ -6,7 +6,7 @@ import { TimeAgo } from '../../ui/TimeAgo';
 import { useActivityNav } from '../activity/activityNav';
 import { NodeRefChips } from '../../ui/NodeRefChips';
 import { CaptureMediaBlock } from '../../ui/media/CaptureMediaBlock';
-import { useCaptures, useRetryCapture, useSubmitFollowUp } from './useCaptures';
+import { useCaptures, useDeleteCapture, useRetryCapture, useSubmitFollowUp } from './useCaptures';
 
 // Recent captures strip with live pipeline status (06 §Capture). Polling lives in useCaptures.
 // M8.1 (ADR-054 §4): the strip shrinks to ~5 (RECENTS_LIMIT) with in-place expand (full text,
@@ -140,6 +140,80 @@ function NudgePrompt({ capture }: { capture: CaptureView }) {
   );
 }
 
+// The general capture-remove affordance (M9.7 T6, ADR-062 §R) with a **double confirmation** — an
+// explicit two-step confirm before the destructive DELETE (user requirement). Step 1 "Remove"
+// reveals step 2 "Delete permanently" (a distinct, danger-colored tap) + Cancel; only the second
+// tap fires the mutation. On success the row animates out of Recents via the list's AnimatePresence
+// (this returns null so it doesn't flicker before the refetch drops it). A 409 (open draft) / other
+// error surfaces inline. Offered only for settled captures (indexed/failed) — never a draft.
+function RemoveControl({ captureId }: { captureId: string }) {
+  const del = useDeleteCapture();
+  const [confirming, setConfirming] = useState(false);
+
+  if (del.isSuccess) return null; // removed — the row is on its way out of the list
+
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        onClick={() => setConfirming(true)}
+        style={{
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          fontSize: 12,
+          fontWeight: 600,
+          color: 'var(--muted)',
+          cursor: 'pointer',
+        }}
+      >
+        Remove
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 12, color: del.isError ? FAIL_COLOR : 'var(--muted)' }}>
+        {del.isError ? 'Couldn’t remove — try again.' : 'Delete this capture and its memories?'}
+      </span>
+      <button
+        type="button"
+        onClick={() => del.mutate(captureId)}
+        disabled={del.isPending}
+        style={{
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          fontSize: 12,
+          fontWeight: 700,
+          color: FAIL_COLOR,
+          cursor: del.isPending ? 'default' : 'pointer',
+          opacity: del.isPending ? 0.6 : 1,
+        }}
+      >
+        {del.isPending ? 'Removing…' : 'Delete permanently'}
+      </button>
+      <button
+        type="button"
+        onClick={() => setConfirming(false)}
+        disabled={del.isPending}
+        style={{
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          fontSize: 12,
+          fontWeight: 600,
+          color: 'var(--muted)',
+          cursor: 'pointer',
+        }}
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 // In-place expand threshold: below this the 3-line clamp never actually truncates anything, so no
 // "Show more" affordance is offered (M8.1, ADR-054 §4 — expand only where there's more to show).
 const EXPAND_THRESHOLD = 180;
@@ -167,6 +241,9 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
   const expandable = hasText && (bodyText as string).length > EXPAND_THRESHOLD;
   const showNudge =
     capture.follow_up_question != null && capture.follow_up_answer == null;
+  // Remove is offered only once a capture has settled (indexed/failed): a draft is Discarded, and
+  // an in-flight capture would race its own background pipeline (ADR-062 §R — remove a settled one).
+  const removable = capture.status === 'indexed' || capture.status === 'failed';
 
   return (
     <motion.div
@@ -297,6 +374,20 @@ function CaptureRow({ capture }: { capture: CaptureView }) {
         )}
 
         {showNudge && <NudgePrompt capture={capture} />}
+
+        {removable && (
+          <div
+            style={{
+              marginTop: 12,
+              paddingTop: 10,
+              borderTop: '1px solid var(--surface-border)',
+              display: 'flex',
+              justifyContent: 'flex-end',
+            }}
+          >
+            <RemoveControl captureId={capture.capture_id} />
+          </div>
+        )}
       </Surface>
     </motion.div>
   );
