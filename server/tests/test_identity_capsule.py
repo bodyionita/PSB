@@ -188,6 +188,59 @@ async def test_caps_are_honored_from_settings():
     assert (outcome.hubs, outcome.memories, outcome.insights) == (1, 2, 0)
 
 
+async def test_leaked_preamble_is_stripped_before_saving():
+    # A chat-tuned conspect model prefixes a conversational preamble ahead of the capsule despite
+    # the "output ONLY the capsule" instruction. The stored/served capsule must be just the prose.
+    leaky = (
+        "I'll help you distill this identity capsule. Let me write it based on the source "
+        "material.\n\nThe user is a builder who works with Alex and Bob on the brain project."
+    )
+    service, capsule, *_ = _make(hubs=[_hub("h1", "Alex")], reply=leaky)
+
+    outcome = await service.run_scheduled()
+
+    assert outcome.generated is True
+    saved = capsule.saved[0].text
+    assert saved == "The user is a builder who works with Alex and Bob on the brain project."
+    assert "I'll help" not in saved and "Let me write" not in saved
+
+
+def test_clean_capsule_text_strips_preambles_but_spares_real_prose():
+    from app.identity.prompts import clean_capsule_text
+
+    # Conversational preambles are removed, leaving only the capsule.
+    assert (
+        clean_capsule_text(
+            "I'll help you distill this. Let me write it.\n\nThe user leads the brain project."
+        )
+        == "The user leads the brain project."
+    )
+    assert clean_capsule_text("Sure! The user is a designer.") == "The user is a designer."
+    fenced = "```\nHere is the capsule:\nThe user codes.\n```"
+    assert clean_capsule_text(fenced) == "The user codes."
+    # A "Based on the sources," lead-in is stripped but the fact folded into it survives.
+    assert (
+        clean_capsule_text("Based on the sources, the user is an early riser.")
+        == "the user is an early riser."
+    )
+    # A reply that is *nothing but* preamble collapses to "" so the caller skips (keeps last).
+    assert clean_capsule_text("I'll help you with that. Let me write the capsule.") == ""
+
+
+def test_clean_capsule_text_spares_prose_that_merely_starts_like_a_preamble():
+    from app.identity.prompts import clean_capsule_text
+
+    # Adverb/adjective openers that are *not* interjections (no punctuation break) are untouched.
+    for prose in (
+        "Certainly a private person, the user rarely shares online.",
+        "Sure footing matters to the user, who climbs weekly.",
+        "Here she leads the team; there he follows.",
+        "Based on the sources the user builds without a lead-in delimiter.",
+        "The user is a builder who works with Alex and Bob.",
+    ):
+        assert clean_capsule_text(prose) == prose
+
+
 async def test_char_cap_truncates_stored_text():
     settings = Settings(
         chat_chain=["conspect-p"],

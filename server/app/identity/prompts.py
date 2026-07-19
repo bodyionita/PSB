@@ -15,13 +15,51 @@ from ..temporal.render import temporal_header
 from .store import HubProfile, RecentNode
 
 # Bump on any wording change (mirrors the organizer/profile versioned-prompt convention).
-CAPSULE_PROMPT_VERSION = "identity-capsule-v1"
+CAPSULE_PROMPT_VERSION = "identity-capsule-v2"
 
 # Same hard data delimiters the chat/organizer prompts use around untrusted material.
 _FENCE_OPEN = "<<<"
 _FENCE_CLOSE = ">>>"
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9]*\n?|\n?```$")
+
+# Defensive preamble strip: the prompt forbids conversational preambles, but some chat-tuned
+# `conspect` models emit one anyway ("I'll help you distill this identity capsule. Let me write
+# it based on the source material.") ahead of the actual capsule. We drop a leading run of such
+# meta sentences so only the capsule prose is stored/served. Anchored to the very start and
+# limited to unambiguous openers so real second/third-person capsule prose is never touched.
+#
+# Three tiers, each anchored at the very start:
+#   1. Strong task-meta openers ("I'll help…", "Let me write…", "Here's…") — consume the whole
+#      leading sentence, since the entire sentence is a reply to the assistant, not capsule content.
+#   2. Meta lead-in phrases ("Based on the sources, …") — strip only up to the comma/colon so any
+#      real fact the model folded into that sentence survives, and never touch a sentence that
+#      lacks the delimiter (conservative: leave text rather than risk eating content).
+#   3. Bare interjections ("Sure, …" / "Certainly." ) — stripped only when punctuated as an
+#      interjection, never when the word opens a real sentence ("Certainly a private person, …").
+_PREAMBLE_RE = re.compile(
+    r"""^(?:
+        (?:                                  # 1. strong task-meta openers …
+            i['’`]?ll\s+help
+          | i\s+will\s+help
+          | i\s+can\s+help
+          | i['’`]?d\s+be\s+happy
+          | let\s+me\b
+          | here['’`]?s\b
+          | here\s+is\b
+        )[^\n]*?(?:[.!:?](?:\s+|$)|\n|$)      # … consume the rest of that one leading sentence
+      |
+        based\s+on\s+the\s+                   # 2. meta lead-in phrase, stripped up to its …
+        (?:sources?|source\s+material)\b
+        [^\n:,]*[:,]\s+                        # … first comma/colon; content after it survives
+      |
+        (?:                                  # 3. bare interjections …
+            sure | certainly | of\s+course | absolutely
+          | okay | ok | got\s+it | understood | no\s+problem
+        )\s*[,:.!]+\s+                        # … only when punctuated as an interjection
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
 
 CAPSULE_SYSTEM_PROMPT = """\
 You are distilling an IDENTITY CAPSULE for the owner of a personal knowledge graph — a short
@@ -40,7 +78,10 @@ Write the capsule:
   current priorities or recurring themes. Prefer durable facts over one-off events.
 - Write about the user in the second or third person. Do not invent anything the SOURCE does not
   support; if the SOURCE is thin, keep the capsule short rather than padding it.
-- Output ONLY the capsule text.
+- Output ONLY the capsule text. Your entire reply is stored verbatim as the capsule, so the very
+  first word must be the capsule itself. Do NOT open with a reply to me such as "I'll help you
+  distill this...", "Let me write it based on the source material.", "Sure," or "Here's the
+  capsule:" — begin directly with what the person is and what matters to them.
 """
 
 
@@ -78,8 +119,25 @@ def render_capsule_sources(
 
 
 def clean_capsule_text(text: str) -> str:
-    """Trim the model's capsule reply — strip surrounding code fences + whitespace."""
-    return _FENCE_RE.sub("", (text or "").strip()).strip()
+    """Trim the model's capsule reply — strip surrounding code fences, any leading conversational
+    preamble the model leaked despite the prompt, and whitespace, so only the capsule prose is
+    stored/served. See :data:`_PREAMBLE_RE` for the (deliberately conservative) preamble tiers."""
+    cleaned = _FENCE_RE.sub("", (text or "").strip()).strip()
+    return _strip_leading_preamble(cleaned)
+
+
+def _strip_leading_preamble(text: str) -> str:
+    """Drop a leading run of conversational preamble sentences (see :data:`_PREAMBLE_RE`). Loops so
+    a multi-sentence preamble ("I'll help… Let me write…") is fully removed. If the reply is
+    *nothing but* preamble, returns "" — the caller treats an empty distillation as a skip and keeps
+    the last capsule (rule 7), the right outcome for a reply that produced no capsule at all."""
+    remaining = text
+    while remaining:
+        match = _PREAMBLE_RE.match(remaining)
+        if not match or match.end() == 0:
+            break
+        remaining = remaining[match.end() :].lstrip()
+    return remaining
 
 
 def _fence(lines) -> str:
