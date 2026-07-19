@@ -284,11 +284,12 @@ class Settings(BaseSettings):
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_stt_model: str = "whisper-large-v3"
     # Groq VLM — the `vision` routing group's PRIMARY model (M9, ADR-057 §4 — Groq-first, user
-    # call). Llama 4 Scout is natively multimodal + fast/cheap, well-suited to compact photo
-    # descriptions and transcribing legible text off chat screenshots (the §5 contract). Served by
-    # the same Groq endpoint/key as STT over the OpenAI-compatible `image_url` shape; a config
-    # scalar verified against Groq's live catalog at build (grilled 2026-07-18).
-    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    # call). Qwen 3.6 27B is Groq's current free multimodal VLM (same Qwen family as the Nebius
+    # 72B fallback), well-suited to compact photo descriptions and transcribing legible text off
+    # chat screenshots (the §5 contract). Served by the same Groq endpoint/key as STT over the
+    # OpenAI-compatible `image_url` shape. (ADR-063: replaced llama-4-scout-17b, which Groq
+    # decommissioned — 404 in the M9.7 T7 live drill.)
+    groq_vision_model: str = "qwen/qwen3.6-27b"
 
     # --- Embeddings: self-hosted nomic via Ollama (ADR-022) ---
     # Single provider, no hot fallback: one index = one vector space. `nomic-embed-text-v1.5`
@@ -323,7 +324,7 @@ class Settings(BaseSettings):
     # ModelRoutingService overlays any saved `app_settings.model_routing["vision"]`, else this seed.
     vision_chain: CsvList = Field(
         default=[
-            "meta-llama/llama-4-scout-17b-16e-instruct",
+            "qwen/qwen3.6-27b",
             "Qwen/Qwen2.5-VL-72B-Instruct",
         ]
     )
