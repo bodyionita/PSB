@@ -190,7 +190,13 @@ jobs:
             set -e
             cd /srv/app
             chmod 600 deploy/.env deploy/origin.crt deploy/origin.key
-            git pull --ff-only
+            # Sync the deploy clone to origin/main by HARD RESET, not `pull --ff-only`. The clone is a
+            # read-only mirror of main (no local commits), and a `--ff-only` pull ABORTS after a
+            # history rewrite (force-push) — a non-fast-forward — wedging the deploy. Fetch + reset
+            # mirrors the remote exactly and self-heals a rewritten history. Only tracked files are
+            # touched, so the scp'd, gitignored deploy/.env + origin TLS files are left intact.
+            git fetch origin main
+            git reset --hard origin/main
             # Interpolate compose vars (BRAINDAN_DOMAIN) from the NON-secret defaults.env, so
             # compose never tries to interpolate the $-laden argon2 hash in .env. The api
             # container still receives the real secrets via its `env_file: .env` (literal).
