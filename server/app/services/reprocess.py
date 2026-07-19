@@ -17,7 +17,7 @@ re-file them — a parked human decision must survive); standing merges are repo
 documented follow-up — there are zero merges today). *Rebuilt from raw:* every node file, the DB
 index (``nodes``/``chunks``/``edges``/``node_profiles``), the alias index, and the
 **capture/graph-derived** ``review_queue`` kinds (entity-ambiguity / vocab-proposal / dedup-proposal
-— re-minted by the replay + nightly sweeps).
+/ entity-dedup — re-minted by the replay + nightly sweeps).
 
 **Safety (ADR-042 §3).** Destructive of derived state → admin-gated + **confirm-required** (the
 router's two-step). Single-flight; runs in the background with an ``agent_runs`` row + a
@@ -323,8 +323,9 @@ class PgReprocessStore:
             # has no FK to nodes, so it (and agent_runs / app_settings / chat_*) is untouched.
             await conn.execute("TRUNCATE nodes CASCADE")
             # Kind-aware review reset (ADR-048 §7, refines ADR-042 §2): the capture/graph-derived
-            # kinds (entity-ambiguity / vocab-proposal / dedup-proposal) are re-minted by the replay
-            # + nightly sweeps, so they're cleared; `stance-candidate` is PRESERVED — its backing
+            # kinds (entity-ambiguity / vocab-proposal / dedup-proposal / entity-dedup) are
+            # re-minted by the replay + nightly sweeps, so they're cleared (a merged dupe still
+            # survives via `entity_merges`); `stance-candidate` is PRESERVED — its backing
             # (chat sessions) is never touched by capture replay and the watermark won't re-file it,
             # so a parked human decision must survive. DELETE (not TRUNCATE) to scope by kind.
             await conn.execute("DELETE FROM review_queue WHERE kind <> $1", KIND_STANCE_CANDIDATE)

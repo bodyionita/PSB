@@ -39,8 +39,10 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from ..config import Settings
-from ..entities.entity_store import EntityStore
+from ..entities.entity_store import EntityNode, EntityStore
+from ..entities.merge import fold_entities
 from ..entities.merge_core import MergeCore, MergeTarget
+from ..entities.merge_store import MergeDecision, MergeDecisionStore, surface_forms
 from ..entities.resolver import significant_tokens
 from ..entities.store import normalize_alias
 from ..graph.node_writer import NodeDocument, NodeEdge, NodeWriter
@@ -53,6 +55,7 @@ from .review_queue import (
     DECIDABLE_STATUSES,
     KIND_DEDUP_PROPOSAL,
     KIND_ENTITY_AMBIGUITY,
+    KIND_ENTITY_DEDUP,
     KIND_OCCURRED_ENRICHMENT,
     KIND_STANCE_CANDIDATE,
     KIND_VOCAB_PROPOSAL,
@@ -141,6 +144,7 @@ class ReviewService:
         chat_ingest: ChatCaptureIngest | None = None,
         entity_store: EntityStore | None = None,
         merge_core: MergeCore | None = None,
+        decisions: MergeDecisionStore | None = None,
         time_classifier: NlTimeClassifier | None = None,
     ) -> None:
         self._settings = settings
@@ -155,6 +159,12 @@ class ReviewService:
         # build the fold targets. None ⇒ dedup merge unresolvable (older tests without dedup items).
         self._entity_store = entity_store
         self._merge_core = merge_core
+        # Entity-dedup resolution (M9.8 T4, ADR-064 §4): `merge` folds the loser hub into the
+        # survivor WITH the alias union (the shared `fold_entities`) and records a durable decision
+        # (keyed on surface form + type) so the merge survives a reprocess (ADR-064 §1) — distinct
+        # from the content-only dedup-proposal merge. None ⇒ the decision isn't recorded (older
+        # tests) — the merge still applies, it just won't survive a reprocess.
+        self._decisions = decisions
         # Vocabulary governance (task 7): delegates the vocab-proposal branch + supplies the
         # effective entity-like types for minting. None ⇒ vocab-proposals unresolvable + seed-only
         # entity types (existing task-4 tests construct without it).
@@ -229,6 +239,8 @@ class ReviewService:
             new_status, resolution = await self._resolve_stance_candidate(record, verdict)
         elif record.kind == KIND_DEDUP_PROPOSAL:
             new_status, resolution = await self._resolve_dedup(record, action, survivor)
+        elif record.kind == KIND_ENTITY_DEDUP:
+            new_status, resolution = await self._resolve_entity_dedup(record, action, survivor)
         elif record.kind == KIND_OCCURRED_ENRICHMENT:
             new_status, resolution = await self._resolve_occurred_enrichment(record, answer)
         else:
@@ -454,6 +466,85 @@ class ReviewService:
             raise BadResolution("dedup-proposal node file is gone; cannot link") from None
         await self._indexer.index_paths([state.store_path])
         await self._backup.request_commit("review: link similar (dedup)")
+
+    # --- entity-dedup (M9.8 T4, ADR-064 §4) ---------------------------------------------
+
+    async def _resolve_entity_dedup(
+        self, record: ReviewRecord, action: str | None, survivor: str | None
+    ) -> tuple[str, dict]:
+        """Resolve a duplicate entity-hub pair (ADR-064 §4): ``merge`` folds the loser hub into the
+        survivor **with the entity alias union** via the shared :func:`fold_entities` (so the
+        survivor inherits the loser's name + aliases) then records a **durable merge decision**
+        keyed on surface form + type (ADR-064 §1) → ``resolved``; ``keep`` dismisses (not a dup) →
+        ``discarded``. Survivor = the request ``survivor`` else the payload's ``default_survivor``;
+        the loser is the other. This is the entity counterpart to :meth:`_resolve_dedup` (which is
+        content-only, no alias union, no durable record)."""
+        act = (action or "").strip().lower()
+        node_a = str(record.payload.get("node_a") or "").strip()
+        node_b = str(record.payload.get("node_b") or "").strip()
+        if not node_a or not node_b:
+            raise BadResolution("entity-dedup is missing its hub pair")
+        if act == "keep":
+            logger.info("entity-dedup %s kept (not a duplicate) → discarded", record.id)
+            return STATUS_DISCARDED, {"action": "keep"}
+        if act != "merge":
+            raise BadResolution("entity-dedup requires an 'action' of merge|keep")
+
+        if self._merge_core is None or self._entity_store is None:  # pragma: no cover — app-wired
+            raise BadResolution("entity-dedup merge is not configured")
+        survivor_id = (survivor or "").strip() or str(record.payload.get("default_survivor") or "")
+        if survivor_id not in (node_a, node_b):
+            raise BadResolution("'survivor' must be one of the pair (node_a / node_b)")
+        loser_id = node_b if survivor_id == node_a else node_a
+        loser = await self._entity_store.get_node(loser_id)
+        surv = await self._entity_store.get_node(survivor_id)
+        if loser is None or surv is None:
+            raise BadResolution("entity-dedup references an unknown node")
+        if loser.merged_into is not None or surv.merged_into is not None:
+            raise BadResolution("entity-dedup references an already-merged node")
+        await fold_entities(
+            loser=loser,
+            survivor=surv,
+            node_writer=self._writer,
+            merge_core=self._merge_core,
+            reason=f"entity-dedup merge {loser.id} → {surv.id}",
+        )
+        # Durable decision (ADR-064 §1) — recorded AFTER the fold committed; best-effort so a store
+        # hiccup can't undo a committed merge (rule 7). Keyed on the loser's surface forms + type,
+        # so `reprocess-all` re-folds the re-created hub back into the survivor.
+        recorded = await self._record_dedup_decision(loser, surv)
+        return STATUS_RESOLVED, {
+            "action": "merge",
+            "survivor": survivor_id,
+            "loser": loser_id,
+            "durable": recorded,
+        }
+
+    async def _record_dedup_decision(self, loser: EntityNode, survivor: EntityNode) -> bool:
+        """Record the durable merge decision for an entity-dedup merge (ADR-064 §1). Best-effort:
+        no store wired, or a DB hiccup, logs and returns ``False`` — the merge is already committed.
+        Mirrors ``MergeService._record_decision`` so both merge entry points record identically."""
+        if self._decisions is None:
+            return False
+        try:
+            await self._decisions.record(
+                MergeDecision(
+                    survivor_type=survivor.type,
+                    survivor_forms=surface_forms(survivor.title, survivor.aliases),
+                    loser_type=loser.type,
+                    loser_forms=surface_forms(loser.title, loser.aliases),
+                    survivor_node_id=survivor.id,
+                    loser_node_id=loser.id,
+                )
+            )
+            return True
+        except Exception:  # noqa: BLE001 — a record hiccup must not undo a committed merge
+            logger.exception(
+                "entity-dedup: could not record durable decision %s → %s (merge still applied)",
+                loser.id,
+                survivor.id,
+            )
+            return False
 
     # --- occurred-enrichment (M8.2, ADR-056 §7) -----------------------------------------
 

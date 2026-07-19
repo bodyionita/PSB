@@ -23,6 +23,7 @@ from .db import Database
 from .dedup.store import PgDedupStore
 from .dedup.sweep import DedupSweepService
 from .entities.backfill import BackfillService
+from .entities.entity_dedup import EntityDedupService, PgEntityDedupStore
 from .entities.entity_store import PgEntityStore
 from .entities.merge import MergeService
 from .entities.merge_core import MergeCore
@@ -343,6 +344,19 @@ async def lifespan(app: FastAPI):
         run_store=run_store,
         vocab=vocabulary_service,
     )
+    # Entity-hub dedup detector (M9.8 T4, ADR-064 §4): conservative same-type hub dedup (name gate
+    # AND shared-neighborhood gate — suppresses "Diana Wren"). High-confidence pairs land inline
+    # (the run's details, read off the latest `entity-dedup` run); lower-confidence pairs file an
+    # `entity-dedup` review item the Review surface below resolves (fold with alias union + record a
+    # durable decision). DB-only (hub reads + review-queue writes / its own run row); scheduled as a
+    # read-mostly `nightly` step + manually runnable via `POST /agents/entity-dedup/run`.
+    app.state.entity_dedup_service = EntityDedupService(
+        settings=settings,
+        store=PgEntityDedupStore(db),
+        review_queue=review_queue,
+        run_store=run_store,
+        vocab=vocabulary_service,
+    )
     # Nightly profile-refresh (derived entity profiles → node_profiles, served by GET /nodes/{id})
     # and entity backfill (recent memories re-checked against touched entities' aliases).
     profile_refresh_service = ProfileRefreshService(
@@ -444,6 +458,10 @@ async def lifespan(app: FastAPI):
         # wired. The Review surface is where a dedup decision becomes graph structure.
         entity_store=entity_store,
         merge_core=merge_core,
+        # Entity-dedup resolution (M9.8 T4, ADR-064 §4): a `merge` folds the loser hub into the
+        # survivor WITH the alias union (the shared `fold_entities`) and records a durable decision
+        # (the same store the interactive merge uses) so it survives a reprocess (ADR-064 §1).
+        decisions=merge_decision_store,
         # occurred-enrichment resolution (M8.2, ADR-056 §7): the NL answer is classified into a
         # symbolic time-ref (rule 12) and resolved against the answer's own date; the classifier
         # routes `conspect` (same tier as the organizer). None ⇒ the kind is unresolvable.
@@ -565,6 +583,7 @@ async def lifespan(app: FastAPI):
             chat_distiller=app.state.chat_distiller_service,
             inbox_drain=app.state.inbox_drain_service,
             dedup_sweep=app.state.dedup_sweep_service,
+            entity_dedup=app.state.entity_dedup_service,
             maybe_digest=app.state.maybe_digest_service,
             graph_health=graph_health_service,
             occurred_enrichment=occurred_enrichment_service,

@@ -1384,6 +1384,26 @@ class FakeDedupStore:
         return {nid: self._stats[nid] for nid in node_ids if nid in self._stats}
 
 
+class FakeEntityDedupStore:
+    """In-memory EntityDedupStore for the entity-dedup detector tests (M9.8 T4, ADR-064 §4).
+
+    ``hubs`` is the preset live-hub set (records the entity types the SQL was asked for);
+    ``existing`` is the set of canonical ``(a, b)`` pairs an ``entity-dedup`` review item already
+    carries (the re-file guard)."""
+
+    def __init__(self, *, hubs=None, existing=None) -> None:
+        self._hubs = list(hubs or [])  # list[HubRow]
+        self._existing = {tuple(p) for p in (existing or set())}  # {(a, b)} canonical
+        self.hub_rows_arg: list[str] | None = None
+
+    async def hub_rows(self, *, entity_like_types):
+        self.hub_rows_arg = list(entity_like_types)
+        return [h for h in self._hubs if h.type in set(entity_like_types)]
+
+    async def review_exists(self, node_a: str, node_b: str) -> bool:
+        return (node_a, node_b) in self._existing
+
+
 class FakeCapsuleSourceStore:
     """In-memory CapsuleSourceStore (M5 task 2): returns preset hubs/memories/insights, bounded by
     the requested limit so a test can assert the config caps are honored."""

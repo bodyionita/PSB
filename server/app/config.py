@@ -136,6 +136,32 @@ class Settings(BaseSettings):
     # next sweep — the re-file guard keeps a re-scan idempotent, ADR-049 §5).
     dedup_max_pairs_per_run: int = 200
 
+    # --- Entity-hub dedup detector (M9.8 T4, ADR-064 §4) ---
+    # Conservative same-type entity-hub dedup: a pair is a candidate only when a **name gate**
+    # (one hub's surface form contains the other's, OR a high fuzzy match) AND a **shared-
+    # neighborhood gate** (they wire into >= min_shared common canonical neighbours) BOTH pass — so
+    # "Diana"/"Diana Vance" (shared content) surface while "Diana Wren" (a different person, no
+    # shared neighbourhood) is suppressed. High-confidence pairs land inline (the run's details,
+    # read off the latest `entity-dedup` run like graph-health); lower-confidence pairs file an
+    # `entity-dedup` review item. Never auto-merges (rule 2 / ADR-064 §4) — always human-approved.
+    # A surface-form token below this length never anchors a name match (the low-entropy guard — so
+    # "Ana"/initials don't collide); mirrors `entity_alias_min_fuzzy_len`.
+    entity_dedup_min_token_len: int = 4
+    # Fuzzy floor (SequenceMatcher ratio over normalized surface forms) for the name gate when there
+    # is no containment; below it the pair fails the name gate outright.
+    entity_dedup_fuzzy_min: float = Field(default=0.82, ge=0.0, le=1.0)
+    # High-confidence fuzzy bar: a fuzzy-only match this strong (no containment) is inline-eligible.
+    entity_dedup_fuzzy_high: float = Field(default=0.92, ge=0.0, le=1.0)
+    # Shared-neighborhood gate: the minimum count of common canonical neighbours for a pair to be a
+    # candidate at all (the AND leg that suppresses same-first-name different people).
+    entity_dedup_min_shared: int = 1
+    # High-confidence shared-neighborhood bar: a pair needs at least this many shared neighbours (on
+    # top of a containment or high-fuzzy name match) to appear inline; weaker pairs file to review.
+    entity_dedup_high_min_shared: int = 2
+    # Bound on how many candidate pairs one run surfaces (inline + filed, strongest first) — a run's
+    # budget; the re-file guard keeps a re-scan idempotent (mirrors the dedup sweep, ADR-049 §5).
+    entity_dedup_max_pairs_per_run: int = 200
+
     # --- Inbox drainer (M6 task 6, 04-pipelines §3b, ADR-048 §10) ---
     # Nightly job: re-run the organizer over captures still materialized as an `inbox/` fallback
     # (organize was down / produced no valid nodes at ingest), so a now-richer entity registry can
@@ -608,6 +634,11 @@ class Settings(BaseSettings):
                 step("entity-backfill"),
                 step("identity-capsule-refresh"),
                 step("dedup-sweep"),
+                # M9.8 T4 (ADR-064 §4): conservative entity-hub dedup detector. Runs after reindex
+                # (needs the settled canonical neighbourhood) + after dedup-sweep, before the store
+                # commit — it only reads + files review items / writes its own run details (no store
+                # mutation), so it sits with the read-mostly tail.
+                step("entity-dedup"),
                 step("store-sweep"),
                 step("store-backup"),
                 # M8.2 (ADR-056 §7): flag undated content nodes for occurred-enrichment. Runs after

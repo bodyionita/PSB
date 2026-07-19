@@ -51,6 +51,9 @@ CHAT_DISTILL = "chat-distill"
 # The dedup sweep (ADR-049, M6 task 5): file dedup-proposal review items for near-duplicate content
 # nodes. Not yet a pipeline step (M6 task 8) — standalone verb = the run-now + local-test path.
 DEDUP_SWEEP = "dedup-sweep"
+# The entity-hub dedup detector (ADR-064 §4, M9.8 T4): surface duplicate hubs (inline high-conf
+# + `entity-dedup` review items for low). A `nightly` pipeline step; this standalone verb = run-now.
+ENTITY_DEDUP = "entity-dedup"
 # The inbox drainer (ADR-048 §10, M6 task 6): re-organize `inbox/`-materialized captures against the
 # now-richer registry. A `nightly` pipeline step (M6 task 8); this standalone verb = run-now + test.
 INBOX_DRAIN = "inbox-drain"
@@ -79,6 +82,7 @@ JOBS: tuple[str, ...] = (
     IDENTITY_CAPSULE,
     CHAT_DISTILL,
     DEDUP_SWEEP,
+    ENTITY_DEDUP,
     INBOX_DRAIN,
     MAYBE_DIGEST,
     REPROCESS,
@@ -116,6 +120,7 @@ async def run_pipeline(name: str) -> int:
         # in-app nightly's long-lived debounce owns that itself — the reprocess-all/CLI pattern).
         from .chat.distiller import build_chat_distiller_service
         from .dedup.sweep import build_dedup_sweep_service
+        from .entities.entity_dedup import build_entity_dedup_service
         from .inbox.drain import InboxDrainService
         from .services.capture_pipeline import build_capture_pipeline
         from .services.capture_store import PgCaptureStore
@@ -140,6 +145,7 @@ async def run_pipeline(name: str) -> int:
                 run_store=PgAgentRunStore(db),
             ),
             dedup_sweep=build_dedup_sweep_service(settings, db, vocab),
+            entity_dedup=build_entity_dedup_service(settings, db, vocab),
             maybe_digest=build_maybe_digest_service(settings, db),
             # Read-mostly nightly-tail reporters (M8/M8.2) — wired so `pipeline nightly` faithfully
             # runs the whole roster the cron does (this method's contract), not a subset.
@@ -212,6 +218,12 @@ async def run_job(name: str) -> None:
             from .dedup.sweep import build_dedup_sweep_service
 
             await build_dedup_sweep_service(settings, db).run_scheduled()
+        elif name == ENTITY_DEDUP:
+            # DB-only (hub reads + review-queue writes / its own run row, no store git) — like the
+            # dedup sweep. Never auto-merges; it only surfaces candidates (ADR-064 §4).
+            from .entities.entity_dedup import build_entity_dedup_service
+
+            await build_entity_dedup_service(settings, db).run_scheduled()
         elif name == INBOX_DRAIN:
             # Re-organize goes through the single writer (rule 2b), so the drainer drives a real
             # capture pipeline. Run it, then flush the store backup so this one-shot commits the

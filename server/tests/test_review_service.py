@@ -27,6 +27,7 @@ from app.providers.registry import ProviderRegistry
 from app.services.review_queue import (
     KIND_DEDUP_PROPOSAL,
     KIND_ENTITY_AMBIGUITY,
+    KIND_ENTITY_DEDUP,
     KIND_OCCURRED_ENRICHMENT,
     KIND_STANCE_CANDIDATE,
     KIND_VOCAB_PROPOSAL,
@@ -51,6 +52,7 @@ from .fakes import (
     FakeEntityStore,
     FakeIndexer,
     FakeIndexStore,
+    FakeMergeDecisionStore,
     FakeReviewQueue,
     FakeStoreBackup,
     FakeVocabularyStore,
@@ -914,3 +916,186 @@ async def test_resolver_review_item_carries_pending_edges(tmp_path: Path):
     assert result.pending == 1
     assert len(review.items) == 1
     assert review.items[0].payload["pending_edges"] == pending
+
+
+# --- entity-dedup resolution (M9.8 T4, ADR-064 §4) ----------------------------------------
+
+
+def _entity_dedup_build(tmp_path: Path):
+    """A ReviewService wired for entity-dedup resolution: a real NodeWriter + FakeIndexStore, a
+    FakeEntityStore + real MergeCore over fakes (the `merge` fold), and a FakeMergeDecisionStore so
+    the durable-decision record (ADR-064 §1) can be asserted. Returns the collaborators."""
+    settings = _settings(tmp_path)
+    writer = NodeWriter(settings.graph_store_path)
+    review = FakeReviewQueue()
+    index = FakeIndexStore()
+    indexer = FakeIndexer()
+    backup = FakeStoreBackup()
+    commit = FakeCommitBackup()
+    entity_store = FakeEntityStore()
+    decisions = FakeMergeDecisionStore()
+    core = MergeCore(
+        entity_store=entity_store, node_writer=writer, indexer=indexer, store_backup=commit
+    )
+    service = ReviewService(
+        settings=settings,
+        review_store=review,
+        index_store=index,
+        indexer=indexer,
+        node_writer=writer,
+        store_backup=backup,
+        run_store=FakeAgentRunStore(),
+        entity_store=entity_store,
+        merge_core=core,
+        decisions=decisions,
+    )
+    return service, review, index, entity_store, decisions, writer, settings
+
+
+HUB_BIG = "33333333-3333-4333-8333-333333333333"  # "Diana" (survivor)
+HUB_SMALL = "44444444-4444-4444-8444-444444444444"  # "Diana Vance" (loser)
+
+
+def _seed_hub(writer, index, node_id, title, aliases):
+    [w] = writer.write_nodes(
+        [
+            NodeDocument(
+                id=node_id,
+                type="person",
+                title=title,
+                body="",
+                created_local=CREATED,
+                source="text",
+                aliases=tuple(aliases),
+            )
+        ]
+    )
+    index.nodes[node_id] = NodeUpsert(
+        id=node_id, store_path=w.store_path, type="person", content_hash="h"
+    )
+    return w.store_path
+
+
+def _entity_dedup_item(default_survivor=HUB_BIG) -> ReviewItem:
+    node_a, node_b = (HUB_BIG, HUB_SMALL) if HUB_BIG < HUB_SMALL else (HUB_SMALL, HUB_BIG)
+    return ReviewItem(
+        kind=KIND_ENTITY_DEDUP,
+        payload={
+            "node_a": node_a,
+            "node_b": node_b,
+            "default_survivor": default_survivor,
+            "type": "person",
+            "titles": {HUB_BIG: "Diana", HUB_SMALL: "Diana Vance"},
+            "signals": {"name_match": {"kind": "containment", "score": 0.5}, "shared_count": 3},
+        },
+        excerpt="possible duplicate person",
+        source="entity-dedup",
+    )
+
+
+async def test_entity_dedup_merge_unions_aliases_and_records_durable(tmp_path: Path):
+    service, review, index, entity_store, decisions, writer, settings = _entity_dedup_build(
+        tmp_path
+    )
+    big_path = _seed_hub(writer, index, HUB_BIG, "Diana", ["Diana"])
+    small_path = _seed_hub(writer, index, HUB_SMALL, "Diana Vance", ["Diana Vance"])
+    entity_store.nodes = {
+        HUB_BIG: EntityNode(HUB_BIG, "person", "Diana", big_path, ["Diana"], None),
+        HUB_SMALL: EntityNode(
+            HUB_SMALL, "person", "Diana Vance", small_path, ["Diana Vance"], None
+        ),
+    }
+    rid = await review.enqueue(_entity_dedup_item(default_survivor=HUB_BIG))
+
+    record = await service.resolve(rid, action="merge")
+
+    assert record.status == "resolved"
+    assert record.resolution == {
+        "action": "merge",
+        "survivor": HUB_BIG,
+        "loser": HUB_SMALL,
+        "durable": True,
+    }
+    # The loser (Diana Vance) is tombstoned onto the survivor (Diana).
+    small_meta = parse_node_metadata(
+        (Path(settings.graph_store_path) / Path(*small_path.split("/"))).read_text("utf-8"),
+        store_path=small_path,
+        fallback_created=CREATED,
+    )
+    assert small_meta.merged_into == HUB_BIG
+    # The survivor's aliases are unioned with the loser's name + aliases (the entity half).
+    big_meta = parse_node_metadata(
+        (Path(settings.graph_store_path) / Path(*big_path.split("/"))).read_text("utf-8"),
+        store_path=big_path,
+        fallback_created=CREATED,
+    )
+    assert "Diana Vance" in big_meta.aliases
+    # A durable decision was recorded, keyed on the loser's surface forms + type (survives replay).
+    recorded = await decisions.all_decisions()
+    assert len(recorded) == 1
+    assert recorded[0].loser_type == "person"
+    assert "diana vance" in recorded[0].loser_forms
+
+
+async def test_entity_dedup_merge_honours_explicit_survivor(tmp_path: Path):
+    service, review, index, entity_store, decisions, writer, settings = _entity_dedup_build(
+        tmp_path
+    )
+    big_path = _seed_hub(writer, index, HUB_BIG, "Diana", ["Diana"])
+    small_path = _seed_hub(writer, index, HUB_SMALL, "Diana Vance", ["Diana Vance"])
+    entity_store.nodes = {
+        HUB_BIG: EntityNode(HUB_BIG, "person", "Diana", big_path, ["Diana"], None),
+        HUB_SMALL: EntityNode(
+            HUB_SMALL, "person", "Diana Vance", small_path, ["Diana Vance"], None
+        ),
+    }
+    rid = await review.enqueue(_entity_dedup_item(default_survivor=HUB_BIG))
+
+    # Override: fold the big hub into the small one instead.
+    record = await service.resolve(rid, action="merge", survivor=HUB_SMALL)
+
+    assert record.resolution["survivor"] == HUB_SMALL and record.resolution["loser"] == HUB_BIG
+    big_meta = parse_node_metadata(
+        (Path(settings.graph_store_path) / Path(*big_path.split("/"))).read_text("utf-8"),
+        store_path=big_path,
+        fallback_created=CREATED,
+    )
+    assert big_meta.merged_into == HUB_SMALL
+
+
+async def test_entity_dedup_keep_discards_without_recording(tmp_path: Path):
+    service, review, index, entity_store, decisions, writer, settings = _entity_dedup_build(
+        tmp_path
+    )
+    rid = await review.enqueue(_entity_dedup_item())
+
+    record = await service.resolve(rid, action="keep")
+
+    assert record.status == "discarded"
+    assert record.resolution == {"action": "keep"}
+    assert await decisions.all_decisions() == []
+
+
+async def test_entity_dedup_bad_action_rejected(tmp_path: Path):
+    service, review, *_ = _entity_dedup_build(tmp_path)
+    rid = await review.enqueue(_entity_dedup_item())
+    with pytest.raises(BadResolution):
+        await service.resolve(rid, action="link")  # link is content-only; not valid for hubs
+
+
+async def test_entity_dedup_already_merged_rejected(tmp_path: Path):
+    service, review, index, entity_store, decisions, writer, settings = _entity_dedup_build(
+        tmp_path
+    )
+    big_path = _seed_hub(writer, index, HUB_BIG, "Diana", ["Diana"])
+    small_path = _seed_hub(writer, index, HUB_SMALL, "Diana Vance", ["Diana Vance"])
+    # The loser is already a tombstone (merged away since filing) — the merge must not double-fold.
+    entity_store.nodes = {
+        HUB_BIG: EntityNode(HUB_BIG, "person", "Diana", big_path, ["Diana"], None),
+        HUB_SMALL: EntityNode(
+            HUB_SMALL, "person", "Diana Vance", small_path, ["Diana Vance"], "other"
+        ),
+    }
+    rid = await review.enqueue(_entity_dedup_item(default_survivor=HUB_BIG))
+    with pytest.raises(BadResolution):
+        await service.resolve(rid, action="merge")

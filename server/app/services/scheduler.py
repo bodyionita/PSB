@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 
 class EntityJob(Protocol):
     """A nightly agent-window / sleep-cycle job (reindex / profile-refresh / backfill /
-    identity-capsule / chat-distiller / inbox-drain / dedup-sweep / maybe-digest / graph-health /
-    occurred-enrichment) —
+    identity-capsule / chat-distiller / inbox-drain / dedup-sweep / entity-dedup / maybe-digest /
+    graph-health / occurred-enrichment) —
     one idempotent, never-raising entry point the scheduler and CLI both drive (ADR-030 §4/§6,
     ADR-046 §5, ADR-048, ADR-053 §9).
     Some return an outcome for CLI logging; the pipeline runner ignores it."""
@@ -63,6 +63,7 @@ class PipelineScheduler:
         chat_distiller: EntityJob | None = None,
         inbox_drain: EntityJob | None = None,
         dedup_sweep: EntityJob | None = None,
+        entity_dedup: EntityJob | None = None,
         maybe_digest: EntityJob | None = None,
         graph_health: EntityJob | None = None,
         occurred_enrichment: EntityJob | None = None,
@@ -82,6 +83,7 @@ class PipelineScheduler:
         self._chat_distiller = chat_distiller
         self._inbox_drain = inbox_drain
         self._dedup_sweep = dedup_sweep
+        self._entity_dedup = entity_dedup
         self._maybe_digest = maybe_digest
         self._graph_health = graph_health
         self._occurred_enrichment = occurred_enrichment
@@ -116,6 +118,10 @@ class PipelineScheduler:
             funcs["inbox-drain"] = self._inbox_drain.run_scheduled
         if self._dedup_sweep is not None:
             funcs["dedup-sweep"] = self._dedup_sweep.run_scheduled
+        # M9.8 T4 (ADR-064 §4): the conservative entity-hub dedup detector, a read-mostly nightly
+        # step (files review items / writes its own run details, no store mutation).
+        if self._entity_dedup is not None:
+            funcs["entity-dedup"] = self._entity_dedup.run_scheduled
         if self._maybe_digest is not None:
             funcs["maybe-digest"] = self._maybe_digest.run_scheduled
         # M8.2 (ADR-056 §7): the undated-node flagger, a read-mostly tail step of `nightly`.

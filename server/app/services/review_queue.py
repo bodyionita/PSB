@@ -41,6 +41,12 @@ KIND_DEDUP_PROPOSAL = "dedup-proposal"
 # applies the date via the mechanical tier (ADR-056 §5). Payloads carry a NODE id, not names — a
 # reprocess rebuilds nodes, so a stale item is harmless (points at a gone id → skipped on resolve).
 KIND_OCCURRED_ENRICHMENT = "occurred-enrichment"
+# M9.8 (ADR-064 §4): a lower-confidence duplicate **entity-hub** pair the conservative dedup
+# detector found (name gate AND shared-neighborhood gate, both passed but below the inline bar). The
+# payload carries both hub ids + the default survivor + the match signals; resolution folds the
+# loser hub into the survivor **with the entity alias union** and records a durable merge decision
+# (so it survives a reprocess, ADR-064 §1) — distinct from the content-only `dedup-proposal` merge.
+KIND_ENTITY_DEDUP = "entity-dedup"
 
 # Lifecycle statuses (ADR-030 §3). Items start ``pending``; ``maybe`` is a **parked, still-
 # decidable** state (ADR-048 §7) — it accepts a later agree/disagree — while ``resolved``/
