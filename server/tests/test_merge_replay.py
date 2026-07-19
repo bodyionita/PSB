@@ -102,15 +102,15 @@ async def test_replay_refolds_by_surface_form_after_id_churn(tmp_path: Path):
     (no decision) is left untouched."""
     writer = NodeWriter(str(tmp_path))
     diana_path = _write_entity(writer, "diana-new", "Diana", ("diana",))
-    soare_path = _write_entity(writer, "vance-new", "Diana Vance", ("diana vance",))
-    manda_path = _write_entity(writer, "wren-new", "Diana Wren", ("diana wren",))
+    vance_path = _write_entity(writer, "vance-new", "Diana Vance", ("diana vance",))
+    wren_path = _write_entity(writer, "wren-new", "Diana Wren", ("diana wren",))
     mem_path = _write_memory(writer, "mem-1", (NodeEdge(rel="involves", to="vance-new"),))
 
     diana = EntityNode("diana-new", "person", "Diana", diana_path, ["diana"], None)
-    soare = EntityNode("vance-new", "person", "Diana Vance", soare_path, ["diana vance"], None)
-    manda = EntityNode("wren-new", "person", "Diana Wren", manda_path, ["diana wren"], None)
+    vance = EntityNode("vance-new", "person", "Diana Vance", vance_path, ["diana vance"], None)
+    wren = EntityNode("wren-new", "person", "Diana Wren", wren_path, ["diana wren"], None)
     store = FakeEntityStore(
-        nodes={"diana-new": diana, "vance-new": soare, "wren-new": manda},
+        nodes={"diana-new": diana, "vance-new": vance, "wren-new": wren},
         inbound={"vance-new": [InboundEdge("mem-1", mem_path, "involves")]},
     )
     # The decision was recorded pre-reprocess with the OLD ids; replay must find the hubs by form.
@@ -120,13 +120,13 @@ async def test_replay_refolds_by_surface_form_after_id_churn(tmp_path: Path):
 
     assert (outcome.decisions, outcome.applied, outcome.skipped) == (1, 1, 0)
     # Diana Vance is now a tombstone pointing at Diana.
-    assert _meta(tmp_path, soare_path).merged_into == "diana-new"
+    assert _meta(tmp_path, vance_path).merged_into == "diana-new"
     # The memory's edge was retargeted onto the survivor.
     assert [(e.rel, e.to) for e in _meta(tmp_path, mem_path).edges] == [("involves", "diana-new")]
     # Survivor unioned the loser's surface forms.
     assert "Diana Vance" in _meta(tmp_path, diana_path).aliases
     # Diana Wren — a different person, no decision — is untouched (not a tombstone).
-    assert _meta(tmp_path, manda_path).merged_into is None
+    assert _meta(tmp_path, wren_path).merged_into is None
     assert backup.reasons and "reprocess replay merge" in backup.reasons[0]
 
 
@@ -135,11 +135,11 @@ async def test_replay_skips_when_a_side_does_not_resolve(tmp_path: Path):
     loser stays live (never-lose)."""
     writer = NodeWriter(str(tmp_path))
     loser_path = _write_entity(writer, "vance-new", "Diana Vance", ("diana vance",))
-    soare = EntityNode("vance-new", "person", "Diana Vance", loser_path, ["diana vance"], None)
+    vance = EntityNode("vance-new", "person", "Diana Vance", loser_path, ["diana vance"], None)
     # Survivor "Diana" is absent from the rebuilt store.
     survivor = EntityNode("diana-old", "person", "Diana", "person/diana.md", ["diana"], None)
-    store = FakeEntityStore(nodes={"vance-new": soare})
-    service, _, _ = _service(tmp_path, store, writer, [_decision(survivor, soare)])
+    store = FakeEntityStore(nodes={"vance-new": vance})
+    service, _, _ = _service(tmp_path, store, writer, [_decision(survivor, vance)])
 
     outcome = await service.replay()
 
@@ -166,13 +166,13 @@ async def test_replay_skips_already_merged_loser(tmp_path: Path):
     """A loser that is already a tombstone (some other pass merged it) is skipped — idempotent."""
     writer = NodeWriter(str(tmp_path))
     diana_path = _write_entity(writer, "diana-new", "Diana", ("diana",))
-    soare_path = _write_entity(writer, "vance-new", "Diana Vance", ("diana vance",))
+    vance_path = _write_entity(writer, "vance-new", "Diana Vance", ("diana vance",))
     diana = EntityNode("diana-new", "person", "Diana", diana_path, ["diana"], None)
     # Loser already merged away.
-    soare = EntityNode(
-        "vance-new", "person", "Diana Vance", soare_path, ["diana vance"], "diana-new"
+    vance = EntityNode(
+        "vance-new", "person", "Diana Vance", vance_path, ["diana vance"], "diana-new"
     )
-    store = FakeEntityStore(nodes={"diana-new": diana, "vance-new": soare})
+    store = FakeEntityStore(nodes={"diana-new": diana, "vance-new": vance})
     service, _, _ = _service(tmp_path, store, writer, [_decision(diana, vance)])
 
     outcome = await service.replay()

@@ -40,7 +40,7 @@ _ROMANIAN_FOLD = str.maketrans(
 
 def fold_diacritics(text: str) -> str:
     """Fold a string to its ASCII base letters: Romanian map + Unicode NFKD, combining marks
-    stripped (ADR-041). ``"Mădălina"`` → ``"Madalina"``, ``"Ștefan"`` → ``"Stefan"``. Idempotent
+    stripped (ADR-041). ``"Ștefan"`` → ``"Stefan"`` and ``"Mădălina"`` → ``"Madalina"``. Idempotent
     (folding folded text is a no-op) and safe on already-ASCII text. Empty in ⇒ empty out."""
     if not text:
         return text
