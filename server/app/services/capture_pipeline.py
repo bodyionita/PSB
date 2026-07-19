@@ -880,6 +880,13 @@ class CapturePipeline:
                 )
                 return
             inter.kind = record.kind
+            # Media captures stream milestone progress lines (M9.7 C, ADR-061 §10): they are the
+            # slow, "what is it doing right now" case (multi-photo composites especially). The lines
+            # go out via `logger.info` under the run's log-capture scope (ADR-053 §1 — the run row
+            # is already open + pushed onto the contextvar stack by `_start_run`), so the openRun
+            # RunDetail tail (T3) shows them live with zero new schema. Text/chat/MCP captures are
+            # fast and stay quiet.
+            is_media = record.kind in (KIND_VOICE, KIND_IMAGE, KIND_COMPOSITE)
 
             transcript = record.raw_text or ""
             if record.kind in (KIND_VOICE, KIND_IMAGE):
@@ -898,11 +905,19 @@ class CapturePipeline:
                 transcript = await self._assemble_composite(capture_id, record, inter)
                 await self._store.set_raw_text(capture_id, transcript)
 
+            if is_media:
+                logger.info("organizing…")
             await self._store.mark_status(capture_id, ORGANIZING)
             t1 = time.monotonic()
             created_local = self._local(record.created_at)
             num_parts = await self._composite_part_count(record)
             organize = await self._organize(transcript, anchor=created_local, num_parts=num_parts)
+            if is_media:
+                logger.info(
+                    "organized → %d node(s)%s",
+                    len(organize.nodes),
+                    " (inbox fallback — organize unavailable)" if organize.used_fallback else "",
+                )
             inter.timings_ms["organize"] = int((time.monotonic() - t1) * 1000)
             inter.organize = {
                 "model": organize.model_used or None,
@@ -927,10 +942,14 @@ class CapturePipeline:
             # Index the freshly-written nodes into the search index (04 §4). Best-effort: the
             # nodes are already durably in the store (truth), so an embed/index failure must not
             # fail the capture — it just leaves the node stale until the next reindex.
+            if is_media:
+                logger.info("indexing %d node(s)…", len(paths))
             inter.index = await self._index_nodes(paths)
             # Derived-tier `node_media` link (ADR-060 §3): recompute this capture's node↔media links
             # against the freshly-indexed content nodes. AFTER indexing (the fk needs the row).
             # Composite: per-node attribution from the organizer's `parts` (ADR-061 §7).
+            if is_media:
+                logger.info("linking media to node(s)…")
             await self._link_node_media(
                 capture_id, content_ids, node_parts=self._node_parts(organize, record)
             )
@@ -1473,11 +1492,18 @@ class CapturePipeline:
         if media is None:
             raise CaptureError(f"{record.kind} capture {capture_id} has no media row")
         t0 = time.monotonic()
+        # A start line so the live tail shows in-progress activity (M9.7 C: single image/voice get
+        # their derive milestone lines too), matched by the outcome line below — parity with the
+        # composite per-part start/outcome pair.
+        logger.info("deriving %s…", media.kind)
         await self._media_derivation.derive_until_settled(media.id)
         # Re-read the settled row — the returned outcome is a snapshot; the row carries the
         # authoritative status / derived text / model after the (possibly looped) attempts.
         media = await self._media_store.get(media.id) or media
-        inter.timings_ms["derive"] = int((time.monotonic() - t0) * 1000)
+        derive_ms = int((time.monotonic() - t0) * 1000)
+        inter.timings_ms["derive"] = derive_ms
+        # One milestone line (M9.7 C): the single image/voice's derive outcome, streamed live.
+        _log_media_derived(media, index=1, total=1, elapsed_ms=derive_ms)
         detail = {
             "media_id": media.id,
             "kind": media.kind,
@@ -1514,16 +1540,29 @@ class CapturePipeline:
             raise CaptureError("composite capture requires the media substrate to be wired")
         await self._store.mark_status(capture_id, DERIVING)
         parts = await self._media_store.list_by_capture_id(capture_id)
+        total = len(parts)
         t0 = time.monotonic()
         sem = asyncio.Semaphore(max(1, self._settings.composite_derive_max_concurrency))
 
-        async def _settle(media: MediaRecord) -> MediaRecord:
+        async def _settle(index: int, media: MediaRecord) -> MediaRecord:
+            # Milestone lines (M9.7 C) stream the per-part progress live to the run-log tail (T3):
+            # a start line as each part enters derivation, an outcome line as it settles. `index`
+            # is the 1-based ordinal marker position (T3 organizer attribution keys off the same).
             async with sem:
+                logger.info("deriving %s %d/%d…", media.kind, index, total)
+                t_part = time.monotonic()
                 await self._media_derivation.derive_until_settled(media.id)
-            return await self._media_store.get(media.id) or media
+                part_ms = int((time.monotonic() - t_part) * 1000)
+            settled_media = await self._media_store.get(media.id) or media
+            _log_media_derived(settled_media, index=index, total=total, elapsed_ms=part_ms)
+            return settled_media
 
         # Concurrent derivation, but `gather` preserves input (ordinal) order in the result.
-        settled = await asyncio.gather(*(_settle(m) for m in parts)) if parts else []
+        settled = (
+            await asyncio.gather(*(_settle(i, m) for i, m in enumerate(parts, start=1)))
+            if parts
+            else []
+        )
         inter.timings_ms["derive"] = int((time.monotonic() - t0) * 1000)
         inter.derive = {
             "parts": [
@@ -1714,6 +1753,20 @@ def _render_media_text(media: MediaRecord) -> str:
     if media.status == MEDIA_DERIVED and (media.derived_text or "").strip():
         return media.derived_text.strip()
     return placeholder(media.kind)
+
+
+def _log_media_derived(media: MediaRecord, *, index: int, total: int, elapsed_ms: int) -> None:
+    """Emit one milestone ``logger.info`` line for a settled media item (M9.7 C, ADR-061 §10).
+
+    Streamed live to the openRun run-log tail (T3) through the capture run's log-capture scope
+    (ADR-053 §1). A ``k/N`` label is shown for a composite (``total > 1``); a lone image/voice omits
+    it. Carries only kind/model/status/attempts — never the raw derived text (rule 11: the tail is a
+    UI-rendered store); the failure ``error`` rides the structured per-part block, not this line."""
+    label = f"{media.kind} {index}/{total}" if total > 1 else media.kind
+    if media.status == MEDIA_DERIVED:
+        logger.info("derived %s via %s (%dms)", label, media.model_used or "?", elapsed_ms)
+    else:
+        logger.info("%s %s after %d attempt(s)", label, media.status, media.attempts)
 
 
 def _part_marker(index: int, kind: str) -> str:
