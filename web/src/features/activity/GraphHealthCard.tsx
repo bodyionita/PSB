@@ -1,7 +1,8 @@
-import { useState, type CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ApiError } from '../../api/client';
 import type { OrphanKeepItem } from '../../api/types';
+import { useResolvedRunItems, type ResolvedStatus } from './useResolvedRunItems';
 import { Button } from '../../ui/Button';
 import { MergeIntoPanel } from '../../ui/MergeIntoPanel';
 import { NodeChip } from '../../ui/NodeChip';
@@ -192,10 +193,26 @@ function ResolvedLine({ text }: { text: string }) {
   );
 }
 
+const RESOLVED_TEXT: Record<ResolvedStatus, string> = {
+  deleted: 'Deleted.',
+  kept: 'Kept — it won’t be flagged again.',
+  merged: 'Merged into another entity.',
+};
+
 // One orphan **hub** offender: Delete (git-rm the zero-degree hub), Merge (fold a dupe into the real
 // hub via the shared picker — the T3 flow), or Keep (whitelist so it stops nagging). Delete confirms
 // inline (there's no propose-preview step) and then polls the background run.
-function OrphanHubRow({ offender }: { offender: HealthOffender }) {
+function OrphanHubRow({
+  offender,
+  resolvedStatus,
+  onResolved,
+}: {
+  offender: HealthOffender;
+  // The durable resolution recorded for this offender against the current run (M9.8 T7 fix) —
+  // survives remount/refetch so an acted row stays settled instead of re-showing its buttons.
+  resolvedStatus?: ResolvedStatus;
+  onResolved: (status: ResolvedStatus) => void;
+}) {
   const del = useDeleteNode();
   const keep = useKeepNode();
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -218,6 +235,17 @@ function OrphanHubRow({ offender }: { offender: HealthOffender }) {
   const deleteFailed = deleteRun.data?.status === 'failed';
   const deleting = del.isPending || (deleteRunId != null && !deleted && !deleteFailed);
 
+  // Record the resolution durably once it lands (delete-run succeeded / keep succeeded); merge is
+  // reported by MergeIntoPanel's onMerged below. The effective status prefers the persisted value so
+  // a remount still reads "settled" even after the local mutation state is gone.
+  useEffect(() => {
+    if (deleted) onResolved('deleted');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deleted]);
+
+  const resolved: ResolvedStatus | undefined =
+    resolvedStatus ?? (deleted ? 'deleted' : keep.isSuccess ? 'kept' : undefined);
+
   return (
     <div style={{ ...ROW_BOX, gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -230,10 +258,8 @@ function OrphanHubRow({ offender }: { offender: HealthOffender }) {
         </span>
       </div>
 
-      {keep.isSuccess ? (
-        <ResolvedLine text="Kept — it won’t be flagged again." />
-      ) : deleted ? (
-        <ResolvedLine text="Deleted." />
+      {resolved ? (
+        <ResolvedLine text={RESOLVED_TEXT[resolved]} />
       ) : (
         <div style={{ display: 'grid', gap: 8 }}>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -272,7 +298,7 @@ function OrphanHubRow({ offender }: { offender: HealthOffender }) {
                 </Button>
                 <Button
                   variant="ghost"
-                  onClick={() => keep.mutate(offender.id)}
+                  onClick={() => keep.mutate(offender.id, { onSuccess: () => onResolved('kept') })}
                   disabled={keep.isPending || deleting}
                   style={SMALL_BTN}
                 >
@@ -287,6 +313,7 @@ function OrphanHubRow({ offender }: { offender: HealthOffender }) {
           {!confirmDelete && !deleting && (
             <MergeIntoPanel
               loser={{ id: offender.id, type: offender.type ?? '', title: offender.label }}
+              onMerged={() => onResolved('merged')}
             />
           )}
 
@@ -419,13 +446,27 @@ function KeptStrip() {
 
 // The orphan-nodes section: the shared header + per-offender actionable rows (hub vs content) + the
 // always-present Kept strip. A hub is any offender whose `type` is entity-like (GET /types).
-function OrphanCheckRow({ check }: { check: HealthCheck }) {
+// A stable per-(type, surface-form) key so a live keep can be matched against a frozen orphan
+// sample offender (case/whitespace-folded; the server keys keeps on the normalized surface form).
+function keptFormKey(type: string | null, label: string): string {
+  return `${type ?? ''} ${label.trim().toLowerCase()}`;
+}
+
+function OrphanCheckRow({ check, runId }: { check: HealthCheck; runId: string | null }) {
   const entityLikeTypes = useEntityLikeTypes();
   // The set is empty only while `GET /types` is still resolving (the vocabulary always has entity
   // seeds), so classifying then would mislabel every hub as a content node and hide its actions.
   // Wait for the types before splitting hub vs content.
   const typesReady = entityLikeTypes.size > 0;
   const hasSample = check.count > 0 && check.sample.length > 0;
+
+  // Durable resolutions for this run (delete/keep/merge survive remount, T7 fix) + a live-keep
+  // reconciliation so a hub kept in a *previous* session also reads as settled against this stale
+  // sample (a fresh graph-health run drops it server-side anyway).
+  const resolved = useResolvedRunItems('graph-health-orphan', runId);
+  const { data: keepsData } = useOrphanKeeps();
+  const keptForms = new Set((keepsData ?? []).map((k) => keptFormKey(k.type, k.label)));
+
   return (
     <div style={{ ...ROW_BOX, gap: 10 }}>
       <CheckHeader check={check} />
@@ -434,7 +475,15 @@ function OrphanCheckRow({ check }: { check: HealthCheck }) {
           <div style={{ display: 'grid', gap: 8 }}>
             {check.sample.map((o) =>
               o.type != null && entityLikeTypes.has(o.type) ? (
-                <OrphanHubRow key={o.id} offender={o} />
+                <OrphanHubRow
+                  key={o.id}
+                  offender={o}
+                  resolvedStatus={
+                    resolved.statusOf(o.id) ??
+                    (keptForms.has(keptFormKey(o.type, o.label)) ? 'kept' : undefined)
+                  }
+                  onResolved={(s) => resolved.mark(o.id, s)}
+                />
               ) : (
                 <ContentOrphanRow key={o.id} offender={o} />
               ),
@@ -488,7 +537,7 @@ export function GraphHealthCard({ runId }: { runId: string | null }) {
           <div style={{ display: 'grid', gap: 10 }}>
             {checks.map((c) =>
               c.check === CHECK_ORPHAN_NODES ? (
-                <OrphanCheckRow key={c.check} check={c} />
+                <OrphanCheckRow key={c.check} check={c} runId={runId} />
               ) : (
                 <CheckRow key={c.check} check={c} />
               ),

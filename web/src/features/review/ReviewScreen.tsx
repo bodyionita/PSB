@@ -25,6 +25,11 @@ const KIND_ENTITY = 'entity-ambiguity';
 const KIND_VOCAB = 'vocab-proposal';
 const KIND_STANCE = 'stance-candidate';
 const KIND_DEDUP = 'dedup-proposal';
+// M9.8 T4/T7 (ADR-064 §4): the conservative entity-HUB dedup detector files its lower-confidence
+// pairs here. Distinct from `dedup-proposal` (M6 content near-duplicates): resolving a merge folds
+// one hub into the other with the alias union AND records a durable merge decision (survives a
+// reprocess). Merge|keep only — never "link".
+const KIND_ENTITY_DEDUP = 'entity-dedup';
 const KIND_OCCURRED = 'occurred-enrichment';
 
 // Only the M6 kinds (stance-candidate / dedup-proposal) show a batch select box; entity/vocab keep
@@ -116,6 +121,33 @@ function dedupOf(item: ReviewItemResponse): DedupInfo {
     cosine: typeof signals.cosine === 'number' ? signals.cosine : null,
     sharedEntities: strList(signals.shared_entity_titles),
     occurredOverlap: signals.occurred_overlap === true,
+  };
+}
+
+interface EntityDedupInfo {
+  nodeA: string;
+  nodeB: string;
+  defaultSurvivor: string;
+  type: string | null;
+  titles: Record<string, string>;
+  sharedCount: number | null;
+  nameMatchKind: string | null;
+}
+
+function entityDedupOf(item: ReviewItemResponse): EntityDedupInfo {
+  const titlesRaw = asRecord(item.payload.titles);
+  const titles: Record<string, string> = {};
+  for (const [k, v] of Object.entries(titlesRaw)) if (typeof v === 'string') titles[k] = v;
+  const signals = asRecord(item.payload.signals);
+  const nameMatch = asRecord(signals.name_match);
+  return {
+    nodeA: str(item.payload.node_a) ?? '',
+    nodeB: str(item.payload.node_b) ?? '',
+    defaultSurvivor: str(item.payload.default_survivor) ?? '',
+    type: typeof item.payload.type === 'string' ? item.payload.type : null,
+    titles,
+    sharedCount: typeof signals.shared_count === 'number' ? signals.shared_count : null,
+    nameMatchKind: typeof nameMatch.kind === 'string' ? nameMatch.kind : null,
   };
 }
 
@@ -592,6 +624,126 @@ function DedupProposalCard({ item, selected, onToggleSelect }: CardProps) {
   );
 }
 
+// --- entity-dedup (M9.8 T4/T7, ADR-064 §4) --------------------------------------------------
+
+// One hub of a possible-duplicate ENTITY pair. Unlike dedup-proposal's DedupNodeRow this needs no
+// lazy node fetch — the detector ships both titles in the payload — but still shows a NodeChip so
+// the hub can be peeked in the shared drawer, plus a radio to pick it as the surviving hub.
+function EntityDedupHubRow({
+  nodeId,
+  title,
+  type,
+  isSurvivor,
+  onPick,
+  busy,
+  groupName,
+}: {
+  nodeId: string;
+  title: string;
+  type: string | null;
+  isSurvivor: boolean;
+  onPick: () => void;
+  busy: boolean;
+  groupName: string;
+}) {
+  return (
+    <label
+      style={{
+        display: 'flex',
+        gap: 10,
+        alignItems: 'center',
+        padding: 12,
+        borderRadius: 'var(--radius)',
+        border: isSurvivor ? '1px solid var(--accent)' : '1px solid var(--surface-border)',
+        background: 'var(--surface)',
+        cursor: busy ? 'default' : 'pointer',
+        opacity: busy ? 0.6 : 1,
+      }}
+    >
+      <input
+        type="radio"
+        name={groupName}
+        checked={isSurvivor}
+        onChange={onPick}
+        disabled={busy}
+        aria-label={`Keep "${title}" as the surviving entity`}
+        style={{ accentColor: 'var(--accent)', flexShrink: 0 }}
+      />
+      <NodeChip nodeId={nodeId} type={type} title={title} />
+    </label>
+  );
+}
+
+function EntityDedupCard({ item, selected, onToggleSelect }: CardProps) {
+  const resolve = useResolveReview();
+  const info = entityDedupOf(item);
+  const busy = resolve.isPending;
+  const parked = item.status === 'maybe';
+  const [survivor, setSurvivor] = useState(info.defaultSurvivor || info.nodeA);
+
+  const titleOf = (id: string) => info.titles[id] ?? id;
+  // merge folds the loser into the picked survivor (alias union + durable decision); keep dismisses
+  // as "not a duplicate". No "link" — the server rejects anything but merge|keep for this kind.
+  const act = (action: 'merge' | 'keep') =>
+    resolve.mutate({ id: item.id, body: action === 'merge' ? { action, survivor } : { action } });
+
+  return (
+    <Surface>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <SelectBox checked={selected} onChange={onToggleSelect} />
+          <span aria-hidden style={{ flexShrink: 0 }}>{typeIcon(info.type)}</span>
+          <span style={{ fontSize: 13, color: 'var(--muted)' }}>Same {info.type ?? 'entity'}?</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          {parked && <AgingTag item={item} />}
+          <KindBadge label="Duplicate?" />
+        </div>
+      </div>
+
+      <p style={{ margin: '6px 0 12px', fontSize: 12.5, color: 'var(--muted)' }}>
+        These two hubs look like the same {info.type ?? 'entity'}
+        {info.sharedCount != null && (
+          <> · {info.sharedCount} shared neighbour{info.sharedCount === 1 ? '' : 's'}</>
+        )}
+        {info.nameMatchKind && <> · {info.nameMatchKind} name match</>}. Merge keeps the selected
+        one and folds the other into it (aliases union, survives a reprocess), or keep them separate.
+      </p>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <EntityDedupHubRow
+          nodeId={info.nodeA}
+          title={titleOf(info.nodeA)}
+          type={info.type}
+          isSurvivor={survivor === info.nodeA}
+          onPick={() => setSurvivor(info.nodeA)}
+          busy={busy}
+          groupName={`entity-survivor-${item.id}`}
+        />
+        <EntityDedupHubRow
+          nodeId={info.nodeB}
+          title={titleOf(info.nodeB)}
+          type={info.type}
+          isSurvivor={survivor === info.nodeB}
+          onPick={() => setSurvivor(info.nodeB)}
+          busy={busy}
+          groupName={`entity-survivor-${item.id}`}
+        />
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+        <Button onClick={() => act('merge')} disabled={busy}>
+          Merge
+        </Button>
+        <Button variant="ghost" onClick={() => act('keep')} disabled={busy}>
+          Not a duplicate
+        </Button>
+      </div>
+      <ResolveError show={resolve.isError} />
+    </Surface>
+  );
+}
+
 // --- occurred-enrichment (M8.2, ADR-056 §7) -------------------------------------------------
 
 // The undated content node a nightly step flagged. The user tags its event time in NATURAL
@@ -708,6 +860,8 @@ function ReviewCard({ item, selected, onToggleSelect }: CardProps) {
         <StanceCandidateCard item={item} selected={selected} onToggleSelect={onToggleSelect} />
       ) : item.kind === KIND_DEDUP ? (
         <DedupProposalCard item={item} selected={selected} onToggleSelect={onToggleSelect} />
+      ) : item.kind === KIND_ENTITY_DEDUP ? (
+        <EntityDedupCard item={item} selected={selected} onToggleSelect={onToggleSelect} />
       ) : item.kind === KIND_OCCURRED ? (
         <OccurredEnrichmentCard item={item} />
       ) : (
@@ -733,6 +887,8 @@ const BATCH_ACTIONS: Record<string, { action: string; label: string; primary?: b
     { action: 'maybe', label: 'Maybe later' },
   ],
   [KIND_DEDUP]: [{ action: 'keep', label: 'Keep both (dismiss)' }],
+  // A batch merge isn't offered (survivor is per-pair); batch keep dismisses a run of non-duplicates.
+  [KIND_ENTITY_DEDUP]: [{ action: 'keep', label: 'Not duplicates (dismiss)' }],
 };
 
 function BatchBar({

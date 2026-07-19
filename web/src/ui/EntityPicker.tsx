@@ -174,13 +174,14 @@ export function EntityPicker({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.12 }}
+            // In-flow (not an absolute overlay): the picker lives inside a scrollable bottom-sheet
+            // (NodePreviewDrawer, maxHeight 85dvh, overflow:auto), where an absolutely-positioned
+            // `top:100%` dropdown clips off the sheet's bottom edge — unreachable + unscrollable
+            // (M9.8 T7 finding). Rendering the results in normal flow pushes the content down so the
+            // sheet's own scroll reveals them; the list still caps its own height and scrolls.
             style={{
-              position: 'absolute',
-              zIndex: 20,
-              top: 'calc(100% + 4px)',
-              left: 0,
-              right: 0,
-              margin: 0,
+              width: '100%',
+              marginTop: 4,
               padding: 4,
               listStyle: 'none',
               maxHeight: 260,

@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ApiError } from '../../api/client';
 import type { DedupCandidate, EntityMergeProposeResponse } from '../../api/types';
@@ -8,6 +8,7 @@ import { TimeAgo } from '../../ui/TimeAgo';
 import { typeIcon } from '../../ui/nodeTypes';
 import { useReviewNav } from '../review/reviewNav';
 import { useMergeEntitiesApply, useMergeEntitiesPropose, useRun } from './useActivity';
+import { useResolvedRunItems } from './useResolvedRunItems';
 import { FAIL_COLOR, OK_COLOR } from './statusColors';
 
 // The duplicate-candidates card (M9.8 T6, ADR-064 §3/§4): the conservative entity-hub dedup
@@ -59,15 +60,31 @@ function parseDedup(details: Record<string, unknown> | undefined): Parsed {
 // One high-confidence pair: a one-click Merge that runs the shared propose (inbound-edge inventory)
 // → confirm → apply, pre-filled with the detector's survivor/loser (apply uses the server-
 // authoritative ids from the proposal, mirroring the AdminOps merge card).
-function DuplicateCandidateRow({ candidate }: { candidate: DedupCandidate }) {
+function DuplicateCandidateRow({
+  candidate,
+  resolved,
+  onMerged,
+}: {
+  candidate: DedupCandidate;
+  // Durable per-run resolution (T7 fix): a merged pair stays settled across remount instead of
+  // re-showing its Merge button (or degrading to a 404 on re-propose) until the next dedup run.
+  resolved: boolean;
+  onMerged: () => void;
+}) {
   const propose = useMergeEntitiesPropose();
   const apply = useMergeEntitiesApply();
   const [plan, setPlan] = useState<EntityMergeProposeResponse | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const run = useRun(runId);
 
-  const merged = run.data?.status === 'succeeded';
+  const runSucceeded = run.data?.status === 'succeeded';
+  const merged = resolved || runSucceeded;
   const failed = run.data?.status === 'failed';
+
+  useEffect(() => {
+    if (runSucceeded) onMerged();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runSucceeded]);
   const merging = apply.isPending || (runId != null && !merged && !failed);
 
   const survivorName = candidate.survivor.title ?? candidate.survivor.id;
@@ -199,6 +216,7 @@ function LowConfidenceLink({ count }: { count: number }) {
 export function DuplicateCandidatesCard({ runId }: { runId: string | null }) {
   const run = useRun(runId);
   const { candidates, lowConfidenceFiled } = parseDedup(run.data?.details);
+  const resolved = useResolvedRunItems('dedup-candidates', runId);
 
   return (
     <Surface>
@@ -230,7 +248,11 @@ export function DuplicateCandidatesCard({ runId }: { runId: string | null }) {
           <AnimatePresence initial={false}>
             {candidates.map((c) => (
               <motion.div key={`${c.loser.id}:${c.survivor.id}`} layout>
-                <DuplicateCandidateRow candidate={c} />
+                <DuplicateCandidateRow
+                  candidate={c}
+                  resolved={resolved.statusOf(c.loser.id) === 'merged'}
+                  onMerged={() => resolved.mark(c.loser.id, 'merged')}
+                />
               </motion.div>
             ))}
           </AnimatePresence>

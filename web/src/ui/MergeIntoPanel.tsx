@@ -7,7 +7,7 @@
 // Self-contained in `ui/` (talks to `api` directly, like <EntityPicker>) so the layering stays
 // clean — the shared preview never reaches into a feature. Collapsed to a subtle button by default.
 import { motion } from 'framer-motion';
-import { useState, type CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../api/client';
 import type { EntityBrowseItem, EntityMergeProposeResponse, RunStatus } from '../api/types';
@@ -47,8 +47,12 @@ function useMergeRun(runId: string | null) {
 
 export function MergeIntoPanel({
   loser,
+  onMerged,
 }: {
   loser: { id: string; type: string; title: string | null };
+  // Fired once when the background merge run reaches `succeeded` — lets a host (the graph-health
+  // orphan row) durably settle the loser to a resolved state (M9.8 T7 fix, ADR-064 §3).
+  onMerged?: () => void;
 }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -72,6 +76,13 @@ export function MergeIntoPanel({
   });
 
   const run = useMergeRun(runId);
+
+  // Notify the host exactly once the merge run settles as succeeded (the loser is now tombstoned).
+  useEffect(() => {
+    if (run.data?.status === 'succeeded') onMerged?.();
+    // Fire on the transition to succeeded; onMerged is idempotent on the host side (marks a set).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.data?.status]);
 
   const reset = () => {
     setSurvivor(null);
