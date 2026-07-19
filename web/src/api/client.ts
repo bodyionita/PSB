@@ -30,6 +30,7 @@ import type {
   NodeDateTokenEdit,
   NodeDateTokenEditResponse,
   NodeDetailResponse,
+  OrphanKeepItem,
   PipelineItem,
   PlanesResponse,
   ProvidersResponse,
@@ -326,6 +327,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ loser, survivor, apply: true }),
     }),
+  // Orphan GC (ADR-064 §5, M9.8 T5/T5.5). Delete a zero-degree orphan **hub** — git-rm + index
+  // prune in the background (202 {run_id}); 404 unknown/tombstone; 400 a content node (remove its
+  // capture instead); 409 still-referenced (merge it instead). Keep whitelists a hub so the
+  // nightly graph-health orphan check stops flagging it (synchronous; 404/400 like delete). The
+  // kept list backs the "Kept (N)" strip; un-keep is keyed on the stable `keep_key` (not node id —
+  // it survives a reprocess), so pass the `key` from an OrphanKeepItem verbatim.
+  deleteNode: (id: string) =>
+    request<RunAcceptedResponse>(`/admin/nodes/${encodeURIComponent(id)}/delete`, {
+      method: 'POST',
+    }),
+  keepNode: (id: string) =>
+    request<OrphanKeepItem>(`/admin/nodes/${encodeURIComponent(id)}/keep`, { method: 'POST' }),
+  listOrphanKeeps: () => request<OrphanKeepItem[]>('/admin/orphan-keeps'),
+  unkeepOrphan: (key: string) =>
+    request<void>(`/admin/orphan-keeps/${encodeURIComponent(key)}`, { method: 'DELETE' }),
   // vocab/consolidate (ADR-036): two-step edge retro-consolidation for an approved rel.
   consolidateVocabPropose: (rel: string) =>
     request<VocabConsolidateProposeResponse>('/admin/vocab/consolidate', {

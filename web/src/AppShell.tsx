@@ -105,7 +105,13 @@ export function AppShell() {
     setReviewSeed(reviewItemId);
     setTab('review');
   }, []);
-  const reviewNav = useMemo(() => ({ openReviewItem }), [openReviewItem]);
+  // Open the Review tab with no seeded item (the graph-health duplicate-candidates link, M9.8 T6):
+  // clear any stale seed so a prior highlight doesn't reapply, then switch tabs.
+  const openReview = useCallback(() => {
+    setReviewSeed(null);
+    setTab('review');
+  }, []);
+  const reviewNav = useMemo(() => ({ openReviewItem, openReview }), [openReviewItem, openReview]);
 
   const openCaptures = useCallback(() => {
     setActivityCategory('captures');

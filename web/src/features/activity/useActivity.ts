@@ -16,6 +16,7 @@ import type {
   AgentRosterItem,
   AgentRunResponse,
   EdgeRetypeItem,
+  OrphanKeepItem,
   PipelineItem,
   RunLogLine,
   RunStatus,
@@ -208,6 +209,43 @@ export function useConsolidateVocabApply() {
   return useMutation({
     mutationFn: (v: { rel: string; plan: EdgeRetypeItem[] }) =>
       api.consolidateVocabApply(v.rel, v.plan),
+  });
+}
+
+// --- Inline-actionable graph-health: orphan GC + keep-list (M9.8 T6, ADR-064 §5) ----------------
+
+// The kept-hub list backing the graph-health card's "Kept (N)" strip. Refetched after a keep /
+// un-keep so the strip stays live (the graph-health *run* details are a past snapshot and don't
+// change until it re-runs, but the keep-list is a live decision store).
+export const ORPHAN_KEEPS_KEY = ['activity', 'orphan-keeps'] as const;
+
+export function useOrphanKeeps() {
+  return useQuery<OrphanKeepItem[]>({
+    queryKey: ORPHAN_KEEPS_KEY,
+    queryFn: () => api.listOrphanKeeps(),
+  });
+}
+
+// Orphan-hub delete → a background run the caller polls with `useRun` (git-rm + index prune). No
+// cache to invalidate: the flagged offender lives in the past graph-health run's details, which the
+// delete doesn't rewrite — the row shows its own resolved state instead.
+export function useDeleteNode() {
+  return useMutation({ mutationFn: (id: string) => api.deleteNode(id) });
+}
+
+// Keep / un-keep both mutate the live keep-list, so they refresh the "Kept (N)" strip on success.
+export function useKeepNode() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.keepNode(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ORPHAN_KEEPS_KEY }),
+  });
+}
+export function useUnkeepOrphan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (key: string) => api.unkeepOrphan(key),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ORPHAN_KEEPS_KEY }),
   });
 }
 

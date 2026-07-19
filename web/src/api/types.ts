@@ -736,6 +736,35 @@ export interface EntityMergeProposeResponse {
   inbound: InboundEdge[];
 }
 
+// --- Orphan GC + keep-list (03-api.md §Admin, ADR-064 §5 — M9.8 T5/T5.5/T6) ---
+// One kept orphan hub: the shape of both `POST /admin/nodes/{id}/keep` and each row of `GET
+// /admin/orphan-keeps`. `key` is the stable surface-form+type handle the web un-keeps on (`DELETE
+// /admin/orphan-keeps/{key}`) — NOT a node id, so it survives a reprocess; `label` is the hub's
+// title form.
+export interface OrphanKeepItem {
+  key: string;
+  type: string;
+  label: string;
+  kept_at: string | null;
+}
+
+// --- Entity-hub dedup candidates (03-api.md §Admin, ADR-064 §4 — M9.8 T4/T6) ---
+// One high-confidence duplicate-hub pair, read off the latest `entity-dedup` run's
+// `details.high_confidence[]` (same mechanism as the graph-health card). `survivor` is the
+// higher-degree hub kept; `loser` is folded away — the one-click Merge pre-fills both. `signals`
+// explains why the detector paired them (shared neighbours + name/alias match).
+export interface DedupPairSide {
+  id: string;
+  title: string | null;
+}
+export interface DedupCandidate {
+  survivor: DedupPairSide;
+  loser: DedupPairSide;
+  type: string;
+  shared_count: number;
+  name_match_kind: string;
+}
+
 // --- Edge vocab consolidation (03-api.md §Admin, POST /admin/vocab/consolidate — ADR-036) ---
 // One edge re-typing: the edge `{rel: from_rel, to}` on node `src_id` becomes `to_rel`. Shared by the
 // propose response + the apply request. Two-step: propose (apply:false) → retypings; apply → run.

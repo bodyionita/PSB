@@ -8,6 +8,11 @@ import { createContext, useContext } from 'react';
 
 export interface ReviewNav {
   openReviewItem: (reviewItemId: string) => void;
+  // Open the Review tab without seeding a specific item (M9.8 T6, ADR-064 §4) — the graph-health
+  // duplicate-candidates section links here for the lower-confidence pairs T4 filed to Review (no
+  // single id to highlight). Optional so a provider that only wires `openReviewItem` still
+  // type-checks; consumers guard on its presence.
+  openReview?: () => void;
 }
 
 export const ReviewNavContext = createContext<ReviewNav | null>(null);

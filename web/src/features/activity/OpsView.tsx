@@ -4,6 +4,7 @@ import type { AgentRosterItem, LastRun, PipelineItem } from '../../api/types';
 import { Button } from '../../ui/Button';
 import { TimeAgo } from '../../ui/TimeAgo';
 import { AdminOps } from './AdminOps';
+import { DuplicateCandidatesCard } from './DuplicateCandidatesCard';
 import { GraphHealthCard } from './GraphHealthCard';
 import { RunLogTail } from './RunLogTail';
 import { StatusBadge } from './runStatus';
@@ -15,6 +16,7 @@ import { useAgents, usePipelines, useRunAgent, useRunPipeline } from './useActiv
 // admin ops. The M2 Admin panel is absorbed here.
 
 const GRAPH_HEALTH = 'graph-health';
+const ENTITY_DEDUP = 'entity-dedup';
 
 function triggerError(err: unknown): string {
   if (err instanceof ApiError) {
@@ -208,16 +210,20 @@ function RosterSection() {
 }
 
 export function OpsView() {
-  // The graph-health card reads the LATEST graph-health run off the roster's last_run.run_id.
+  // The graph-health + duplicate-candidates cards each read the LATEST run of their job off the
+  // roster's last_run.run_id (graph-health / entity-dedup — same mechanism, ADR-064 §3/§4).
   const { data: agents } = useAgents();
   const graphHealthRunId =
     agents?.find((a) => a.name === GRAPH_HEALTH)?.last_run?.run_id ?? null;
+  const entityDedupRunId =
+    agents?.find((a) => a.name === ENTITY_DEDUP)?.last_run?.run_id ?? null;
 
   return (
     <div style={{ display: 'grid', gap: 20 }}>
       <PipelinesSection />
       <RosterSection />
       <GraphHealthCard runId={graphHealthRunId} />
+      <DuplicateCandidatesCard runId={entityDedupRunId} />
       <div>
         <h2 style={{ margin: '0 0 12px', fontSize: 16 }}>Operations</h2>
         <AdminOps />
