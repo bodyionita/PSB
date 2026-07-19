@@ -9,6 +9,7 @@ import type {
   AutoRecordedItem,
   BackupResponse,
   EdgeRetypeItem,
+  EntityBrowseItem,
   EntityMergeProposeResponse,
   CaptureAcceptedResponse,
   CaptureView,
@@ -171,6 +172,18 @@ export const api = {
         ...(topK != null ? { top_k: topK } : {}),
       }),
     }),
+  // Name-typeahead browse over entity hubs (M9.8 T2, ADR-064 §2) — backs the shared merge picker,
+  // resolving a typed name to an entity id (no UUIDs). `q` matches diacritic-folded titles/aliases
+  // (empty → alphabetical browse); `type` narrows to one entity-like hub kind; `/search` stays the
+  // query-shaped semantic surface.
+  entities: (q?: string, type?: string, limit?: number) =>
+    request<EntityBrowseItem[]>(
+      `/entities?${new URLSearchParams({
+        ...(q ? { q } : {}),
+        ...(type ? { type } : {}),
+        ...(limit != null ? { limit: String(limit) } : {}),
+      }).toString()}`,
+    ),
   getNode: (id: string) =>
     request<NodeDetailResponse>(`/nodes/${encodeURIComponent(id)}`),
   // The mechanical date-token edit (M8.2, ADR-056 §5): rewrite an exact body `[[t:…]]` token to a

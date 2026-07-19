@@ -19,14 +19,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
 from ..dependencies import (
+    get_entity_browse_service,
     get_graph_service,
     get_node_time_edit_service,
     get_search_service,
     require_session,
 )
+from ..entities.entity_browse import EntityBrowseService
 from ..graph.service import GraphService, InvalidCursor
 from ..graph.store import NeighborEdge
 from ..models import (
+    EntityBrowseItem,
     MapNeighborItem,
     MapZone,
     NeighborCenter,
@@ -102,6 +105,23 @@ async def search(
         )
         for hit in hits
     ]
+
+
+@router.get("/entities", response_model=list[EntityBrowseItem])
+async def browse_entities(
+    q: str | None = Query(default=None),
+    type: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=50),
+    service: EntityBrowseService = Depends(get_entity_browse_service),
+) -> list[EntityBrowseItem]:
+    """Name-typeahead browse over entity hubs (03-api §Search & graph, ADR-058 §11; ADR-064 §2).
+
+    Feeds the shared merge picker: ``q`` matches diacritic-folded titles/aliases (search-as-you-
+    type; empty ``q`` → an alphabetical browse), ``type`` narrows to one entity-like hub kind (all
+    configured kinds when omitted), ``limit`` bounds the page. Read-only, no model — ``/search``
+    stays the query-shaped semantic surface. Tombstones are excluded by the store read."""
+    refs = await service.browse(type_filter=type, q=q, limit=limit)
+    return [EntityBrowseItem(id=r.id, type=r.type, title=r.title, aliases=r.aliases) for r in refs]
 
 
 @router.get("/nodes/{node_id}", response_model=NodeDetailResponse)

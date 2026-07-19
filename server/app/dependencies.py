@@ -13,6 +13,7 @@ from .chat.distiller import ChatDistillerService
 from .chat.service import ChatService
 from .config import Settings
 from .db import Database
+from .entities.entity_browse import EntityBrowseService
 from .entities.merge import MergeService
 from .graph.service import DerivedEdgeGraph, GraphService
 from .identity.service import IdentityCapsuleService
@@ -155,6 +156,10 @@ def get_review_service(request: Request) -> ReviewService:
 
 def get_node_time_edit_service(request: Request) -> NodeTimeEditService:
     return request.app.state.node_time_edit_service
+
+
+def get_entity_browse_service(request: Request) -> EntityBrowseService:
+    return request.app.state.entity_browse_service
 
 
 def get_merge_service(request: Request) -> MergeService:

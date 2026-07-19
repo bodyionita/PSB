@@ -18,7 +18,7 @@ from app.search.service import NodePreview
 from app.search.store import NodeEdgeView, SearchHit
 from app.services.node_media_store import NodeMediaItem
 
-from .fakes import FakeNeighborStore, FakeNodeReader
+from .fakes import FakeEntityStore, FakeNeighborStore, FakeNodeReader
 
 PREFIX = "/api/v1"
 
@@ -245,6 +245,73 @@ def test_get_node_unknown_is_404():
 def test_get_node_malformed_uuid_is_422():
     resp = _client(FakeSearchService()).get(f"{PREFIX}/nodes/not-a-uuid")
     assert resp.status_code == 422
+
+
+# --- GET /entities (M9.8 T2, ADR-064 §2 — the merge picker's browse) ------------------------
+
+
+def _entities_client(refs) -> TestClient:
+    from app.dependencies import get_entity_browse_service
+    from app.entities.entity_browse import EntityBrowseService
+
+    store = FakeEntityStore(entities=refs)
+    svc = EntityBrowseService(
+        store=store, entity_like_types=["person", "place", "topic", "event", "project"]
+    )
+    app = FastAPI()
+    app.include_router(search.router, prefix=PREFIX)
+    app.dependency_overrides[get_entity_browse_service] = lambda: svc
+    app.dependency_overrides[require_session] = lambda: None
+    return TestClient(app)
+
+
+def _entity_ref(id: str, title: str | None, *, type: str = "person", aliases=None):
+    from app.entities.entity_store import EntityRef
+
+    return EntityRef(
+        id=id, type=type, title=title, aliases=list(aliases or []), store_path=f"person/{id}.md"
+    )
+
+
+def test_browse_entities_search_by_name_resolves_id_and_shape():
+    refs = [
+        _entity_ref("11111111-1111-1111-1111-111111111111", "Diana Vance", aliases=["Di"]),
+        _entity_ref("22222222-2222-2222-2222-222222222222", "Diana Wren"),
+        _entity_ref("33333333-3333-3333-3333-333333333333", "Bob"),
+    ]
+    resp = _entities_client(refs).get(f"{PREFIX}/entities", params={"q": "diana vance"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body[0] == {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "type": "person",
+        "title": "Diana Vance",
+        "aliases": ["Di"],
+    }
+    assert "33333333-3333-3333-3333-333333333333" not in [b["id"] for b in body]
+
+
+def test_browse_entities_empty_query_is_alphabetical_browse():
+    refs = [_entity_ref("b", "Zoe"), _entity_ref("a", "Alex")]
+    resp = _entities_client(refs).get(f"{PREFIX}/entities")
+    assert resp.status_code == 200
+    assert [b["title"] for b in resp.json()] == ["Alex", "Zoe"]
+
+
+def test_browse_entities_type_filter_narrows():
+    refs = [
+        _entity_ref("p", "Diana", type="person"),
+        _entity_ref("t", "Diana", type="topic"),
+    ]
+    resp = _entities_client(refs).get(f"{PREFIX}/entities", params={"type": "topic"})
+    assert resp.status_code == 200
+    assert [b["id"] for b in resp.json()] == ["t"]
+
+
+def test_browse_entities_limit_bounds_are_validated():
+    client = _entities_client([_entity_ref("a", "A")])
+    assert client.get(f"{PREFIX}/entities", params={"limit": 0}).status_code == 422
+    assert client.get(f"{PREFIX}/entities", params={"limit": 51}).status_code == 422
 
 
 # --- GET /nodes/{id}/neighbors (M7 map, ADR-051 §2) -----------------------------------------

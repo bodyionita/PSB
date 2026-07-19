@@ -23,6 +23,7 @@ from .db import Database
 from .dedup.store import PgDedupStore
 from .dedup.sweep import DedupSweepService
 from .entities.backfill import BackfillService
+from .entities.entity_browse import EntityBrowseService
 from .entities.entity_dedup import EntityDedupService, PgEntityDedupStore
 from .entities.entity_store import PgEntityStore
 from .entities.merge import MergeService
@@ -291,6 +292,11 @@ async def lifespan(app: FastAPI):
     # merge/backfill jobs share the node writer + indexer + store backup so they rewrite files then
     # reindex + force-commit (store is truth, rule 1).
     entity_store = PgEntityStore(db)
+    # The name-typeahead browse behind `GET /entities` (ADR-064 §2, M9.8 T2) — the read the shared
+    # merge picker resolves a name to an id through. Read-only over the same entity store.
+    app.state.entity_browse_service = EntityBrowseService(
+        store=entity_store, entity_like_types=settings.entity_like_types
+    )
     # The shared merge-core (ADR-049 §1): retarget inbound edges → tombstone loser → reindex →
     # force commit+push. Entity-merge composes it with an alias-union; content-merge (dedup
     # resolution, below) folds with it alone. One instance shared by both callers.

@@ -734,6 +734,19 @@ class McpRevokeAllResponse(BaseModel):
     revoked: int
 
 
+# --- Entity browse (03-api §Search & graph, M9.5 / ADR-058 §11; M9.8 T2 / ADR-064 §2) ---
+class EntityBrowseItem(BaseModel):
+    """One entity hub in the ``GET /entities`` browse/search result — the shape the shared
+    name-typeahead merge picker (ADR-064 §2) renders and resolves to an id. Identity only (no
+    body): ``title`` is the display name, ``aliases`` the matched-on alternates, ``type`` the hub
+    kind for its glyph. Tombstones are already excluded by the store read (ADR-030 §5)."""
+
+    id: str
+    type: str
+    title: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+
+
 # --- Entity merge (03-api §Admin, M3 / ADR-030 §5) ---
 class EntityMergeRequest(BaseModel):
     """POST /admin/entities/merge body. ``apply=false`` (default) proposes the inbound-edge

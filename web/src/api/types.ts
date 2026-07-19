@@ -167,6 +167,16 @@ export interface SearchResultItem {
   media_kinds: MediaKind[];
 }
 
+// One entity hub in the `GET /entities` name-typeahead browse (M9.8 T2, ADR-064 §2). Identity
+// only — the shared merge picker renders `title` (+ matched `aliases`, `type` glyph) and resolves
+// the user's pick to `id`, so no UUID is ever typed. Tombstones are excluded server-side.
+export interface EntityBrowseItem {
+  id: string;
+  type: string;
+  title: string | null;
+  aliases: string[];
+}
+
 // One edge of a node (GET /nodes/{id}): the *other* endpoint + edge metadata. `dir` = out (this
 // node → other) | in; `origin` = canonical (typed, labelled by `rel`) | derived (similarity);
 // `score` = confidence (canonical) or cosine (derived).
