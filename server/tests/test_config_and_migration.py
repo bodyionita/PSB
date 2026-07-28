@@ -116,11 +116,12 @@ def test_production_rejects_insecure_default_secrets():
     Settings(environment="development")
 
 
-def test_compute_head_is_migration_022():
+def test_compute_head_is_migration_023():
     # M9.6 adds 019/020 (composite capture; captures.run_id — ADR-061); M9.8 T1 adds 021
     # (entity_merges — durable, replayable merges, ADR-064 §1); M9.8 T5.5 adds 022 (orphan_keeps —
-    # the durable orphan keep-list, ADR-064 §5); head advances to 022.
-    assert compute_head() == "022"
+    # the durable orphan keep-list, ADR-064 §5); 023 locks `public` deny-all against the Supabase
+    # Data API (ADR-065); head advances to 023.
+    assert compute_head() == "023"
 
 
 def test_media_config_defaults():
